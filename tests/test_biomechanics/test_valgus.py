@@ -8,6 +8,7 @@ against synthetic skeletons with known geometry.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -27,6 +28,14 @@ from biomechanics.utils.types import Keypoint2D, Point3D, Skeleton2D, Skeleton3D
 
 ANGLE_TOLERANCE = 2.0
 KASR_TOLERANCE = 0.05
+TOE_OUT_ANGLES_DEG = (0.0, 15.0, 30.0)
+KNEE_SWIVEL_DEG = 10.0
+KNEE_FLEXION_DEG = 100.0
+FEMUR_M = 0.46
+TIBIA_M = 0.44
+HIP_HALF_WIDTH_M = 0.14
+STANCE_HALF_WIDTH_M = 0.20
+FOOT_LENGTH_M = 0.20
 
 
 def _make_skeleton_2d(overrides: dict[int, tuple[float, float]] | None = None) -> Skeleton2D:
@@ -64,10 +73,10 @@ def _make_skeleton_3d(
     overrides: dict[int, tuple[float, float, float]] | None = None,
     n_keypoints: int = 19,
 ) -> Skeleton3D:
-    """Standing skeleton in 3D (Y-down, meters).
+    """Standing skeleton in 3D (Y-down, X = subject's left, +Z = subject's back).
 
     Hip width 0.24m, knees directly below hips, ankles below knees.
-    Includes foot_index keypoints (17, 18) for hip-IR measurement.
+    Includes foot_index keypoints (17, 18) pointing forward (-Z).
     """
     base = {
         0: (0.0, -1.70, 0.0),
@@ -87,8 +96,8 @@ def _make_skeleton_3d(
         14: (-0.12, -0.50, 0.0),   # right_knee
         15: (0.12, -0.05, 0.0),    # left_ankle
         16: (-0.12, -0.05, 0.0),   # right_ankle
-        17: (0.12, -0.02, 0.15),   # left_foot_index
-        18: (-0.12, -0.02, 0.15),  # right_foot_index
+        17: (0.12, -0.02, -0.15),   # left_foot_index
+        18: (-0.12, -0.02, -0.15),  # right_foot_index
     }
     if overrides:
         base.update(overrides)
@@ -149,26 +158,19 @@ class TestSingleCameraValgusEstimator:
         result = est.estimate(skel)
         assert result.kasr > 1.0
 
-    def test_none_skeleton_returns_neutral(self):
-        est = SingleCameraValgusEstimator()
-        result = est.estimate(None)
-        assert result.valgus_l == 0.0
-        assert result.valgus_r == 0.0
-        assert result.kasr == pytest.approx(1.0)
-
-    def test_mistracked_ankle_at_hip_height_returns_zero(self):
+    def test_mistracked_ankle_at_hip_height_returns_nan(self):
         """A confidently-wrong ankle near hip height must not spike the angle.
 
         The vertical span sits in the arctan2 denominator, so a degenerate
         span would turn ordinary knee-to-ankle x offsets into ~90 degree
-        valgus readings.
+        valgus readings. The measurement is unusable, so it is NaN.
         """
         skel = _make_skeleton_2d({
             15: (440, 505),  # left ankle mistracked to just below the hip
         })
         est = SingleCameraValgusEstimator()
         result = est.estimate(skel)
-        assert result.valgus_l == 0.0
+        assert math.isnan(result.valgus_l)
         assert abs(result.valgus_r) < ANGLE_TOLERANCE
 
     def test_facing_confidence_drops_when_rotated(self):
@@ -213,14 +215,29 @@ class TestTriangulatedValgusEstimator:
         shift is purely a rotation artifact.
         """
         skel = _make_skeleton_3d({
-            17: (0.06, -0.02, 0.14),   # left foot rotated inward
-            18: (-0.06, -0.02, 0.14),  # right foot rotated inward
+            17: (0.06, -0.02, -0.14),   # left foot rotated inward
+            18: (-0.06, -0.02, -0.14),  # right foot rotated inward
         })
         est = TriangulatedValgusEstimator()
         result = est.estimate(None, skel)
         assert abs(result.valgus_l) < ANGLE_TOLERANCE
         assert abs(result.valgus_r) < ANGLE_TOLERANCE
-        assert result.hip_rotation_l > 0 or result.hip_rotation_r > 0
+        assert result.hip_rotation_l > 5.0
+        assert result.hip_rotation_r > 5.0
+
+    def test_feet_rotated_outward_read_negative_hip_rotation(self):
+        skel = _make_skeleton_3d({
+            17: (0.18, -0.02, -0.14),   # left foot rotated outward
+            18: (-0.18, -0.02, -0.14),  # right foot rotated outward
+        })
+        result = TriangulatedValgusEstimator().estimate(None, skel)
+        assert result.hip_rotation_l < -5.0
+        assert result.hip_rotation_r < -5.0
+
+    def test_neutral_feet_read_near_zero_hip_rotation(self):
+        result = TriangulatedValgusEstimator().estimate(None, _make_skeleton_3d())
+        assert abs(result.hip_rotation_l) < ANGLE_TOLERANCE
+        assert abs(result.hip_rotation_r) < ANGLE_TOLERANCE
 
     def test_3d_kasr_below_one_when_knees_cave(self):
         skel = _make_skeleton_3d({
@@ -231,11 +248,135 @@ class TestTriangulatedValgusEstimator:
         result = est.estimate(None, skel)
         assert result.kasr < 1.0
 
-    def test_none_skeleton_returns_neutral(self):
+    def test_none_skeleton_returns_nan(self):
         est = TriangulatedValgusEstimator()
         result = est.estimate(None, None)
-        assert result.valgus_l == 0.0
-        assert result.kasr == pytest.approx(1.0)
+        assert math.isnan(result.valgus_l)
+        assert math.isnan(result.valgus_r)
+        assert math.isnan(result.kasr)
+        assert math.isnan(result.hip_rotation_l)
+        assert result.foot_confidence_l == 0.0
+
+    def test_missing_knee_gives_nan_for_that_side_only(self):
+        skel = _make_skeleton_3d()
+        skel.keypoints[13].confidence = 0.0
+        result = TriangulatedValgusEstimator().estimate(None, skel)
+        assert math.isnan(result.valgus_l)
+        assert math.isnan(result.hip_rotation_l)
+        assert math.isnan(result.kasr)
+        assert result.foot_confidence_l == 0.0
+        assert not math.isnan(result.valgus_r)
+
+    def test_missing_toe_gives_nan_valgus_and_zero_confidence(self):
+        skel = _make_skeleton_3d(n_keypoints=17)
+        result = TriangulatedValgusEstimator().estimate(None, skel)
+        assert math.isnan(result.valgus_l)
+        assert result.foot_confidence_l == 0.0
+
+
+def _two_bone_knee(
+    hip: np.ndarray,
+    ankle: np.ndarray,
+    pole: np.ndarray,
+    swivel_deg: float,
+    medial: np.ndarray,
+) -> np.ndarray:
+    """Knee position for a femur/tibia pair bending toward ``pole`` and
+    swivelled about the hip-ankle axis by ``swivel_deg`` toward ``medial``."""
+    hip_to_ankle = ankle - hip
+    dist = float(np.linalg.norm(hip_to_ankle))
+    axis = hip_to_ankle / dist
+    along = (FEMUR_M ** 2 - TIBIA_M ** 2 + dist ** 2) / (2.0 * dist)
+    radius = math.sqrt(max(FEMUR_M ** 2 - along ** 2, 0.0))
+    pole_perp = pole - np.dot(pole, axis) * axis
+    pole_perp /= np.linalg.norm(pole_perp)
+    medial_perp = np.cross(axis, pole_perp)
+    if np.dot(medial_perp, medial) < 0:
+        medial_perp = -medial_perp
+    swivel = math.radians(swivel_deg)
+    return hip + along * axis + radius * (math.cos(swivel) * pole_perp + math.sin(swivel) * medial_perp)
+
+
+def _squat_skeleton_3d(toe_out_deg: float, swivel_deg: float, knee_flexion_deg: float = KNEE_FLEXION_DEG) -> Skeleton3D:
+    """Bottom-of-squat legs with symmetric toe-out; both knees swivelled
+    medially by ``swivel_deg`` (positive = knee cave) from the plane the knee
+    tracks in when it follows the toes. Y-down, X = left, forward = -Z."""
+    toe_out = math.radians(toe_out_deg)
+    hip_to_ankle = math.sqrt(
+        FEMUR_M ** 2 + TIBIA_M ** 2 - 2.0 * FEMUR_M * TIBIA_M * math.cos(math.pi - math.radians(knee_flexion_deg))
+    )
+    hip_back_m = 0.15
+    points = np.zeros((19, 3))
+    for hip_index, knee_index, ankle_index, toe_index, side in (
+        (11, 13, 15, 17, 1.0), (12, 14, 16, 18, -1.0),
+    ):
+        foot_dir = np.array([side * math.sin(toe_out), 0.0, -math.cos(toe_out)])
+        ankle = np.array([side * STANCE_HALF_WIDTH_M, 0.0, 0.0])
+        dx = side * HIP_HALF_WIDTH_M - ankle[0]
+        dy = -math.sqrt(max(hip_to_ankle ** 2 - dx ** 2 - hip_back_m ** 2, 1e-6))
+        hip = np.array([side * HIP_HALF_WIDTH_M, dy, hip_back_m])
+        medial = np.array([-side, 0.0, 0.0])
+        points[hip_index] = hip
+        points[ankle_index] = ankle
+        points[toe_index] = ankle + FOOT_LENGTH_M * foot_dir
+        points[knee_index] = _two_bone_knee(hip, ankle, foot_dir, swivel_deg, medial)
+    points[5] = points[11] + [0.06, -0.45, 0.0]
+    points[6] = points[12] + [-0.06, -0.45, 0.0]
+    return Skeleton3D.from_numpy(points, confidences=np.full(19, 0.9))
+
+
+class TestTriangulatedToeOutInvariance:
+    """Magnitude used to come from the pelvis-ML Grood-Suntay axis and sign from
+    the hip-ankle line: with 15 degrees of toe-out a 10 degree knee cave read
+    -4.7 (varus). Sign and magnitude must come from one geometry, and knees
+    tracking over the toes must read neutral at any toe-out angle."""
+
+    @pytest.mark.parametrize("toe_out_deg", TOE_OUT_ANGLES_DEG)
+    def test_knees_over_toes_read_neutral(self, toe_out_deg: float):
+        result = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(toe_out_deg, 0.0))
+        assert result.valgus_l == pytest.approx(0.0, abs=ANGLE_TOLERANCE)
+        assert result.valgus_r == pytest.approx(0.0, abs=ANGLE_TOLERANCE)
+
+    @pytest.mark.parametrize("toe_out_deg", TOE_OUT_ANGLES_DEG)
+    def test_knee_cave_reads_positive(self, toe_out_deg: float):
+        result = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(toe_out_deg, KNEE_SWIVEL_DEG))
+        assert result.valgus_l > 5.0
+        assert result.valgus_r > 5.0
+
+    @pytest.mark.parametrize("toe_out_deg", TOE_OUT_ANGLES_DEG)
+    def test_varus_reads_negative(self, toe_out_deg: float):
+        result = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(toe_out_deg, -KNEE_SWIVEL_DEG))
+        assert result.valgus_l < -5.0
+        assert result.valgus_r < -5.0
+
+    @pytest.mark.parametrize("toe_out_deg", TOE_OUT_ANGLES_DEG)
+    def test_same_cave_reads_the_same_at_every_toe_out(self, toe_out_deg: float):
+        reference = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(0.0, KNEE_SWIVEL_DEG))
+        result = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(toe_out_deg, KNEE_SWIVEL_DEG))
+        assert result.valgus_l == pytest.approx(reference.valgus_l, abs=ANGLE_TOLERANCE)
+
+    def test_cave_and_varus_are_antisymmetric(self):
+        cave = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(15.0, KNEE_SWIVEL_DEG))
+        varus = TriangulatedValgusEstimator().estimate(None, _squat_skeleton_3d(15.0, -KNEE_SWIVEL_DEG))
+        assert cave.valgus_l == pytest.approx(-varus.valgus_l, abs=0.5)
+
+
+class TestSingleCameraMissingInputs:
+
+    def test_none_skeleton_returns_nan(self):
+        result = SingleCameraValgusEstimator().estimate(None)
+        assert math.isnan(result.valgus_l)
+        assert math.isnan(result.kasr)
+        assert result.foot_confidence_l == 0.0
+
+    def test_missing_knee_gives_nan_for_that_side(self):
+        skel = _make_skeleton_2d()
+        skel.keypoints[13].confidence = 0.0
+        result = SingleCameraValgusEstimator().estimate(skel)
+        assert math.isnan(result.valgus_l)
+        assert math.isnan(result.kasr)
+        assert not math.isnan(result.valgus_r)
+        assert result.foot_confidence_l == 0.0
 
 
 class TestBuildValgusEstimator:

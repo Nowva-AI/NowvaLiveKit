@@ -16,6 +16,7 @@ from biomechanics.faults.rules.elbow_flare import ElbowFlareRule
 from biomechanics.faults.rules.bar_path import BarPathRule
 from biomechanics.faults.rules.shoulder_stability import ShoulderStabilityRule
 from biomechanics.faults.rules.trunk_stability import TrunkStabilityRule
+from biomechanics.faults.rules.heel_rise import HeelRiseRule
 
 __all__ = [
     "DepthRule",
@@ -32,4 +33,5 @@ __all__ = [
     "BarPathRule",
     "ShoulderStabilityRule",
     "TrunkStabilityRule",
+    "HeelRiseRule",
 ]

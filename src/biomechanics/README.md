@@ -166,19 +166,21 @@ Shared types, filters, and geometry helpers used across all layers.
 - `standing_gate.py` -- `StandingPoseGate` validates the user is standing in frame
   before calibration begins (checks keypoint visibility, knee extension, torso
   uprightness over N consecutive frames).
-- `filters.py` -- `JointAngleFilter` applies One Euro filtering for temporal
-  smoothing.
-- `derivatives.py` -- `DerivativeTracker` computes angular velocity and acceleration.
-- `confidence_blend.py` -- blends current and previous keypoints weighted by
-  confidence.
-- `velocity_clamp.py` -- caps per-frame keypoint displacement to reject
-  teleportation noise.
-- `bone_constraints.py` -- `BoneLengthConstraints` calibrates expected bone lengths
-  during standing, then enforces them to stabilize skeleton proportions. Also
-  extracts `BodyProportions` used for fault threshold scaling.
-- `position_filter.py` -- One Euro filter applied directly to 3D keypoint positions.
-- `predictive_state.py` -- `PredictiveStateEstimator` extrapolates joint angles
-  forward in time for predictive fault pre-cueing.
+- `filters.py` -- `OneEuroFilter`, `LowPassFilter`, `ExponentialMovingAverage`,
+  `RunningMedian` (display smoothing and the robust per-rep depth statistic).
+- `derivatives.py` -- `AngleDerivatives` container (velocity/acceleration) read by
+  the tempo rules; the squat path passes none.
+- `preik_chain.py` -- `build_preik_chain` / `PreIKChain`: the single pre-IK stage
+  order (Kalman → foot contact → hip re-centring) with an inspector tap.
+- `keypoint_kalman.py` -- `FixedLagKeypointSmoother`: the only temporal filter
+  before IK; lagged analysis stream + undelayed display stream.
+- `foot_contact.py` -- `FootContactModel` / `FootState`: world-frame planted-foot
+  anchors, heel rise, stance metrics (multi-camera).
+- `segment_lengths.py` -- `SegmentLengthEstimator` / `BodyProportions`:
+  session-scoped body measurement feeding fault threshold scaling.
+- `position_filter.py` -- `Skeleton2DSmoother`, One Euro on the 2D overlay
+  (display only).
+- `json_safe.py` -- `nan_to_none` for every JSON/IPC boundary (missing angles are NaN).
 
 ### `viz/`
 Visualization and debugging.

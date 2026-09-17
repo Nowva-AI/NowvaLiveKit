@@ -1,6 +1,6 @@
 """Record a short webcam clip and build a self-contained HTML audit page
-showing every pre-IK skeleton filter stage frame by frame, with gate,
-confidence, and displacement data for auditing the filtering pipeline."""
+showing the raw pose and every pre-IK chain stage frame by frame, with gate,
+confidence, body-measurement, and displacement data for auditing the chain."""
 
 from __future__ import annotations
 
@@ -22,48 +22,32 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from biomechanics.config import BiomechanicsConfig, load_pipeline_config  # noqa: E402
+from biomechanics.config import load_pipeline_config  # noqa: E402
 from biomechanics.kinematics.analytical_ik import AnalyticalIKSolver  # noqa: E402
 from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator  # noqa: E402
-from biomechanics.utils.bone_constraints import BoneLengthConstraints  # noqa: E402
-from biomechanics.utils.confidence_blend import ConfidenceBlender  # noqa: E402
-from biomechanics.utils.ground_clamp import GroundClamp  # noqa: E402
-from biomechanics.utils.position_filter import KeypointPositionSmoother  # noqa: E402
+from biomechanics.profiles import get_profile  # noqa: E402
+from biomechanics.utils.json_safe import nan_to_none  # noqa: E402
+from biomechanics.utils.preik_chain import build_preik_chain  # noqa: E402
+from biomechanics.utils.segment_lengths import SegmentLengthEstimator  # noqa: E402
 from biomechanics.utils.standing_gate import StandingPoseGate  # noqa: E402
-from biomechanics.utils.types import CocoKeypoints as CK, Skeleton3D  # noqa: E402
-from biomechanics.utils.velocity_clamp import VelocityClamp  # noqa: E402
+from biomechanics.utils.types import CocoKeypoints as CK, JointAngles  # noqa: E402
 
 RECORDINGS_DIR = _REPO_ROOT / "scripts" / "recordings"
 TEMPLATE_PATH = Path(__file__).with_name("capture_audit_template.html")
+EXERCISE_NAME = "squat"
 
-# Pre-IK chain order must match biomechanics.utils.preik_chain.apply_preik_filters.
-STAGE_ORDER = [
-    ("confidence_blend", "Confidence Blend"),
-    ("velocity_clamp", "Velocity Clamp"),
-    ("bone_constraints", "Bone Constraints"),
-    ("ground_clamp", "Ground Clamp"),
-    ("position_smoother", "Position Smoother"),
-    ("bone_reenforce", "Bone Re-enforce"),
-]
-
-# Validated dark-mode categorical palette; stage identity keeps a fixed slot.
-PANEL_COLORS = {
-    "raw2d": "#c3c2b7",
-    "raw3d": "#3987e5",
-    "confidence_blend": "#d95926",
-    "velocity_clamp": "#199e70",
-    "bone_constraints": "#c98500",
-    "ground_clamp": "#d55181",
-    "position_smoother": "#008300",
-    "bone_reenforce": "#9085e9",
-}
+# Validated dark-mode categorical palette; chain stages take slots by position.
+RAW_2D_COLOR = "#c3c2b7"
+RAW_3D_COLOR = "#3987e5"
+STAGE_COLORS = ["#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9"]
 
 KEYPOINT_NAMES = [
     "nose", "l_eye", "r_eye", "l_ear", "r_ear",
     "l_shoulder", "r_shoulder", "l_elbow", "r_elbow", "l_wrist", "r_wrist",
     "l_hip", "r_hip", "l_knee", "r_knee", "l_ankle", "r_ankle",
-    "l_foot", "r_foot",
+    "l_foot", "r_foot", "l_heel", "r_heel",
 ]
+NUM_KEYPOINTS = len(KEYPOINT_NAMES)
 
 ANGLE_KEYS = [
     "hip_flexion_l", "hip_flexion_r",
@@ -77,6 +61,8 @@ MIN_PROJECTION_POINTS = 4
 PREVIEW_WINDOW = "Nowva Capture Audit"
 STATIC_FEED_DIFF_THRESHOLD = 0.5
 MAX_SCAN_DEVICES = 4
+FALLBACK_FPS = 30.0
+PROGRESS_EVERY_FRAMES = 50
 
 
 def _make_gate(gate_config) -> StandingPoseGate:
@@ -91,43 +77,21 @@ def _make_gate(gate_config) -> StandingPoseGate:
     )
 
 
-def _build_stage_fns(
-    config: BiomechanicsConfig, standing_gate: StandingPoseGate
-) -> tuple[dict, BoneLengthConstraints, GroundClamp]:
-    blender = ConfidenceBlender(
-        min_confidence=config.confidence_blend.min_confidence,
-        max_confidence=config.confidence_blend.max_confidence,
-    )
-    velocity_clamp = VelocityClamp(
-        max_velocity_m_per_s=config.velocity_clamp.max_velocity_m_per_s,
-        target_fps=config.pipeline.target_fps,
-    )
-    bones = BoneLengthConstraints(
-        calibration_frames=config.bone_constraints.calibration_frames,
-        tolerance=config.bone_constraints.tolerance,
-        standing_gate=standing_gate,
-    )
-    ground = GroundClamp(
-        calibration_frames=config.ground_clamp.calibration_frames,
-        stance_width_tolerance_m=config.ground_clamp.stance_width_tolerance_m,
-        ankle_y_tolerance_m=config.ground_clamp.ankle_y_tolerance_m,
-        min_leg_extension_ratio=config.ground_clamp.min_leg_extension_ratio,
-        standing_gate=standing_gate,
-    )
-    smoother = KeypointPositionSmoother(
-        min_cutoff=config.position_filter.min_cutoff,
-        beta=config.position_filter.beta,
-        d_cutoff=config.position_filter.d_cutoff,
-    )
-    stage_fns = {
-        "confidence_blend": blender.blend,
-        "velocity_clamp": velocity_clamp.clamp,
-        "bone_constraints": bones.enforce,
-        "ground_clamp": ground.clamp,
-        "position_smoother": smoother.smooth,
-        "bone_reenforce": bones.enforce,
-    }
-    return stage_fns, bones, ground
+def _stage_label(stage_name: str) -> str:
+    return stage_name.replace("_", " ").title()
+
+
+class _StageTap:
+    """Collects the chain's per-stage arrays for one run/predict call."""
+
+    def __init__(self) -> None:
+        self.stages: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    def __call__(self, stage: str, points: np.ndarray, confidences: np.ndarray) -> None:
+        self.stages[stage] = (points.copy(), confidences.copy())
+
+    def clear(self) -> None:
+        self.stages = {}
 
 
 def _fit_projection(
@@ -170,15 +134,24 @@ def _gate_state(gate: StandingPoseGate) -> dict:
     }
 
 
+def _measurement_state(estimator: SegmentLengthEstimator) -> dict:
+    measured, required = estimator.progress
+    return {"complete": estimator.is_complete, "measured": measured, "required": required}
+
+
 def _hip_position_cm(points: np.ndarray) -> float:
     hip_mid_y = (points[CK.LEFT_HIP][1] + points[CK.RIGHT_HIP][1]) / 2.0
     ankle_mid_y = (points[CK.LEFT_ANKLE][1] + points[CK.RIGHT_ANKLE][1]) / 2.0
     return round((hip_mid_y - ankle_mid_y) * 100.0, 1)
 
 
-def _angles_dict(solver: AnalyticalIKSolver, skeleton: Skeleton3D) -> dict:
-    angles = solver.solve(skeleton).as_dict()
-    return {key: round(float(angles[key]), 1) for key in ANGLE_KEYS if key in angles}
+def _angles_dict(angles: JointAngles) -> dict:
+    values = angles.as_dict()
+    return {key: round(float(values[key]), 1) for key in ANGLE_KEYS if key in values}
+
+
+def _rounded(values: np.ndarray, digits: int) -> list[float]:
+    return [round(float(value), digits) for value in values]
 
 
 def _show_preview(frame: np.ndarray, headline: str, subline: str) -> bool:
@@ -331,9 +304,7 @@ def _encode_video(frames_dir: Path, fps: float, out_path: Path) -> None:
     writer.release()
 
 
-def process_session(
-    session_dir: Path, disabled: list[str], open_html: bool = True
-) -> Path:
+def process_session(session_dir: Path, open_html: bool = True) -> Path:
     meta = json.loads((session_dir / "meta.json").read_text())
     frames_dir = session_dir / "frames"
     frame_paths = sorted(frames_dir.glob("*.jpg"))
@@ -344,9 +315,10 @@ def process_session(
     if len(timestamps) > 1:
         fps = (len(timestamps) - 1) / (timestamps[-1] - timestamps[0])
     else:
-        fps = 30.0
+        fps = FALLBACK_FPS
     fps = round(fps, 2)
 
+    # Same components, same order, as the single-camera production pipeline.
     config = load_pipeline_config()
     estimator = MediaPipePoseEstimator(
         confidence_threshold=config.pose.confidence_threshold,
@@ -355,125 +327,151 @@ def process_session(
     estimator.initialize()
     standing_gate = _make_gate(config.standing_gate)
     readiness_gate = _make_gate(config.readiness_gate)
-    stage_fns, bones, ground = _build_stage_fns(config, standing_gate)
+    chain = build_preik_chain(config, multi_camera=False)
+    tap = _StageTap()
+    chain.set_tap(tap)
+    # Stage 0 is the chain's input, shown as the raw 3D panel.
+    stage_keys = list(chain.stage_names[1:])
+    body_calibration = SegmentLengthEstimator()
+    profile = get_profile(EXERCISE_NAME)
+    rep_counter = profile.create_rep_counter(config)
     ik_solver = AnalyticalIKSolver()
-    proportions_applied = False
 
-    enabled_stages = [key for key, _ in STAGE_ORDER if key not in disabled]
     min_conf = config.pose.confidence_threshold
     last_transform: tuple[float, np.ndarray] | None = None
 
     milestones: dict[str, int | None] = {
         "standing_pass": None,
         "readiness_pass": None,
-        "bones_calibrated": None,
-        "ground_calibrated": None,
+        "body_measured": None,
     }
 
     frames: list[dict] = []
+    index_by_timestamp: dict[float, int] = {}
+    raw_points_by_index: dict[int, np.ndarray] = {}
     print(f"Processing {len(frame_paths)} frames ({fps} fps)...")
     for index, path in enumerate(frame_paths):
+        if (index + 1) % PROGRESS_EVERY_FRAMES == 0:
+            print(f"  {index + 1}/{len(frame_paths)}")
+        timestamp = float(timestamps[index])
+        index_by_timestamp[timestamp] = index
         image = cv2.imread(str(path))
         skeleton_2d, skeleton_3d = estimator.estimate_both(image)
 
-        entry: dict = {"detected": skeleton_3d is not None, "gated": True}
-        if skeleton_3d is None:
-            frames.append(entry)
+        entry: dict = {"detected": skeleton_3d is not None, "gated": not readiness_gate.is_ready}
+        frames.append(entry)
+
+        if skeleton_3d is not None:
+            # Recorded capture clock, not the estimator's wall clock.
+            skeleton_3d.timestamp = timestamp
+            skeleton_3d.frame_index = index
+
+            standing_gate.check(skeleton_3d)
+            readiness_gate.check(skeleton_3d)
+            if milestones["standing_pass"] is None and standing_gate.is_ready:
+                milestones["standing_pass"] = index
+            if milestones["readiness_pass"] is None and readiness_gate.is_ready:
+                milestones["readiness_pass"] = index
+
+            raw_points = skeleton_3d.to_numpy()
+            conf_3d = np.array([kp.confidence for kp in skeleton_3d.keypoints])
+            raw_points_by_index[index] = raw_points
+            points_2d = (
+                skeleton_2d.to_numpy() if skeleton_2d is not None
+                else np.zeros((NUM_KEYPOINTS, 3))
+            )
+            transform = _fit_projection(raw_points, points_2d, conf_3d, points_2d[:, 2], min_conf)
+            if transform is not None:
+                last_transform = transform
+
+            entry["gated"] = not readiness_gate.is_ready
+            entry["k2d"] = [
+                [round(float(x), 1), round(float(y), 1), round(float(c), 2)]
+                for x, y, c in points_2d
+            ]
+            entry["conf3d"] = _rounded(conf_3d, 2)
+            entry["gates"] = {
+                "standing": _gate_state(standing_gate),
+                "readiness": _gate_state(readiness_gate),
+            }
+            entry["angles"] = {"raw": _angles_dict(ik_solver.solve(skeleton_3d))}
+            entry["hip_cm"] = {"raw": _hip_position_cm(raw_points)}
+            entry["stages"] = {}
+            if last_transform is not None:
+                entry["stages"]["raw3d"] = _project(raw_points, *last_transform)
+
+        # The chain runs only once the readiness gate has passed, exactly like the
+        # pipeline: measured frames through run(), dropouts through predict_missing().
+        if not readiness_gate.is_ready:
+            continue
+        tap.clear()
+        if skeleton_3d is not None:
+            result = chain.run(skeleton_3d)
+        else:
+            result = chain.predict_missing(timestamp)
+        if result is None:
             continue
 
-        standing_gate.check(skeleton_3d)
-        readiness_gate.check(skeleton_3d)
-        if milestones["standing_pass"] is None and standing_gate.is_ready:
-            milestones["standing_pass"] = index
-        if milestones["readiness_pass"] is None and readiness_gate.is_ready:
-            milestones["readiness_pass"] = index
+        # The chain's output is fixed-lag: it describes an earlier frame, so the
+        # stage skeletons, displacements, and angles are attached to that frame.
+        analysis = result.analysis
+        lagged_index = index_by_timestamp.get(analysis.timestamp, index)
+        lagged = frames[lagged_index]
+        lagged_stages = lagged.setdefault("stages", {})
 
-        raw_points = skeleton_3d.to_numpy()
-        conf_3d = np.array([kp.confidence for kp in skeleton_3d.keypoints])
-        points_2d = skeleton_2d.to_numpy() if skeleton_2d is not None else np.zeros((19, 3))
+        previous_points = raw_points_by_index.get(lagged_index)
+        displacement: dict = {}
+        output_confidences: np.ndarray | None = None
+        for key in stage_keys:
+            if key not in tap.stages:
+                continue
+            points, confidences = tap.stages[key]
+            if previous_points is not None:
+                displacement[key] = _rounded(np.linalg.norm(points - previous_points, axis=1) * 100.0, 1)
+            if last_transform is not None:
+                lagged_stages[key] = _project(points, *last_transform)
+            previous_points = points
+            output_confidences = confidences
+        lagged["disp"] = displacement
+        if output_confidences is not None:
+            lagged["conf_out"] = _rounded(output_confidences, 2)
 
-        transform = _fit_projection(
-            raw_points, points_2d, conf_3d, points_2d[:, 2], min_conf
+        analysis_points = analysis.to_numpy()
+        analysis_confidences = np.array([kp.confidence for kp in analysis.keypoints])
+        if not body_calibration.is_complete:
+            body_calibration.record(analysis_points, analysis_confidences, rep_counter.rep_count)
+            if body_calibration.is_complete and milestones["body_measured"] is None:
+                milestones["body_measured"] = index
+
+        angles = ik_solver.solve(analysis)
+        rep_counter.update(
+            signal_value=profile.get_rep_signal(analysis, angles),
+            timestamp=analysis.timestamp,
+            angles=angles,
+            faults=[],
         )
-        if transform is not None:
-            last_transform = transform
-        transform = last_transform
-
-        entry["gated"] = not readiness_gate.is_ready
-        entry["k2d"] = [
-            [round(float(x), 1), round(float(y), 1), round(float(c), 2)]
-            for x, y, c in points_2d
-        ]
-        entry["conf3d"] = [round(float(c), 2) for c in conf_3d]
-        entry["gates"] = {
-            "standing": _gate_state(standing_gate),
-            "readiness": _gate_state(readiness_gate),
-        }
-        entry["angles"] = {"raw": _angles_dict(ik_solver, skeleton_3d)}
-        entry["hip_cm"] = {"raw": _hip_position_cm(raw_points)}
-
-        stages_proj: dict = {}
-        if transform is not None:
-            stages_proj["raw3d"] = _project(raw_points, *transform)
-
-        if readiness_gate.is_ready:
-            displacement: dict = {}
-            previous_points = raw_points
-            current = skeleton_3d
-            for key in enabled_stages:
-                current = stage_fns[key](current)
-                points = current.to_numpy()
-                displacement[key] = [
-                    round(float(d), 1)
-                    for d in np.linalg.norm(points - previous_points, axis=1) * 100.0
-                ]
-                if transform is not None:
-                    stages_proj[key] = _project(points, *transform)
-                if key == "confidence_blend":
-                    entry["conf_blend"] = [
-                        round(float(kp.confidence), 2) for kp in current.keypoints
-                    ]
-                previous_points = points
-            entry["disp"] = displacement
-            entry["angles"]["filtered"] = _angles_dict(ik_solver, current)
-            entry["hip_cm"]["filtered"] = _hip_position_cm(previous_points)
-
-            if milestones["bones_calibrated"] is None and bones.is_calibrated:
-                milestones["bones_calibrated"] = index
-            if milestones["ground_calibrated"] is None and ground.is_calibrated:
-                milestones["ground_calibrated"] = index
-            if (
-                not proportions_applied
-                and bones.is_calibrated
-                and bones.body_proportions is not None
-            ):
-                ik_solver.set_body_proportions(bones.body_proportions)
-                proportions_applied = True
-            entry["bones"] = {
-                "calibrated": bones.is_calibrated,
-                "progress": list(bones.progress),
-            }
-            entry["ground"] = {"calibrated": ground.is_calibrated}
-
-        entry["stages"] = stages_proj
-        frames.append(entry)
-        if (index + 1) % 50 == 0:
-            print(f"  {index + 1}/{len(frame_paths)}")
+        lagged.setdefault("angles", {})["chain"] = _angles_dict(angles)
+        lagged.setdefault("hip_cm", {})["chain"] = _hip_position_cm(analysis_points)
+        lagged["rep"] = {"count": rep_counter.rep_count, "phase": rep_counter.phase}
+        lagged["body"] = _measurement_state(body_calibration)
 
     estimator.release()
 
     body_proportions = None
-    if bones.body_proportions is not None:
+    if body_calibration.body_proportions is not None:
         body_proportions = {
             key: round(float(value), 4)
-            for key, value in vars(bones.body_proportions).items()
+            for key, value in body_calibration.body_proportions.model_dump().items()
         }
 
-    panels = [{"key": "raw2d", "label": "Raw 2D Pose", "color": PANEL_COLORS["raw2d"]},
-              {"key": "raw3d", "label": "Raw 3D (filter input)", "color": PANEL_COLORS["raw3d"]}]
-    for key, label in STAGE_ORDER:
-        if key in enabled_stages:
-            panels.append({"key": key, "label": label, "color": PANEL_COLORS[key]})
+    panels = [{"key": "raw2d", "label": "Raw 2D Pose", "color": RAW_2D_COLOR},
+              {"key": "raw3d", "label": "Raw 3D (chain input)", "color": RAW_3D_COLOR}]
+    for position, key in enumerate(stage_keys):
+        panels.append({
+            "key": key,
+            "label": _stage_label(key),
+            "color": STAGE_COLORS[position % len(STAGE_COLORS)],
+        })
 
     data = {
         "session": meta["session"],
@@ -483,23 +481,26 @@ def process_session(
         "height": meta["height"],
         "n_frames": len(frames),
         "panels": panels,
-        "stage_keys": enabled_stages,
-        "disabled": sorted(disabled),
+        "stage_keys": stage_keys,
+        "chain": {
+            "multi_camera": False,
+            "stage_names": list(chain.stage_names),
+            "lag_frames": config.kalman.lag_frames,
+        },
         "milestones": milestones,
         "body_proportions": body_proportions,
+        "rep_count": rep_counter.rep_count,
         "keypoint_names": KEYPOINT_NAMES,
         "config": {
             "pose": config.pose.model_dump(),
             "standing_gate": config.standing_gate.model_dump(),
             "readiness_gate": config.readiness_gate.model_dump(),
-            "confidence_blend": config.confidence_blend.model_dump(),
-            "velocity_clamp": config.velocity_clamp.model_dump(),
-            "bone_constraints": config.bone_constraints.model_dump(),
-            "ground_clamp": config.ground_clamp.model_dump(),
-            "position_filter": config.position_filter.model_dump(),
+            "kalman": config.kalman.model_dump(),
+            "foot_contact": config.foot_contact.model_dump(),
         },
         "frames": frames,
     }
+    data = nan_to_none(data)
     (session_dir / "data.json").write_text(json.dumps(data))
 
     video_path = session_dir / "video.mp4"
@@ -509,7 +510,7 @@ def process_session(
     print("Building HTML...")
     video_b64 = base64.b64encode(video_path.read_bytes()).decode("ascii")
     html = TEMPLATE_PATH.read_text()
-    html = html.replace("__TITLE__", f"Filter Audit — {meta['session']}")
+    html = html.replace("__TITLE__", f"Pre-IK Chain Audit — {meta['session']}")
     html = html.replace("__VIDEO_B64__", video_b64)
     html = html.replace("__DATA_JSON__", json.dumps(data, separators=(",", ":")))
     html_path = session_dir / "audit.html"
@@ -528,20 +529,9 @@ def _latest_session() -> Path:
     return sessions[-1]
 
 
-def _parse_disabled(raw: str) -> list[str]:
-    if not raw:
-        return []
-    valid = {key for key, _ in STAGE_ORDER}
-    disabled = [item.strip() for item in raw.split(",") if item.strip()]
-    unknown = [item for item in disabled if item not in valid]
-    if unknown:
-        raise ValueError(f"Unknown stage(s) {unknown}. Valid: {sorted(valid)}")
-    return disabled
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Record a webcam clip and audit the pre-IK skeleton filter chain.",
+        description="Record a webcam clip and audit the pre-IK chain stage by stage.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -553,24 +543,18 @@ def main() -> None:
     record_parser.add_argument("--no-preview", action="store_true")
 
     process_parser = subparsers.add_parser(
-        "process", help="Re-process a recorded session (e.g. with stages disabled)"
+        "process", help="Re-process a recorded session with the current chain"
     )
     process_parser.add_argument("session_dir", nargs="?", default=None,
                                 help="Session directory (default: most recent)")
 
     for sub in (record_parser, process_parser):
-        sub.add_argument(
-            "--disable", type=str, default="",
-            help="Comma-separated stages to disable: "
-                 + ",".join(key for key, _ in STAGE_ORDER),
-        )
         sub.add_argument("--no-open", action="store_true")
 
     argv = sys.argv[1:]
     if not argv or argv[0] not in ("record", "process"):
         argv = ["record", *argv]
     args = parser.parse_args(argv)
-    disabled = _parse_disabled(args.disable)
 
     if args.command == "record":
         config = load_pipeline_config()
@@ -585,7 +569,7 @@ def main() -> None:
     else:
         session_dir = Path(args.session_dir) if args.session_dir else _latest_session()
 
-    process_session(session_dir, disabled, open_html=not args.no_open)
+    process_session(session_dir, open_html=not args.no_open)
 
 
 if __name__ == "__main__":

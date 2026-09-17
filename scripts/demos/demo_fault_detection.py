@@ -14,7 +14,6 @@ Controls:
     's' - Toggle skeleton display
     'v' - Start/Stop video recording
     'd' - Toggle debug mode (show raw angles)
-    'f' - Toggle temporal filter
 """
 
 import sys
@@ -33,7 +32,6 @@ from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator
 from biomechanics.kinematics.analytical_ik import AnalyticalIKSolver
 from biomechanics.faults import RuleEngine, RepCounter, RepCounterConfig
 from biomechanics.utils.types import FaultSeverity
-from biomechanics.utils.filters import JointAngleFilter
 from biomechanics.utils.derivatives import DerivativeTracker
 
 
@@ -91,7 +89,7 @@ def draw_skeleton(frame, skeleton_2d, color=COLOR_GREEN):
             cv2.circle(frame, (int(kp.x), int(kp.y)), 5, color, -1)
 
 
-def draw_info_panel(frame, rep_counter, angles, derivatives, raw_angles, faults, recent_faults, fps, is_recording, debug_mode, filter_enabled):
+def draw_info_panel(frame, rep_counter, angles, derivatives, faults, recent_faults, fps, is_recording, debug_mode):
     """Draw info panel on frame."""
     h, w = frame.shape[:2]
 
@@ -157,13 +155,6 @@ def draw_info_panel(frame, rep_counter, angles, derivatives, raw_angles, faults,
 
         # Debug mode - show more angles and velocity
         if debug_mode:
-            # Show filter status
-            filter_status = "FILTERED" if filter_enabled else "RAW"
-            filter_color = COLOR_GREEN if filter_enabled else COLOR_ORANGE
-            cv2.putText(frame, f"  Mode: {filter_status}", (20, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, filter_color, 1)
-            y += line_height - 8
-
             cv2.putText(frame, f"  Hip L/R: {angles.hip_flexion_l:.1f}/{angles.hip_flexion_r:.1f}", (20, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_BLUE, 1)
             y += line_height - 8
@@ -178,14 +169,6 @@ def draw_info_panel(frame, rep_counter, angles, derivatives, raw_angles, faults,
 
                 accel = derivatives.avg_knee_acceleration
                 cv2.putText(frame, f"  Accel: {accel:.1f} deg/s²", (20, y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_GRAY, 1)
-                y += line_height - 8
-
-            # Show raw vs filtered comparison if filter is on
-            if filter_enabled and raw_angles:
-                raw_hip = (raw_angles.hip_flexion_l + raw_angles.hip_flexion_r) / 2
-                filt_hip = (angles.hip_flexion_l + angles.hip_flexion_r) / 2
-                cv2.putText(frame, f"  Raw Hip: {raw_hip:.1f}  Filt: {filt_hip:.1f}", (20, y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_GRAY, 1)
                 y += line_height - 8
 
@@ -225,7 +208,7 @@ def draw_info_panel(frame, rep_counter, angles, derivatives, raw_angles, faults,
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_WHITE, 2)
 
     # Controls hint
-    cv2.putText(frame, "V=Record  R=Reset  D=Debug  F=Filter  Q=Quit", (20, h - 15),
+    cv2.putText(frame, "V=Record  R=Reset  D=Debug  Q=Quit", (20, h - 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_GRAY, 1)
 
 
@@ -394,10 +377,6 @@ def main():
     ik_solver = AnalyticalIKSolver()
     rule_engine = RuleEngine()
 
-    # Temporal smoothing filter for joint angles
-    # One Euro Filter: min_cutoff=1.0 (smooth), beta=0.007 (responsive to fast movements)
-    angle_filter = JointAngleFilter(min_cutoff=1.0, beta=0.007)
-
     # Derivative tracker for velocity/acceleration
     derivative_tracker = DerivativeTracker(smoothing_alpha=0.3)
 
@@ -435,14 +414,12 @@ def main():
     print("  's' - Toggle skeleton display")
     print("  'v' - Start/Stop video recording")
     print("  'd' - Toggle debug mode")
-    print("  'f' - Toggle filter")
     print("\nStand back so your full body is visible.")
     print("Start squatting to see form analysis!\n")
 
     # State
     show_skeleton = True
     debug_mode = True  # Start with debug on to see angles
-    filter_enabled = True  # Temporal smoothing filter
     recent_faults = {}
     fault_decay_time = 5.0
     fault_timestamps = []
@@ -450,7 +427,6 @@ def main():
     go_deeper_time = 0  # Time when "go deeper" feedback was triggered
     last_rep_data = None
     frame_times = []
-    raw_angles = None
     derivatives = None
 
     # Video recording
@@ -486,15 +462,8 @@ def main():
         feedback = None
 
         if skeleton_3d is not None:
-            # Compute joint angles
-            raw_angles = ik_solver.solve(skeleton_3d)
-
-            # Apply temporal smoothing filter (One Euro Filter)
-            # This removes noise and jitter for stable rep detection
-            if filter_enabled:
-                angles = angle_filter.filter_angles(raw_angles)
-            else:
-                angles = raw_angles
+            # Compute joint angles (no post-IK angle filter, as in production)
+            angles = ik_solver.solve(skeleton_3d)
 
             # Compute derivatives (velocity, acceleration)
             derivatives = derivative_tracker.update(angles)
@@ -554,7 +523,7 @@ def main():
         fps = 1.0 / (sum(frame_times) / len(frame_times)) if frame_times else 0
 
         # Draw info panel
-        draw_info_panel(frame, rep_counter, angles, derivatives, raw_angles, faults, recent_faults, fps, is_recording, debug_mode, filter_enabled)
+        draw_info_panel(frame, rep_counter, angles, derivatives, faults, recent_faults, fps, is_recording, debug_mode)
 
         # Draw fault alert (most severe)
         if faults:
@@ -584,7 +553,6 @@ def main():
         elif key == ord('r'):
             rep_counter.reset()
             rule_engine.reset()
-            angle_filter.reset()
             derivative_tracker.reset()
             recent_faults.clear()
             fault_timestamps.clear()
@@ -602,11 +570,6 @@ def main():
         elif key == ord('d'):
             debug_mode = not debug_mode
             print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
-        elif key == ord('f'):
-            filter_enabled = not filter_enabled
-            if not filter_enabled:
-                angle_filter.reset()
-            print(f"Filter: {'ON' if filter_enabled else 'OFF'}")
         elif key == ord('v'):
             if not is_recording:
                 # Start recording

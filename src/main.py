@@ -458,6 +458,11 @@ class NowvaApp:
             cmd.append("--calibration-mode")
         if preload:
             cmd.append("--preload")
+        # Multi-camera T-pose calibration scales every 3D length by the
+        # user's height; without it the subprocess falls back to an env default.
+        user_height_cm = self.state.get("user.height_cm")
+        if user_height_cm:
+            cmd.extend(["--user-height-cm", str(float(user_height_cm))])
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"

@@ -106,3 +106,78 @@ class TestListenerReconnect:
         )
 
         assert service._assessment_demo_played is False
+
+
+class _StubState:
+    def __init__(self, user_id: str) -> None:
+        self.values: dict = {"user.id": user_id}
+
+    def get(self, key: str, default: object = None) -> object:
+        return self.values.get(key, default)
+
+    def set(self, key: str, value: object) -> None:
+        self.values[key] = value
+
+    def save_state(self) -> None:
+        pass
+
+
+class TestCalibrationCompletePersistence:
+    def test_calibration_without_athlete_params_keeps_stored_params(self, monkeypatch):
+        """A calibration_complete that lost its body measurements must not
+        erase the stored ones — returning users would lose diagnosis."""
+        import types
+        import uuid
+        from db.models import UserCalibration
+
+        stored_params = {
+            "shoulder_width_m": 0.39, "femur_avg_m": 0.46, "torso_avg_m": 0.55,
+            "hip_width_m": 0.27, "tibia_avg_m": 0.44, "foot_avg_m": 0.21,
+        }
+        user_id = uuid.uuid4()
+        row = UserCalibration(
+            user_id=user_id, movement_pattern="squat", peaks={}, thresholds={},
+            calibration_reps=5, athlete_params=dict(stored_params),
+            baseline={"peakDorsi": 33.0, "peakKneeFlex": 118.0},
+        )
+
+        class _Query:
+            def filter(self, *conditions):
+                return self
+
+            def first(self):
+                return row
+
+        class _Session:
+            def query(self, model):
+                return _Query()
+
+            def add(self, new_row):
+                raise AssertionError("existing row must be updated, not re-added")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(
+            sys.modules, "db.database", types.SimpleNamespace(SessionLocal=_Session),
+        )
+        service = CoachingService(session=None, state=_StubState(str(user_id)))
+
+        async def _no_reply(instructions):
+            return None
+
+        monkeypatch.setattr(service, "_coaching_llm_reply", _no_reply)
+
+        asyncio.run(service._on_calibration_complete({
+            "type": "calibration_complete",
+            "movement_pattern": "squat",
+            "peaks": {"trunk_flexion": 41.0},
+            "thresholds": {"knee_valgus": {"mild": 12.5}},
+        }))
+
+        assert row.athlete_params == stored_params
+        assert row.baseline == {"peakDorsi": 33.0, "peakKneeFlex": 118.0}
+        assert row.thresholds == {"knee_valgus": {"mild": 12.5}}

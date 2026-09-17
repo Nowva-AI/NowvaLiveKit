@@ -2,20 +2,27 @@
 Fault Detection Rule Engine
 
 Orchestrates all fault detection rules, maintains angle history,
-and deduplicates consecutive same-fault frames.
+and deduplicates same-fault reports that arrive within DEDUP_INTERVAL_S.
 """
+
+from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import List, Optional, Dict
+from typing import TYPE_CHECKING, List, Optional, Dict
 
 from biomechanics.utils.types import JointAngles, FaultEvent, BarbellDetection
 from biomechanics.utils.derivatives import AngleDerivatives
 from biomechanics.faults.fault_types import FaultRule, FaultType
-from biomechanics.utils.bone_constraints import BodyProportions
 from biomechanics.config import BiomechanicsConfig, get_config
 
+if TYPE_CHECKING:
+    from biomechanics.utils.segment_lengths import BodyProportions
+
 logger = logging.getLogger(__name__)
+
+# Minimum time between two reports of the same fault type (was 15 frames at 30 fps).
+DEDUP_INTERVAL_S = 0.5
 
 
 class RuleEngine:
@@ -59,9 +66,8 @@ class RuleEngine:
             )
         self.rules: List[FaultRule] = rules
 
-        # Deduplication tracking
-        self._last_faults: Dict[str, int] = {}  # fault_type -> last frame
-        self._dedup_frames: int = 15  # Minimum frames between same fault
+        # Deduplication tracking: fault_type -> timestamp of the last report
+        self._last_fault_times: Dict[str, float] = {}
 
         # Baseline calibration — after first clean rep, adjust thresholds
         # to the user's natural movement pattern. The profile owns the
@@ -76,9 +82,9 @@ class RuleEngine:
     def apply_body_proportion_scaling(self, proportions: BodyProportions) -> None:
         """Scale fault thresholds based on the user's body proportions.
 
-        Called once by the pipeline after bone-length calibration completes.
-        Delegates to each rule's scale_for_proportions() method — rules that
-        don't need scaling simply inherit the no-op default.
+        Idempotent: each rule rescales from the base thresholds it stored at
+        construction, so calling this again (or with new proportions) never
+        compounds (C8). Rules that don't need scaling inherit the no-op default.
         """
         for rule in self.rules:
             rule.scale_for_proportions(proportions)
@@ -90,7 +96,7 @@ class RuleEngine:
     def reset(self) -> None:
         """Reset engine state (clear history and rule states)."""
         self.history.clear()
-        self._last_faults.clear()
+        self._last_fault_times.clear()
 
         # Reset stateful rules
         for rule in self.rules:
@@ -117,6 +123,7 @@ class RuleEngine:
         bar_detection: Optional[BarbellDetection] = None,
         derivatives: Optional[AngleDerivatives] = None,
         phase: Optional[str] = None,
+        foot_state=None,
     ) -> List[FaultEvent]:
         """
         Evaluate all rules for the current frame.
@@ -130,6 +137,7 @@ class RuleEngine:
                 via ``set_frame_context``; others ignore it.
             derivatives: Optional velocity/acceleration data for tempo rules.
             phase: Current rep phase (descending, bottom, ascending, idle).
+            foot_state: Optional FootState from the foot contact model (multi-camera only).
 
         Returns:
             List of detected faults (deduplicated)
@@ -140,7 +148,7 @@ class RuleEngine:
         faults: List[FaultEvent] = []
 
         for rule in self.rules:
-            rule.set_frame_context(bar_detection=bar_detection, derivatives=derivatives, phase=phase)
+            rule.set_frame_context(bar_detection=bar_detection, derivatives=derivatives, phase=phase, foot_state=foot_state)
             fault = rule.evaluate(
                 angles=angles,
                 history=self.history,
@@ -149,17 +157,17 @@ class RuleEngine:
             )
 
             if fault is not None:
-                # Deduplicate consecutive same-fault frames
-                if self._should_report_fault(fault, angles.frame_index):
+                # Deduplicate same-fault reports within the dedup interval
+                if self._should_report_fault(fault, angles.timestamp):
                     faults.append(fault)
-                    self._last_faults[fault.fault_type] = angles.frame_index
+                    self._last_fault_times[fault.fault_type] = angles.timestamp
 
         return faults
 
-    def _should_report_fault(self, fault: FaultEvent, frame_index: int) -> bool:
-        """Check if fault should be reported (deduplication)."""
-        last_frame = self._last_faults.get(fault.fault_type, -self._dedup_frames - 1)
-        return frame_index - last_frame >= self._dedup_frames
+    def _should_report_fault(self, fault: FaultEvent, timestamp: float) -> bool:
+        """Check if fault should be reported (time-based deduplication)."""
+        last_time = self._last_fault_times.get(fault.fault_type, float("-inf"))
+        return timestamp - last_time >= DEDUP_INTERVAL_S
 
     # ------------------------------------------------------------------
     # Baseline calibration (delegates to profile)
@@ -194,6 +202,26 @@ class RuleEngine:
     def calibrated(self) -> bool:
         """Whether baseline calibration is complete."""
         return self._calibrated
+
+    def finish_rep(self, angles: JointAngles, rep_number: int) -> List[FaultEvent]:
+        """Give per-rep rules their verdict on the rep that just completed."""
+        faults: List[FaultEvent] = []
+        for rule in self.rules:
+            finish = getattr(rule, "finish_rep", None)
+            if finish is None:
+                continue
+            fault = finish(angles, rep_number)
+            if fault is not None and self._should_report_fault(fault, angles.timestamp):
+                faults.append(fault)
+                self._last_fault_times[fault.fault_type] = angles.timestamp
+        return faults
+
+    def discard_rep(self) -> None:
+        """Drop per-rep rule state for a descent that was not counted."""
+        for rule in self.rules:
+            discard = getattr(rule, "discard_rep", None)
+            if discard is not None:
+                discard()
 
     def evaluate_rep_complete(
         self,

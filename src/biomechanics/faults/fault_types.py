@@ -27,6 +27,7 @@ class FaultType(str, Enum):
     SHOULDER_STABILITY = "shoulder_stability"
     TRUNK_STABILITY = "trunk_stability"
     TEMPO = "tempo"  # Tempo-related faults (too fast, stalling)
+    HEEL_RISE = "heel_rise"
 
 
 # Default thresholds from config (degrees unless specified)
@@ -121,8 +122,9 @@ class FaultRule(ABC):
     _bar_detection = None  # type: Optional["BarbellDetection"]
     _derivatives = None    # type: Optional["AngleDerivatives"]
     _phase = None          # type: Optional[str]
+    _foot_state = None     # type: Optional["FootState"]
 
-    def set_frame_context(self, bar_detection=None, derivatives=None, phase=None) -> None:
+    def set_frame_context(self, bar_detection=None, derivatives=None, phase=None, foot_state=None) -> None:
         """Update per-frame auxiliary context for this rule.
 
         Called by the engine once per frame, before ``evaluate()``. Subclasses
@@ -132,6 +134,7 @@ class FaultRule(ABC):
         self._bar_detection = bar_detection
         self._derivatives = derivatives
         self._phase = phase
+        self._foot_state = foot_state
 
     @property
     @abstractmethod
@@ -185,8 +188,9 @@ class FaultRule(ABC):
     def scale_for_proportions(self, proportions) -> None:
         """Adjust thresholds based on user body proportions. Default: no-op.
 
-        Subclasses (e.g. KneeValgusRule) override to scale
-        their specific thresholds using the BodyProportions data.
+        Subclasses (e.g. ForwardLeanRule) override to rescale their
+        thresholds from the base values stored at construction, so repeated
+        calls never compound (C8).
         """
         pass
 

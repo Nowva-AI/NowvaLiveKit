@@ -9,7 +9,6 @@ is a black box that produces (frame, Skeleton2D, Skeleton3D).
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +19,10 @@ from biomechanics.triangulation.calibration import (
     CalibrationResult,
     TPoseCalibrator,
 )
-from biomechanics.triangulation.multi_capture import MultiCameraCapture
+from biomechanics.triangulation.multi_capture import (
+    DEFAULT_MAX_SYNC_DELTA_MS,
+    MultiCameraCapture,
+)
 from biomechanics.triangulation.triangulator import DLTTriangulator
 from biomechanics.utils.types import MultiViewPose, Skeleton2D, Skeleton3D
 
@@ -40,7 +42,7 @@ class MultiCameraPoseProvider:
         model_path: str | None = None,
         min_views: int = 2,
         max_reprojection_error: float = 15.0,
-        max_sync_delta_ms: float = 15.0,
+        max_sync_delta_ms: float = DEFAULT_MAX_SYNC_DELTA_MS,
         resolution: tuple[int, int] = (1280, 720),
         primary_camera: int = 0,
         focal_length_factor: float = 0.8,
@@ -89,6 +91,8 @@ class MultiCameraPoseProvider:
             device_ids=self._device_ids,
             resolution=self._resolution,
             max_sync_delta_ms=self._max_sync_delta_ms,
+            min_views=self._min_views,
+            primary_device_id=self._primary_camera,
         )
         self._capture.start()
 
@@ -134,15 +138,19 @@ class MultiCameraPoseProvider:
         while collected < n_frames:
             synced = self._capture.get_synced_frames()
             if synced is None:
-                time.sleep(0.01)
                 continue
-            synced_frames, _ = synced
-            for cam_id, frame in synced_frames.items():
+            for cam_id, frame in synced.frames.items():
                 frames_per_camera[cam_id].append(frame)
             collected += 1
 
+        # Partial synced sets can leave a camera without frames; the calibrator
+        # handles each camera independently, so pass only cameras that have some.
         self._calibration = calibrator.calibrate(
-            frames=frames_per_camera,
+            frames={
+                cam_id: cam_frames
+                for cam_id, cam_frames in frames_per_camera.items()
+                if cam_frames
+            },
             height_m=height_m,
             resolution=self._resolution,
         )
@@ -164,10 +172,13 @@ class MultiCameraPoseProvider:
         self,
     ) -> tuple[np.ndarray | None, Skeleton2D | None, Skeleton3D | None]:
         """
-        Grab synced frames, run per-camera pose estimation, triangulate.
+        Grab the next unprocessed synced set, run per-camera pose estimation, triangulate.
 
-        Returns:
-            (primary_frame, primary_skeleton_2d, triangulated_skeleton_3d)
+        Returns (primary_frame, primary_skeleton_2d, triangulated_skeleton_3d). Every
+        returned skeleton carries the primary camera's capture sequence number as
+        frame_index (strictly increasing, never repeated) and the primary capture
+        timestamp (wall-aligned seconds). Cameras missing from the synced set are
+        simply absent from the triangulation views.
         """
         if self._capture is None or self._triangulator is None:
             return None, None, None
@@ -176,33 +187,53 @@ class MultiCameraPoseProvider:
         if synced is None:
             return None, None, None
 
-        synced_frames, ref_ts = synced
         primary_id = str(self._primary_camera)
 
         views: dict[str, Skeleton2D] = {}
         primary_skeleton_2d: Skeleton2D | None = None
 
-        cam_ids = list(synced_frames.keys())
+        cam_ids = list(synced.frames.keys())
         skeletons = self._estimator.estimate_batch(
-            [synced_frames[cam_id] for cam_id in cam_ids]
+            [synced.frames[cam_id] for cam_id in cam_ids], camera_ids=cam_ids
         )
         for cam_id, skeleton_2d in zip(cam_ids, skeletons):
             if skeleton_2d is not None:
+                skeleton_2d.timestamp = synced.timestamp
+                skeleton_2d.frame_index = synced.sequence
                 views[cam_id] = skeleton_2d
                 if cam_id == primary_id:
                     primary_skeleton_2d = skeleton_2d
 
+        primary_frame = synced.frames[primary_id]
         if len(views) < self._min_views:
-            return synced_frames.get(primary_id), primary_skeleton_2d, None
+            return primary_frame, primary_skeleton_2d, None
 
         multi_view = MultiViewPose(
             views=views,
-            timestamp=ref_ts,
-            frame_index=0,
+            timestamp=synced.timestamp,
+            frame_index=synced.sequence,
         )
         skeleton_3d = self._triangulator.triangulate(multi_view)
 
-        return synced_frames.get(primary_id), primary_skeleton_2d, skeleton_3d
+        return primary_frame, primary_skeleton_2d, skeleton_3d
+
+    def reset_temporal_state(self) -> None:
+        """Clear per-keypoint history in the triangulator and the per-camera crop tracking.
+
+        Call at set boundaries and after long dropouts; cameras and calibration
+        are untouched.
+        """
+        if self._triangulator is not None:
+            self._triangulator.reset()
+        if self._estimator is not None:
+            self._estimator.reset_tracking()
+
+    @property
+    def swap_count(self) -> int:
+        """Cumulative left/right swap corrections applied by the triangulator."""
+        if self._triangulator is None:
+            return 0
+        return self._triangulator.swap_count
 
     def release(self) -> None:
         """Stop capture and release resources."""

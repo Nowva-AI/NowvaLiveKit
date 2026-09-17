@@ -16,6 +16,8 @@ coordinates score identically to preprocessed ones.
 
 from __future__ import annotations
 
+import math
+
 from .graph.evidence_tests import _clamp, expected_trunk_lean_geometric
 from .types import RepKinematicSummary, RepScore, RepTrajectory, RepTrajectorySample, SetScoreSummary
 
@@ -67,7 +69,11 @@ TEMPO_DECAY_RANGE_SECONDS = 1.5
 
 
 def _percentile(values: list[float], fraction: float) -> float:
-    ordered = sorted(values)
+    # Missing angles are NaN (C9) and would poison the sort; a rep with no
+    # finite sample scores as if the value were absent.
+    ordered = sorted(value for value in values if not math.isnan(value))
+    if not ordered:
+        return math.nan
     if len(ordered) == 1:
         return ordered[0]
     position = fraction * (len(ordered) - 1)

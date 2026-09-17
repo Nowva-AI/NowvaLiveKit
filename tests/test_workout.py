@@ -9,7 +9,6 @@ Generates per-set plots and saves per-set data to output/ when done.
 """
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -93,7 +92,6 @@ def run_test():
     config = load_pipeline_config(config_path)
     config.capture.device_id = camera_id
     config.bilstm.enabled = True
-    os.environ["ENABLE_PREIK_FILTERS"] = "true"
 
     pipeline = BiomechanicsPipeline(config)
     ipc_client = MockIPCClient()

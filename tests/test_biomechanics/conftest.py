@@ -177,3 +177,80 @@ def mock_ipc_client():
             self.connected = False
 
     return MockIPCClient()
+
+
+# =============================================================================
+# SYNTHETIC WORLD-FRAME SQUAT (shared by the pre-IK chain and pipeline tests)
+# =============================================================================
+# Triangulated frame: Y-down metres, X = subject's left, forward = -Z, floor
+# at y = 0. 21 keypoints (COCO-17 + toes + heels).
+
+SYNTHETIC_FPS = 30.0
+SYNTHETIC_FEMUR_M = 0.45
+SYNTHETIC_TIBIA_M = 0.43
+SYNTHETIC_TORSO_M = 0.52
+SYNTHETIC_HIP_HALF_WIDTH_M = 0.12
+SYNTHETIC_SHOULDER_HALF_WIDTH_M = 0.19
+SYNTHETIC_TOE_FORWARD_M = 0.18
+SYNTHETIC_HEEL_BACK_M = 0.06
+SYNTHETIC_NUM_KEYPOINTS = 21
+SYNTHETIC_BOTTOM_SHANK_DEG = 35.0
+SYNTHETIC_BOTTOM_THIGH_DEG = 85.0
+SYNTHETIC_BOTTOM_TRUNK_DEG = 40.0
+
+
+def world_squat_points(
+    depth_ratio: float, valgus_m: float = 0.0, lean_extra_deg: float = 0.0,
+) -> np.ndarray:
+    """(21, 3) world-frame squat pose. depth_ratio 0 = standing, 1 = bottom;
+    valgus_m shifts both knees medially at the bottom."""
+    import math
+
+    from biomechanics.utils.types import CocoKeypoints as CK
+
+    shank = math.radians(SYNTHETIC_BOTTOM_SHANK_DEG * depth_ratio)
+    thigh = math.radians(SYNTHETIC_BOTTOM_THIGH_DEG * depth_ratio)
+    trunk = math.radians(SYNTHETIC_BOTTOM_TRUNK_DEG * depth_ratio + lean_extra_deg)
+    knee = np.array([0.0, -SYNTHETIC_TIBIA_M * math.cos(shank), -SYNTHETIC_TIBIA_M * math.sin(shank)])
+    hip = knee + np.array([0.0, -SYNTHETIC_FEMUR_M * math.cos(thigh), SYNTHETIC_FEMUR_M * math.sin(thigh)])
+    shoulder = hip + np.array([0.0, -SYNTHETIC_TORSO_M * math.cos(trunk), -SYNTHETIC_TORSO_M * math.sin(trunk)])
+
+    points = np.zeros((SYNTHETIC_NUM_KEYPOINTS, 3))
+    sides = (
+        (1.0, CK.LEFT_HIP, CK.LEFT_KNEE, CK.LEFT_ANKLE, CK.LEFT_SHOULDER, CK.LEFT_ELBOW,
+         CK.LEFT_WRIST, CK.LEFT_FOOT_INDEX, CK.LEFT_HEEL),
+        (-1.0, CK.RIGHT_HIP, CK.RIGHT_KNEE, CK.RIGHT_ANKLE, CK.RIGHT_SHOULDER, CK.RIGHT_ELBOW,
+         CK.RIGHT_WRIST, CK.RIGHT_FOOT_INDEX, CK.RIGHT_HEEL),
+    )
+    for sign, hip_i, knee_i, ankle_i, shoulder_i, elbow_i, wrist_i, toe_i, heel_i in sides:
+        x = sign * SYNTHETIC_HIP_HALF_WIDTH_M
+        points[ankle_i] = [x, 0.0, 0.0]
+        points[knee_i] = [x - sign * valgus_m * depth_ratio, knee[1], knee[2]]
+        points[hip_i] = [x, hip[1], hip[2]]
+        points[shoulder_i] = [sign * SYNTHETIC_SHOULDER_HALF_WIDTH_M, shoulder[1], shoulder[2]]
+        points[elbow_i] = [sign * 0.24, shoulder[1] + 0.25, shoulder[2] + 0.05]
+        points[wrist_i] = [sign * 0.24, shoulder[1] + 0.48, shoulder[2] + 0.10]
+        points[toe_i] = [x + sign * 0.03, 0.0, -SYNTHETIC_TOE_FORWARD_M]
+        points[heel_i] = [x, 0.0, SYNTHETIC_HEEL_BACK_M]
+    head = (points[CK.LEFT_SHOULDER] + points[CK.RIGHT_SHOULDER]) / 2.0 + np.array([0.0, -0.22, -0.03])
+    points[CK.NOSE] = head
+    points[CK.LEFT_EYE] = head + [0.03, -0.02, 0.0]
+    points[CK.RIGHT_EYE] = head + [-0.03, -0.02, 0.0]
+    points[CK.LEFT_EAR] = head + [0.07, 0.0, 0.05]
+    points[CK.RIGHT_EAR] = head + [-0.07, 0.0, 0.05]
+    return points
+
+
+def squat_depth_profile(
+    stand_s: float = 1.0, down_s: float = 1.0, hold_s: float = 0.4, up_s: float = 1.0,
+) -> list[float]:
+    """Per-frame depth ratios for one rep: stand, cosine descent, hold, cosine ascent."""
+    import math
+
+    frames: list[float] = [0.0] * int(stand_s * SYNTHETIC_FPS)
+    down_frames = int(down_s * SYNTHETIC_FPS)
+    frames += [0.5 - 0.5 * math.cos(math.pi * i / down_frames) for i in range(down_frames)]
+    frames += [1.0] * int(hold_s * SYNTHETIC_FPS)
+    up_frames = int(up_s * SYNTHETIC_FPS)
+    frames += [0.5 + 0.5 * math.cos(math.pi * i / up_frames) for i in range(up_frames)]
+    return frames

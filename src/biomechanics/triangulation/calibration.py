@@ -1,22 +1,17 @@
 """
-T-Pose Camera Calibration.
+T-pose camera calibration: a canonical 3D T-pose scaled to the user's height is matched
+to each camera's averaged 2D keypoints with cv2.solvePnP. Height gives absolute scale.
 
-Builds a canonical 3D T-pose skeleton scaled to the user's height, then
-uses cv2.solvePnP per camera to determine extrinsic parameters. The
-user's height provides the absolute scale reference, eliminating the
-need for a checkerboard or known inter-camera distance.
-
-Coordinate convention (matches MediaPipe / AnalyticalIKSolver):
-  - Y-axis points downward
-  - X-axis points to the subject's left
-  - Z-axis points forward (toward front camera)
-  - Origin at hip midpoint
+World frame: origin at hip midpoint, meters, right-handed. X = subject's left,
+Y = down, +Z = subject's BACK (the front camera sits at -Z; forward is -Z).
 """
+
+from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -38,6 +33,29 @@ SEGMENT_RATIOS = {
     "forearm": 0.150,
 }
 
+NUM_TPOSE_KEYPOINTS = 17  # COCO-17; skeleton foot keypoints 17-20 are not in the model
+
+# Keypoint gate on the per-camera mean raw RTMPose score (missed frames count as 0).
+# Raw scores: no-person images peak at 0.16-0.27; visible keypoints on tracked crops
+# average 0.77-0.99 with single-frame minimum 0.61 (data/squats.mov). A keypoint passes
+# only if it is detected at visible-keypoint confidence in most frames.
+MIN_MEAN_KEYPOINT_SCORE = 0.5
+MIN_SOLVE_KEYPOINTS = 6
+HIGH_REPROJECTION_ERROR_PX = 10.0
+
+# T-pose check, per frame in 2D. Wrist height offset from its shoulder is normalized
+# by torso length (vertical, so camera yaw does not shrink it): 0.5 torso ~ arms
+# within ~26 deg of horizontal (0.5 * 0.290 / (0.175 + 0.150) = sin 26 deg).
+TPOSE_MAX_WRIST_DROP_TO_TORSO_RATIO = 0.5
+# Wrist reach beyond its shoulder along the shoulder line, normalized by shoulder span
+# (both shrink equally with yaw): T-pose ~1.55, arms at sides ~0.
+TPOSE_MIN_WRIST_REACH_TO_SHOULDER_SPAN_RATIO = 0.75
+TPOSE_MIN_FRAME_FRACTION = 0.5
+TPOSE_REQUIRED_KEYPOINTS = [
+    CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER, CK.LEFT_WRIST, CK.RIGHT_WRIST, CK.LEFT_HIP, CK.RIGHT_HIP,
+]
+MIN_SHOULDER_SPAN_PX = 1.0
+
 
 @dataclass
 class CameraCalibration:
@@ -48,16 +66,69 @@ class CameraCalibration:
     rotation_matrix: np.ndarray
     translation_vector: np.ndarray
     reprojection_error: float
-    resolution: Tuple[int, int]
+    resolution: tuple[int, int]
 
 
 @dataclass
 class CalibrationResult:
     """Complete multi-camera calibration."""
-    cameras: Dict[str, CameraCalibration] = field(default_factory=dict)
-    tpose_model_3d: Optional[np.ndarray] = None
+    cameras: dict[str, CameraCalibration] = field(default_factory=dict)
+    tpose_model_3d: np.ndarray | None = None
     athlete_height_m: float = 0.0
     timestamp: str = ""
+
+
+def tpose_frame_mask(points_xy: np.ndarray, scores: np.ndarray) -> np.ndarray:
+    """
+    Per-frame T-pose check on 2D keypoints (F, 17, 2) with scores (F, 17): both wrists
+    near their shoulder's height and reaching well outside the shoulders. Frames missing
+    a shoulder, wrist or hip are not T-pose frames.
+    """
+    all_detected = np.all(scores[:, TPOSE_REQUIRED_KEYPOINTS] > 0.0, axis=1)
+
+    shoulder_l = points_xy[:, CK.LEFT_SHOULDER]
+    shoulder_r = points_xy[:, CK.RIGHT_SHOULDER]
+    wrist_l = points_xy[:, CK.LEFT_WRIST]
+    wrist_r = points_xy[:, CK.RIGHT_WRIST]
+    shoulder_mid = (shoulder_l + shoulder_r) / 2.0
+    hip_mid = (points_xy[:, CK.LEFT_HIP] + points_xy[:, CK.RIGHT_HIP]) / 2.0
+
+    torso_length_px = np.linalg.norm(hip_mid - shoulder_mid, axis=1)
+    shoulder_vec = shoulder_l - shoulder_r
+    shoulder_span_px = np.linalg.norm(shoulder_vec, axis=1)
+    measurable = all_detected & (shoulder_span_px > MIN_SHOULDER_SPAN_PX) & (torso_length_px > 0.0)
+
+    safe_span = np.where(measurable, shoulder_span_px, 1.0)
+    safe_torso = np.where(measurable, torso_length_px, 1.0)
+    outward_l = shoulder_vec / safe_span[:, None]
+
+    reach_l_ratio = np.sum((wrist_l - shoulder_l) * outward_l, axis=1) / safe_span
+    reach_r_ratio = np.sum((shoulder_r - wrist_r) * outward_l, axis=1) / safe_span
+    drop_l_ratio = np.abs(wrist_l[:, 1] - shoulder_l[:, 1]) / safe_torso
+    drop_r_ratio = np.abs(wrist_r[:, 1] - shoulder_r[:, 1]) / safe_torso
+
+    arms_level = (drop_l_ratio <= TPOSE_MAX_WRIST_DROP_TO_TORSO_RATIO) & (
+        drop_r_ratio <= TPOSE_MAX_WRIST_DROP_TO_TORSO_RATIO
+    )
+    arms_out = (reach_l_ratio >= TPOSE_MIN_WRIST_REACH_TO_SHOULDER_SPAN_RATIO) & (
+        reach_r_ratio >= TPOSE_MIN_WRIST_REACH_TO_SHOULDER_SPAN_RATIO
+    )
+    return measurable & arms_level & arms_out
+
+
+def average_detected_keypoints(
+    points_xy: np.ndarray, scores: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Average (F, 17, 2) keypoints over the frames where each keypoint was detected
+    (score > 0); mean scores run over all frames, so misses count as 0.
+    """
+    detected = scores > 0.0
+    detected_counts = detected.sum(axis=0)
+    summed_xy = np.sum(points_xy * detected[..., None], axis=0)
+    mean_xy = summed_xy / np.maximum(detected_counts, 1)[:, None]
+    mean_scores = scores.mean(axis=0)
+    return mean_xy, mean_scores
 
 
 class TPoseCalibrator:
@@ -66,8 +137,8 @@ class TPoseCalibrator:
 
     Flow:
     1. Build a canonical T-pose 3D model scaled to user height.
-    2. Detect 2D keypoints in each camera's T-pose frames via pose estimator.
-    3. Average keypoints per camera to reduce noise.
+    2. Detect 2D keypoints in each camera's T-pose frames (crop tracked per camera).
+    3. Verify the subject holds a T-pose, then average keypoints per camera.
     4. Use cv2.solvePnP per camera to solve for rotation and translation.
     5. Compute projection matrices P = K @ [R|t].
     """
@@ -76,18 +147,15 @@ class TPoseCalibrator:
         self,
         pose_estimator: PoseEstimator,
         focal_length_factor: float = 0.8,
-    ):
+    ) -> None:
         self._estimator = pose_estimator
         self._focal_length_factor = focal_length_factor
 
     def build_tpose_model(self, height_m: float) -> np.ndarray:
         """
-        Return (17, 3) canonical T-pose skeleton in world coordinates.
-
-        The model is defined with:
-          - Origin at hip midpoint
-          - Y-down, X-left, Z-forward
-          - Arms extended horizontally, legs straight down
+        Return the (17, 3) canonical T-pose in world coordinates: origin at hip midpoint,
+        X = subject's left, Y down, +Z = subject's back; arms horizontal along X, legs
+        straight down, every keypoint in the Z = 0 plane.
         """
         r = SEGMENT_RATIOS
         h = height_m
@@ -113,13 +181,7 @@ class TPoseCalibrator:
         eye_offset_x = 0.015 * h
         ear_offset_x = 0.04 * h
 
-        # COCO 17 keypoints in T-pose
-        # Index: 0=nose, 1=l_eye, 2=r_eye, 3=l_ear, 4=r_ear,
-        #        5=l_shoulder, 6=r_shoulder, 7=l_elbow, 8=r_elbow,
-        #        9=l_wrist, 10=r_wrist, 11=l_hip, 12=r_hip,
-        #        13=l_knee, 14=r_knee, 15=l_ankle, 16=r_ankle
-
-        model = np.zeros((17, 3), dtype=np.float64)
+        model = np.zeros((NUM_TPOSE_KEYPOINTS, 3), dtype=np.float64)
 
         # Head
         model[CK.NOSE] = [0.0, nose_y, 0.0]
@@ -150,8 +212,7 @@ class TPoseCalibrator:
 
         return model
 
-    def _build_intrinsics(self, resolution: Tuple[int, int]) -> np.ndarray:
-        """Build camera intrinsic matrix from resolution and focal length factor."""
+    def _build_intrinsics(self, resolution: tuple[int, int]) -> np.ndarray:
         w, h = resolution
         f = self._focal_length_factor * w
         return np.array([
@@ -160,61 +221,36 @@ class TPoseCalibrator:
             [0.0, 0.0, 1.0],
         ], dtype=np.float64)
 
-    def _detect_keypoints_averaged(
-        self,
-        frames: List[np.ndarray],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Run pose estimation on multiple frames and average 2D keypoints.
+    def _detect_keypoints(
+        self, frames: list[np.ndarray], camera_id: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        # (F, 17, 2) positions and (F, 17) scores; frames without a person score 0.
+        points_xy = np.zeros((len(frames), NUM_TPOSE_KEYPOINTS, 2), dtype=np.float64)
+        scores = np.zeros((len(frames), NUM_TPOSE_KEYPOINTS), dtype=np.float64)
 
-        Returns:
-            (avg_keypoints (17, 2), avg_confidences (17,))
-        """
-        all_kpts = []
-        all_confs = []
-
-        for frame in frames:
-            skeleton = self._estimator.estimate(frame)
+        for i, frame in enumerate(frames):
+            skeleton = self._estimator.estimate(frame, camera_id)
             if skeleton is None:
                 continue
+            keypoints = skeleton.to_numpy()[:NUM_TPOSE_KEYPOINTS]
+            points_xy[i] = keypoints[:, :2]
+            scores[i] = keypoints[:, 2]
 
-            kpts = np.zeros((17, 2), dtype=np.float64)
-            confs = np.zeros(17, dtype=np.float64)
-
-            for i in range(min(17, len(skeleton.keypoints))):
-                kp = skeleton.keypoints[i]
-                kpts[i] = [kp.x, kp.y]
-                confs[i] = kp.confidence
-
-            all_kpts.append(kpts)
-            all_confs.append(confs)
-
-        if not all_kpts:
-            return np.zeros((17, 2)), np.zeros(17)
-
-        avg_kpts = np.mean(all_kpts, axis=0)
-        avg_confs = np.mean(all_confs, axis=0)
-        return avg_kpts, avg_confs
+        return points_xy, scores
 
     def calibrate(
         self,
-        frames: Dict[str, List[np.ndarray]],
+        frames: dict[str, list[np.ndarray]],
         height_m: float,
-        resolution: Tuple[int, int],
+        resolution: tuple[int, int],
     ) -> CalibrationResult:
         """
-        Run T-pose calibration on collected frames from all cameras.
+        Run T-pose calibration on collected frames (camera_id -> T-pose frames).
 
-        Args:
-            frames: Dict mapping camera_id -> list of T-pose frames
-            height_m: Athlete height in meters
-            resolution: Camera resolution (w, h)
-
-        Returns:
-            CalibrationResult with projection matrices for all cameras
+        Cameras with too few detected keypoints are skipped. Raises ValueError if a
+        camera sees a person who is not holding a T-pose in at least half the frames,
+        and RuntimeError if no camera calibrates.
         """
-        from datetime import datetime
-
         model_3d = self.build_tpose_model(height_m)
         K = self._build_intrinsics(resolution)
         dist_coeffs = np.zeros(4, dtype=np.float64)
@@ -226,18 +262,26 @@ class TPoseCalibrator:
         )
 
         for cam_id, cam_frames in frames.items():
-            avg_kpts, avg_confs = self._detect_keypoints_averaged(cam_frames)
+            points_xy, scores = self._detect_keypoints(cam_frames, cam_id)
+            avg_kpts, avg_confs = average_detected_keypoints(points_xy, scores)
 
-            # Only use keypoints with sufficient confidence
-            valid_mask = avg_confs > 0.5
-            valid_indices = np.where(valid_mask)[0]
+            valid_indices = np.where(avg_confs > MIN_MEAN_KEYPOINT_SCORE)[0]
 
-            if len(valid_indices) < 6:
+            if len(valid_indices) < MIN_SOLVE_KEYPOINTS:
                 logger.warning(
-                    "Camera %s: only %d valid keypoints (need 6+), skipping",
-                    cam_id, len(valid_indices),
+                    "Camera %s: only %d valid keypoints (need %d+), skipping",
+                    cam_id, len(valid_indices), MIN_SOLVE_KEYPOINTS,
                 )
                 continue
+
+            tpose_fraction = float(np.mean(tpose_frame_mask(points_xy, scores)))
+            if tpose_fraction < TPOSE_MIN_FRAME_FRACTION:
+                raise ValueError(
+                    f"Camera {cam_id}: subject is not holding a T-pose "
+                    f"({tpose_fraction:.0%} of {len(cam_frames)} frames, need "
+                    f"{TPOSE_MIN_FRAME_FRACTION:.0%}). Stand facing the front camera with "
+                    f"both arms straight out at shoulder height."
+                )
 
             object_points = model_3d[valid_indices].astype(np.float64)
             image_points = avg_kpts[valid_indices].astype(np.float64)
@@ -271,7 +315,7 @@ class TPoseCalibrator:
             errors = np.linalg.norm(projected - image_points, axis=1)
             reproj_error = float(np.mean(errors))
 
-            if reproj_error > 10.0:
+            if reproj_error > HIGH_REPROJECTION_ERROR_PX:
                 logger.warning(
                     "Camera %s: high reprojection error %.1f px", cam_id, reproj_error
                 )

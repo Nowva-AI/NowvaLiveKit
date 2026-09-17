@@ -25,6 +25,7 @@ from biomechanics.diagnosis.bridge import (
 )
 from biomechanics.diagnosis.graph.parameter_deltas import dorsi_driven_targets
 from biomechanics.diagnosis.types import DiagnosisResult, RepKinematicSummary, RepScore, SetScoreSummary
+from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import (
     DEPTH_CLASS_NAMES,
     FaultEvent,
@@ -84,7 +85,7 @@ class IPCBridge:
     def prepare_exercise(self, exercise_name: str) -> Dict[str, str]:
         """Cache cues for an exercise and notify the voice agent."""
         cues = self.cue_cache.prepare_for_exercise(exercise_name)
-        self.ipc_client.send_message({
+        self._send({
             "type": "cache_cues",
             "exercise_name": exercise_name,
             "cues": cues,
@@ -134,7 +135,7 @@ class IPCBridge:
             except Exception:
                 logger.debug("Stance metric computation failed", exc_info=True)
 
-        self.ipc_client.send_message(msg)
+        self._send(msg)
 
     # ------------------------------------------------------------------
     # Fault events (deduplicated per fault type)
@@ -149,7 +150,7 @@ class IPCBridge:
 
         cue_key = self.cue_cache.get_cue_for_fault(fault.fault_type, now)
 
-        self.ipc_client.send_message({
+        self._send({
             "type": "fault",
             "fault_type": fault.fault_type,
             "severity": fault.severity.value,
@@ -217,10 +218,10 @@ class IPCBridge:
             msg["rep_kinematic_summary"] = rep_kinematic_summary.model_dump()
         if set_number is not None:
             msg["set_number"] = set_number
-        self.ipc_client.send_message(msg)
+        self._send(msg)
 
         # Backward compatibility
-        self.ipc_client.send_message({
+        self._send({
             "type": "rep_count",
             "value": rep.rep_number,
         })
@@ -257,7 +258,7 @@ class IPCBridge:
             })
         if set_number is not None:
             msg["set_number"] = set_number
-        self.ipc_client.send_message(msg)
+        self._send(msg)
 
     def send_rep_diagnosis(
         self,
@@ -293,7 +294,7 @@ class IPCBridge:
         }
         if rep_score is not None:
             msg["rep_score"] = rep_score.model_dump()
-        self.ipc_client.send_message(msg)
+        self._send(msg)
 
     # ------------------------------------------------------------------
     # Set completion
@@ -308,7 +309,7 @@ class IPCBridge:
         """Send structured diagnosis and scoring results for a completed set."""
         per_rep = score_summary.per_rep_scores
         n = len(per_rep)
-        self.ipc_client.send_message({
+        self._send({
             "type": "diagnosis_complete",
             "set_number": set_number,
             "diagnosis": {
@@ -370,7 +371,7 @@ class IPCBridge:
             data["avg_severity"] = round(data["total_severity"] / data["count"], 2)
             data["total_severity"] = round(data["total_severity"], 2)
 
-        self.ipc_client.send_message({
+        self._send({
             "type": "set_complete",
             "set_number": set_number,
             "total_reps": len(reps),
@@ -386,7 +387,7 @@ class IPCBridge:
 
     def send_pipeline_status(self, status: str, latency: Dict[str, float]) -> None:
         """Broadcast pipeline health status."""
-        self.ipc_client.send_message({
+        self._send({
             "type": "pipeline_status",
             "status": status,
             "latency_ms": latency,
@@ -395,6 +396,10 @@ class IPCBridge:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _send(self, message: Dict[str, Any]) -> None:
+        """Every IPC message passes here: NaN/inf (missing angles) become None."""
+        self.ipc_client.send_message(nan_to_none(message))
 
     @staticmethod
     def _depth_category(angle: float) -> str:

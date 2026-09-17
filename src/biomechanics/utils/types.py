@@ -6,9 +6,12 @@ Includes to_numpy() methods for interoperability with NumPy-based processing.
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 import numpy as np
+
+if TYPE_CHECKING:
+    from biomechanics.utils.foot_contact import FootState
 
 
 # =============================================================================
@@ -556,8 +559,15 @@ class PipelineFrame(BaseModel):
     skeleton_2d: Optional[Skeleton2D] = None
     multi_view: Optional[MultiViewPose] = None
 
-    # Layer 2: 3D Reconstruction
+    # Layer 2: 3D Reconstruction. skeleton_3d is ALWAYS the analysis skeleton
+    # (hip-centred, fixed-lag smoothed) that IK, rules, and buffers consumed —
+    # None on gated frames. Display consumers should read
+    # skeleton_3d_display (undelayed) or skeleton_3d_raw (as estimated,
+    # present on gated frames too).
     skeleton_3d: Optional[Skeleton3D] = None
+    skeleton_3d_raw: Optional[Skeleton3D] = None
+    skeleton_3d_display: Optional[Skeleton3D] = None
+    foot_state: Optional["FootState"] = None
 
     # Layer 3: Kinematics
     joint_angles: Optional[JointAngles] = None
@@ -629,3 +639,12 @@ def depth_category(knee_angle: float) -> str:
         return "half"
     else:
         return "quarter"
+
+
+# FootState is defined in foot_contact.py, which imports CocoKeypoints from
+# this module. Importing it here, after every class above exists, closes that
+# cycle so PipelineFrame.foot_state resolves; utils/__init__ imports this
+# module first so the cycle is always entered from this side.
+from biomechanics.utils.foot_contact import FootState  # noqa: E402
+
+PipelineFrame.model_rebuild()

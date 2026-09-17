@@ -11,7 +11,8 @@ import numpy as np
 FIXTURES_DIR = Path(__file__).parent.parent.parent / "tests" / "test_biomechanics" / "fixtures"
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
-# Standing pose (arms down, legs straight) — 19 keypoints (COCO 17 + 2 foot indices)
+# Standing pose (arms down, legs straight) — 21 keypoints (COCO 17 + toes + heels)
+NUM_KEYPOINTS = 21
 _STANDING_3D = np.array([
     [0.0, 1.75, 0.0],     # 0  nose
     [0.03, 1.78, -0.02],   # 1  left_eye
@@ -32,6 +33,8 @@ _STANDING_3D = np.array([
     [-0.10, 0.05, 0.0],    # 16 right_ankle
     [0.12, 0.0, 0.10],     # 17 left_foot_index
     [-0.12, 0.0, 0.10],    # 18 right_foot_index
+    [0.10, 0.0, -0.05],    # 19 left_heel
+    [-0.10, 0.0, -0.05],   # 20 right_heel
 ])
 
 
@@ -40,22 +43,24 @@ def _load_json(name: str) -> dict:
         return json.load(f)
 
 
-def _ensure_19_keypoints(pts: np.ndarray) -> np.ndarray:
-    """Extend 17-keypoint array to 19 by adding foot index keypoints."""
-    if len(pts) >= 19:
+def _ensure_21_keypoints(pts: np.ndarray) -> np.ndarray:
+    """Extend a 17-keypoint array to 21 by adding toe and heel keypoints."""
+    if len(pts) >= NUM_KEYPOINTS:
         return pts
     left_ankle = pts[15]
     right_ankle = pts[16]
     left_foot = left_ankle + np.array([0.02, -0.05, 0.10])
     right_foot = right_ankle + np.array([-0.02, -0.05, 0.10])
-    return np.vstack([pts, [left_foot], [right_foot]])
+    left_heel = left_ankle + np.array([0.0, -0.05, -0.05])
+    right_heel = right_ankle + np.array([0.0, -0.05, -0.05])
+    return np.vstack([pts[:17], [left_foot], [right_foot], [left_heel], [right_heel]])
 
 
 def load_fixture_skeleton_3d():
-    """Load the half-squat 3D skeleton fixture (19 keypoints)."""
+    """Load the half-squat 3D skeleton fixture (21 keypoints)."""
     from biomechanics.utils.types import Skeleton3D
     data = _load_json("sample_3d_points.json")
-    pts = _ensure_19_keypoints(np.array(data["points"]))
+    pts = _ensure_21_keypoints(np.array(data["points"]))
     return Skeleton3D.from_numpy(pts)
 
 
@@ -81,7 +86,7 @@ def generate_squat_sequence(n_frames: int = 90) -> list:
     from biomechanics.utils.types import Skeleton3D
 
     data = _load_json("sample_3d_points.json")
-    squat_bottom = _ensure_19_keypoints(np.array(data["points"]))
+    squat_bottom = _ensure_21_keypoints(np.array(data["points"]))
 
     frames = []
     for i in range(n_frames):

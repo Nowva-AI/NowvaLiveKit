@@ -135,7 +135,7 @@ class TestMediaPipePoseEstimator:
         """Estimator should expose COCO keypoint names."""
         estimator = MediaPipePoseEstimator()
         assert estimator.KEYPOINT_NAMES == COCO_KEYPOINT_NAMES
-        assert estimator.NUM_KEYPOINTS == 19
+        assert estimator.NUM_KEYPOINTS == 21
 
     def test_estimate_returns_skeleton2d_or_none(self):
         """estimate() should return Skeleton2D or None."""

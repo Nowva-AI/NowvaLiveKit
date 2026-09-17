@@ -5,10 +5,13 @@ Tests each fault rule with known angle values.
 Verifies severity levels, thresholds, and fault messages.
 """
 
+import math
 import pytest
 import sys
 from pathlib import Path
 from collections import deque
+
+import numpy as np
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -18,8 +21,17 @@ from biomechanics.faults.fault_types import FaultType
 from biomechanics.faults.rules.depth import DepthRule, DepthCategory
 from biomechanics.faults.rules.symmetry import SymmetryRule
 from biomechanics.faults.rules.forward_lean import ForwardLeanRule
-from biomechanics.faults.rules.knee_valgus import KneeValgusRule
-from biomechanics.faults.rule_engine import RuleEngine
+from biomechanics.faults.rules.knee_valgus import KneeValgusRule, KNEE_VALGUS_COOLDOWN_S
+from biomechanics.faults.rules.forward_lean import FORWARD_LEAN_COOLDOWN_S
+from biomechanics.faults.rules.back_rounding import BackRoundingRule, BACK_ROUNDING_COOLDOWN_S
+from biomechanics.faults.rule_engine import RuleEngine, DEDUP_INTERVAL_S
+
+NAN = float("nan")
+FPS = 30.0
+REP_FRAMES = 60
+PEAK_KNEE_FLEXION_DEG = 110.0
+SYMMETRIC_NOISE_DEG = 2.0
+ASYMMETRY_DEG = 12.0
 
 
 def create_joint_angles(
@@ -173,27 +185,64 @@ class TestDepthRule:
         assert depth_rule.evaluate_depth_class(3, angles) is None
         assert depth_rule.evaluate_depth_class(4, angles) is None
 
-    def test_tracks_max_during_rep(self, depth_rule, history):
-        """Depth rule should track max depth during rep."""
-        # Enter rep
-        angles1 = create_joint_angles(frame=0, knee_flexion_l=50, knee_flexion_r=50)
-        depth_rule.evaluate(angles1, history, in_rep=True, rep_number=1)
+    def test_per_frame_path_never_emits(self, depth_rule, history):
+        """S17: depth is reported once per rep by the rep-complete path only,
+        so the per-frame evaluate() must stay silent even for a quarter squat."""
+        for frame, knee in enumerate((30.0, 50.0, 55.0, 40.0)):
+            angles = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=knee, knee_flexion_r=knee)
+            assert depth_rule.evaluate(angles, history, in_rep=True, rep_number=1) is None
+        after = create_joint_angles(frame=4, timestamp=4 / FPS, knee_flexion_l=5.0, knee_flexion_r=5.0)
+        assert depth_rule.evaluate(after, history, in_rep=False, rep_number=2) is None
 
-        angles2 = create_joint_angles(frame=1, knee_flexion_l=80, knee_flexion_r=80)
-        depth_rule.evaluate(angles2, history, in_rep=True, rep_number=1)
+    def test_nan_max_depth_gives_no_fault(self, depth_rule):
+        assert depth_rule.evaluate_max_depth(max_knee_flexion=NAN, angles=create_joint_angles(), rep_number=1) is None
 
-        angles3 = create_joint_angles(frame=2, knee_flexion_l=95, knee_flexion_r=95)  # Max
-        depth_rule.evaluate(angles3, history, in_rep=True, rep_number=1)
 
-        angles4 = create_joint_angles(frame=3, knee_flexion_l=70, knee_flexion_r=70)
-        depth_rule.evaluate(angles4, history, in_rep=True, rep_number=1)
+def _run_symmetry_reps(
+    rule: SymmetryRule,
+    n_reps: int,
+    right_offset_deg: float,
+    noise_deg: float,
+    seed: int = 0,
+) -> list:
+    """Feed cosine knee-flexion reps through the rule; returns emitted faults.
 
-        # Check max was tracked
-        assert depth_rule._max_depth_in_rep == 95.0
+    Each rep is REP_FRAMES in-rep frames followed by 10 standing frames.
+    """
+    rng = np.random.default_rng(seed)
+    history: deque = deque(maxlen=90)
+    faults = []
+    frame = 0
+    for rep_index in range(n_reps):
+        rep_number = rep_index + 1
+        for i in range(REP_FRAMES):
+            knee = PEAK_KNEE_FLEXION_DEG * 0.5 * (1.0 - math.cos(2.0 * math.pi * (i + 1) / REP_FRAMES))
+            angles = create_joint_angles(
+                frame=frame,
+                timestamp=frame / FPS,
+                knee_flexion_l=knee + rng.normal(0.0, noise_deg),
+                knee_flexion_r=knee + right_offset_deg + rng.normal(0.0, noise_deg),
+            )
+            fault = rule.evaluate(angles, history, in_rep=True, rep_number=rep_number)
+            if fault is not None:
+                faults.append(fault)
+            frame += 1
+        # The pipeline judges the rep on the frame the counter completes it.
+        fault = rule.finish_rep(angles, rep_number)
+        if fault is not None:
+            faults.append(fault)
+        for _ in range(10):
+            angles = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=3.0, knee_flexion_r=3.0)
+            fault = rule.evaluate(angles, history, in_rep=False, rep_number=rep_number + 1)
+            if fault is not None:
+                faults.append(fault)
+            frame += 1
+    return faults
 
 
 class TestSymmetryRule:
-    """Test SymmetryRule for bilateral asymmetry detection."""
+    """SymmetryRule evaluates one aggregate per rep over the bottom window
+    (S16) instead of firing on every noisy frame."""
 
     @pytest.fixture
     def symmetry_rule(self):
@@ -207,71 +256,62 @@ class TestSymmetryRule:
         """Symmetry rule should report BILATERAL_ASYMMETRY fault type."""
         assert symmetry_rule.fault_type == FaultType.BILATERAL_ASYMMETRY
 
-    def test_no_fault_when_symmetric(self, symmetry_rule, history):
-        """No fault when L/R angles are equal."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_flexion_l=60.0,
-            hip_flexion_r=60.0,
-            knee_flexion_l=70.0,
-            knee_flexion_r=70.0,
-        )
-        fault = symmetry_rule.evaluate(angles, history, in_rep=True)
-        assert fault is None
+    def test_symmetric_noisy_reps_produce_no_fault(self, symmetry_rule):
+        faults = _run_symmetry_reps(symmetry_rule, n_reps=6, right_offset_deg=0.0, noise_deg=SYMMETRIC_NOISE_DEG)
+        assert faults == []
+
+    def test_genuine_asymmetry_fires_once_per_rep(self, symmetry_rule):
+        faults = _run_symmetry_reps(symmetry_rule, n_reps=4, right_offset_deg=-ASYMMETRY_DEG, noise_deg=SYMMETRIC_NOISE_DEG)
+        assert len(faults) == 4
+        assert [fault.rep_number for fault in faults] == [1, 2, 3, 4]
+        for fault in faults:
+            assert fault.severity == FaultSeverity.MODERATE
+            assert fault.details["heavier_side"] == "left"
+            assert fault.details["asymmetry"] == pytest.approx(ASYMMETRY_DEG, abs=2.0)
+
+    def test_single_noisy_frame_cannot_fire(self, symmetry_rule, history):
+        """A per-frame 20 degree spike used to fire SEVERE immediately."""
+        angles = create_joint_angles(frame=0, knee_flexion_l=90.0, knee_flexion_r=70.0)
+        assert symmetry_rule.evaluate(angles, history, in_rep=True, rep_number=1) is None
 
     def test_no_fault_when_not_in_rep(self, symmetry_rule, history):
-        """No fault when not in rep even with asymmetry."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_flexion_l=60.0,
-            hip_flexion_r=40.0,  # 20° asymmetry
-        )
-        fault = symmetry_rule.evaluate(angles, history, in_rep=False)
-        assert fault is None
+        angles = create_joint_angles(frame=0, knee_flexion_l=60.0, knee_flexion_r=40.0)
+        assert symmetry_rule.evaluate(angles, history, in_rep=False) is None
 
-    def test_mild_asymmetry(self, symmetry_rule, history):
-        """Mild asymmetry (5-10°) should produce MILD fault."""
-        angles = create_joint_angles(
-            frame=0,
-            knee_flexion_l=70.0,
-            knee_flexion_r=63.0,  # 7° asymmetry on the default (knee) getter
-        )
-        fault = symmetry_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.severity == FaultSeverity.MILD
+    def test_severity_bands(self):
+        mild = _run_symmetry_reps(SymmetryRule(), n_reps=1, right_offset_deg=-7.0, noise_deg=0.0)
+        severe = _run_symmetry_reps(SymmetryRule(), n_reps=1, right_offset_deg=-20.0, noise_deg=0.0)
+        assert [fault.severity for fault in mild] == [FaultSeverity.MILD]
+        assert [fault.severity for fault in severe] == [FaultSeverity.SEVERE]
 
-    def test_moderate_asymmetry(self, symmetry_rule, history):
-        """Moderate asymmetry (10-15°) should produce MODERATE fault."""
-        angles = create_joint_angles(
-            frame=0,
-            knee_flexion_l=80.0,
-            knee_flexion_r=68.0,  # 12° asymmetry
-        )
-        fault = symmetry_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.severity == FaultSeverity.MODERATE
+    def test_uncounted_rep_is_discarded_without_a_fault(self, symmetry_rule, history):
+        """A false start or rejected descent never gets judged."""
+        for frame in range(REP_FRAMES):
+            angles = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=90.0, knee_flexion_r=70.0)
+            assert symmetry_rule.evaluate(angles, history, in_rep=True, rep_number=1) is None
+        symmetry_rule.discard_rep()
+        after = create_joint_angles(frame=REP_FRAMES, timestamp=REP_FRAMES / FPS, knee_flexion_l=3.0, knee_flexion_r=3.0)
+        assert symmetry_rule.evaluate(after, history, in_rep=False, rep_number=2) is None
+        assert symmetry_rule.finish_rep(after, 1) is None
 
-    def test_severe_asymmetry(self, symmetry_rule, history):
-        """Severe asymmetry (>15°) should produce SEVERE fault."""
-        angles = create_joint_angles(
-            frame=0,
-            knee_flexion_l=90.0,
-            knee_flexion_r=70.0,  # 20° asymmetry on the default (knee) getter
-        )
-        fault = symmetry_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.severity == FaultSeverity.SEVERE
+    def test_rep_ended_without_verdict_is_dropped_on_next_frame(self, symmetry_rule, history):
+        for frame in range(REP_FRAMES):
+            angles = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=90.0, knee_flexion_r=70.0)
+            symmetry_rule.evaluate(angles, history, in_rep=True, rep_number=1)
+        after = create_joint_angles(frame=REP_FRAMES, timestamp=REP_FRAMES / FPS, knee_flexion_l=3.0, knee_flexion_r=3.0)
+        assert symmetry_rule.evaluate(after, history, in_rep=False, rep_number=2) is None
+        assert symmetry_rule.finish_rep(after, 1) is None
 
-    def test_identifies_heavier_side(self, symmetry_rule, history):
-        """Fault details should identify which side is heavier."""
-        angles = create_joint_angles(
-            frame=0,
-            knee_flexion_l=90.0,  # Left deeper (20° asymmetry → severe)
-            knee_flexion_r=70.0,
-        )
-        fault = symmetry_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.details["heavier_side"] == "left"
+    def test_nan_frames_are_skipped_without_corrupting_the_rep(self, symmetry_rule, history):
+        frame = 0
+        for i in range(REP_FRAMES):
+            knee = PEAK_KNEE_FLEXION_DEG * 0.5 * (1.0 - math.cos(2.0 * math.pi * (i + 1) / REP_FRAMES))
+            left = NAN if i % 3 == 0 else knee
+            angles = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=left, knee_flexion_r=knee)
+            assert symmetry_rule.evaluate(angles, history, in_rep=True, rep_number=1) is None
+            frame += 1
+        after = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=3.0, knee_flexion_r=3.0)
+        assert symmetry_rule.evaluate(after, history, in_rep=False, rep_number=2) is None
 
 
 class TestForwardLeanRule:
@@ -324,6 +364,23 @@ class TestForwardLeanRule:
         fault = forward_lean_rule.evaluate(angles, history, in_rep=True)
         assert fault is not None
         assert fault.severity == FaultSeverity.SEVERE
+
+    def test_nan_trunk_flexion_is_skipped(self, forward_lean_rule, history):
+        angles = create_joint_angles(frame=0, trunk_flexion=NAN)
+        assert forward_lean_rule.evaluate(angles, history, in_rep=True) is None
+        # and the cooldown was not consumed
+        angles = create_joint_angles(frame=0, timestamp=0.0, trunk_flexion=120.0)
+        assert forward_lean_rule.evaluate(angles, history, in_rep=True) is not None
+
+    def test_cooldown_is_time_based_not_frame_based(self, forward_lean_rule, history):
+        """Triangulated skeletons carried frame_index 0 forever, so a frame
+        cooldown fired once per session (W1)."""
+        first = create_joint_angles(frame=0, timestamp=100.0, trunk_flexion=120.0)
+        assert forward_lean_rule.evaluate(first, history, in_rep=True) is not None
+        within = create_joint_angles(frame=0, timestamp=100.0 + FORWARD_LEAN_COOLDOWN_S / 2, trunk_flexion=120.0)
+        assert forward_lean_rule.evaluate(within, history, in_rep=True) is None
+        after = create_joint_angles(frame=0, timestamp=100.0 + FORWARD_LEAN_COOLDOWN_S, trunk_flexion=120.0)
+        assert forward_lean_rule.evaluate(after, history, in_rep=True) is not None
 
 
 class TestKneeValgusRule:
@@ -465,6 +522,57 @@ class TestKneeValgusRule:
         fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
         assert fault is None
 
+    def test_nan_valgus_is_skipped(self, knee_valgus_rule, history):
+        angles = create_joint_angles(
+            frame=0, knee_valgus_l=NAN, knee_valgus_r=30.0, foot_confidence_l=0.9, foot_confidence_r=0.9,
+        )
+        assert knee_valgus_rule.evaluate(angles, history, in_rep=True) is None
+
+    def test_nan_hip_adduction_fallback_is_skipped(self, knee_valgus_rule, history):
+        angles = create_joint_angles(frame=0, hip_adduction_l=NAN, hip_adduction_r=NAN)
+        assert knee_valgus_rule.evaluate(angles, history, in_rep=True) is None
+
+    def test_cooldown_is_time_based_not_frame_based(self, knee_valgus_rule, history):
+        first = create_joint_angles(frame=0, timestamp=50.0, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        assert knee_valgus_rule.evaluate(first, history, in_rep=True) is not None
+        within = create_joint_angles(frame=0, timestamp=50.0 + KNEE_VALGUS_COOLDOWN_S / 2, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        assert knee_valgus_rule.evaluate(within, history, in_rep=True) is None
+        after = create_joint_angles(frame=0, timestamp=50.0 + KNEE_VALGUS_COOLDOWN_S, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        assert knee_valgus_rule.evaluate(after, history, in_rep=True) is not None
+
+    def test_no_proportion_scaling(self, knee_valgus_rule):
+        """C8: the valgus metric has no valid hip-width scaling (F5)."""
+        class Proportions:
+            forward_lean_scale = 1.3
+        before = (knee_valgus_rule.mild_threshold, knee_valgus_rule.moderate_threshold, knee_valgus_rule.severe_threshold)
+        knee_valgus_rule.scale_for_proportions(Proportions())
+        assert (knee_valgus_rule.mild_threshold, knee_valgus_rule.moderate_threshold, knee_valgus_rule.severe_threshold) == before
+
+
+class TestBackRoundingRule:
+
+    @pytest.fixture
+    def history(self):
+        return deque(maxlen=90)
+
+    def test_nan_setup_frame_does_not_corrupt_setup(self, history):
+        rule = BackRoundingRule()
+        assert rule.evaluate(create_joint_angles(frame=0, timestamp=0.0, trunk_flexion=NAN), history, in_rep=True) is None
+        assert rule.evaluate(create_joint_angles(frame=1, timestamp=1 / FPS, trunk_flexion=170.0), history, in_rep=True) is None
+        assert rule.evaluate(create_joint_angles(frame=2, timestamp=2 / FPS, trunk_flexion=NAN), history, in_rep=True) is None
+        fault = rule.evaluate(create_joint_angles(frame=3, timestamp=3 / FPS, trunk_flexion=145.0), history, in_rep=True)
+        assert fault is not None
+        assert fault.details["setup_trunk_flexion"] == pytest.approx(170.0)
+
+    def test_cooldown_is_time_based_not_frame_based(self, history):
+        rule = BackRoundingRule()
+        rule.evaluate(create_joint_angles(frame=0, timestamp=10.0, trunk_flexion=170.0), history, in_rep=True)
+        assert rule.evaluate(create_joint_angles(frame=0, timestamp=10.1, trunk_flexion=145.0), history, in_rep=True) is not None
+        assert rule.evaluate(create_joint_angles(frame=0, timestamp=10.2, trunk_flexion=145.0), history, in_rep=True) is None
+        assert rule.evaluate(
+            create_joint_angles(frame=0, timestamp=10.1 + BACK_ROUNDING_COOLDOWN_S, trunk_flexion=145.0), history, in_rep=True,
+        ) is not None
+
 
 class TestRuleEngine:
     """Test RuleEngine orchestration."""
@@ -511,6 +619,24 @@ class TestRuleEngine:
         # First should fire, second should be deduplicated
         assert forward_lean_count <= 1
         assert forward_lean_count2 == 0
+
+    def test_deduplication_is_time_based(self):
+        """Two rules reporting the same fault type: the engine's dedup window
+        must be measured in seconds even when frame_index never advances."""
+        engine = RuleEngine(rules=[KneeValgusRule(), KneeValgusRule()])
+        angles = create_joint_angles(frame=0, timestamp=20.0, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        assert len(engine.evaluate(angles, in_rep=True, phase="bottom")) == 1
+        later = create_joint_angles(frame=0, timestamp=20.0 + DEDUP_INTERVAL_S + KNEE_VALGUS_COOLDOWN_S, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        assert len(engine.evaluate(later, in_rep=True, phase="bottom")) == 1
+
+    def test_nan_frame_produces_no_faults_and_no_state_change(self, engine):
+        angles = create_joint_angles(
+            frame=0, timestamp=0.0, trunk_flexion=NAN, knee_flexion_l=NAN, knee_flexion_r=NAN,
+            hip_adduction_l=NAN, hip_adduction_r=NAN, knee_valgus_l=NAN, knee_valgus_r=NAN,
+            foot_confidence_l=0.0, foot_confidence_r=0.0,
+        )
+        assert engine.evaluate(angles, in_rep=True, phase="bottom") == []
+        assert engine.evaluate_rep_complete(NAN, angles, rep_number=1) == []
 
     def test_multiple_faults_same_frame(self, engine):
         """Engine should detect multiple fault types in same frame."""

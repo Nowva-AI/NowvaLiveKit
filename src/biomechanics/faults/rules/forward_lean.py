@@ -6,11 +6,23 @@ Excessive forward lean can indicate mobility issues or
 compensatory patterns.
 """
 
+from __future__ import annotations
+
+import math
 from collections import deque
 from typing import Optional
 
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
-from biomechanics.faults.fault_types import FaultRule, FaultType, DEFAULT_THRESHOLDS, FAULT_MESSAGES
+from biomechanics.faults.fault_types import FaultRule, FaultType, FAULT_MESSAGES
+
+# Minimum time between two forward-lean reports (was 150 frames at 30 fps)
+FORWARD_LEAN_COOLDOWN_S = 5.0
+# Trunk flexion reading of a perfectly upright trunk (180-convention)
+UPRIGHT_TRUNK_DEG = 180.0
+# Baseline calibration: how far past the lifter's own clean-rep peak each tier sits.
+BASELINE_MILD_MARGIN_DEG = 10.0
+BASELINE_MODERATE_MARGIN_DEG = 15.0
+BASELINE_SEVERE_MARGIN_DEG = 20.0
 
 
 class ForwardLeanRule(FaultRule):
@@ -31,8 +43,10 @@ class ForwardLeanRule(FaultRule):
     - Moderate: below 135°
     - Severe: below 125°
 
-    Note: These thresholds may need adjustment based on
-    squat style (high bar vs low bar) and body proportions.
+    Body-proportion scaling works in lean space from the base thresholds
+    stored at construction: threshold = 180 - (180 - base) * scale, so a
+    long-femur lifter (scale > 1) is allowed MORE lean, and re-applying the
+    scaling never compounds (C8).
     """
 
     def __init__(
@@ -41,16 +55,39 @@ class ForwardLeanRule(FaultRule):
         moderate_threshold: float = 135.0,
         severe_threshold: float = 125.0,
     ):
+        self._base_mild_threshold = mild_threshold
+        self._base_moderate_threshold = moderate_threshold
+        self._base_severe_threshold = severe_threshold
         self.mild_threshold = mild_threshold
         self.moderate_threshold = moderate_threshold
         self.severe_threshold = severe_threshold
 
-        self._last_fault_frame: int = -150  # ~5s at 30fps — avoid spamming
+        self._last_fault_time_s: float = float("-inf")
+        self._baseline_peak_deg: float | None = None
+        self._proportions_scale: float = 1.0
 
     def scale_for_proportions(self, proportions) -> None:
-        self.mild_threshold *= proportions.forward_lean_scale
-        self.moderate_threshold *= proportions.forward_lean_scale
-        self.severe_threshold *= proportions.forward_lean_scale
+        self._proportions_scale = proportions.forward_lean_scale
+        self._rebuild_thresholds()
+
+    def apply_baseline(self, peak_trunk_flexion_deg: float) -> None:
+        """Tighten the thresholds to the lifter's own clean-rep peak lean."""
+        self._baseline_peak_deg = peak_trunk_flexion_deg
+        self._rebuild_thresholds()
+
+    def _rebuild_thresholds(self) -> None:
+        scale = self._proportions_scale
+        mild = UPRIGHT_TRUNK_DEG - (UPRIGHT_TRUNK_DEG - self._base_mild_threshold) * scale
+        moderate = UPRIGHT_TRUNK_DEG - (UPRIGHT_TRUNK_DEG - self._base_moderate_threshold) * scale
+        severe = UPRIGHT_TRUNK_DEG - (UPRIGHT_TRUNK_DEG - self._base_severe_threshold) * scale
+        if self._baseline_peak_deg is not None:
+            peak = self._baseline_peak_deg
+            mild = min(mild, peak - BASELINE_MILD_MARGIN_DEG)
+            moderate = min(moderate, peak - BASELINE_MODERATE_MARGIN_DEG)
+            severe = min(severe, peak - BASELINE_SEVERE_MARGIN_DEG)
+        self.mild_threshold = mild
+        self.moderate_threshold = moderate
+        self.severe_threshold = severe
 
     @property
     def fault_type(self) -> FaultType:
@@ -67,16 +104,18 @@ class ForwardLeanRule(FaultRule):
         Evaluate trunk flexion for excessive forward lean.
 
         Only fires during reps - standing position lean is not
-        a fault.
+        a fault. Frames with a NaN trunk angle are skipped.
         """
         if not in_rep:
             return None
 
-        # Cooldown between fault reports
-        if angles.frame_index - self._last_fault_frame < 150:
+        trunk_flexion = angles.trunk_flexion  # 180° = upright, lower = more lean
+        if math.isnan(trunk_flexion):
             return None
 
-        trunk_flexion = angles.trunk_flexion  # 180° = upright, lower = more lean
+        # Cooldown between fault reports
+        if angles.timestamp - self._last_fault_time_s < FORWARD_LEAN_COOLDOWN_S:
+            return None
 
         # Above mild threshold → upright enough → no fault
         if trunk_flexion > self.mild_threshold:
@@ -96,7 +135,7 @@ class ForwardLeanRule(FaultRule):
         if severity == FaultSeverity.NONE:
             return None
 
-        self._last_fault_frame = angles.frame_index
+        self._last_fault_time_s = angles.timestamp
 
         message_key = severity.value
         message = FAULT_MESSAGES[FaultType.FORWARD_LEAN].get(

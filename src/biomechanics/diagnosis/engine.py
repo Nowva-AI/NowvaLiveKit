@@ -266,7 +266,8 @@ class HypothesisEngine:
         self, rep: RepKinematicSummary, feature_name: str
     ) -> float:
         if feature_name == "knee_valgus_max":
-            return max(rep.knee_valgus_l, rep.knee_valgus_r)
+            sides = [v for v in (rep.knee_valgus_l, rep.knee_valgus_r) if not math.isnan(v)]
+            return max(sides) if sides else 0.0
         elif feature_name == "hip_y_asymmetry":
             return abs(rep.hip_y_l_at_bottom - rep.hip_y_r_at_bottom)
         elif feature_name == "depth_deficit":
@@ -279,6 +280,7 @@ class HypothesisEngine:
             return getattr(rep, feature_name)
 
     def _aggregate(self, values: list[float], method: str) -> float:
+        values = [v for v in values if not math.isnan(v)]
         if not values:
             return 0.0
         if method == "max":

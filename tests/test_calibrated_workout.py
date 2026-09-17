@@ -11,7 +11,6 @@ Phase 2: Perform 3 sets of 5 reps with calibrated fault thresholds.
 """
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -157,7 +156,6 @@ def run_test():
     config = load_pipeline_config(config_path)
     config.capture.device_id = camera_id
     config.bilstm.enabled = True
-    os.environ["ENABLE_PREIK_FILTERS"] = "true"
 
     pipeline = BiomechanicsPipeline(config)
     ipc_client = MockIPCClient()

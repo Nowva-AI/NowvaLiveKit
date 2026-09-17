@@ -8,10 +8,13 @@ from different data depending on capture mode:
 - SingleCameraValgusEstimator: frontal-plane projection angle (FPPA) from the
   image-plane 2D skeleton, plus an x-only knee-to-ankle separation ratio. Avoids
   the unreliable monocular depth axis entirely.
-- TriangulatedValgusEstimator: true 3D knee abduction angle from a
-  Grood-Suntay-style knee coordinate system (femoral medio-lateral axis vs tibial
-  long axis), which is robust to hip axial rotation by construction, plus a metric
-  3D separation ratio. Also exposes a hip internal-rotation estimate.
+- TriangulatedValgusEstimator: 3D knee deviation from the plane the knee tracks
+  in when it follows the toes (spanned by the hip-ankle line and the foot's
+  forward direction), so knees-over-toes reads neutral at any toe-out angle and
+  any stance width. Also exposes a signed hip internal-rotation estimate.
+
+Any measurement whose keypoints are missing is NaN, never a neutral 0.0.
+Frame: X = subject's left, Y = down, +Z = subject's back (forward = -Z).
 """
 
 from __future__ import annotations
@@ -20,15 +23,21 @@ from typing import NamedTuple, Protocol
 
 import numpy as np
 
-from biomechanics.utils.geometry import angle_between_vectors, normalize_vector
+from biomechanics.utils.geometry import WORLD_UP, angle_between_vectors, normalize_vector
 from biomechanics.utils.types import (
     CocoKeypoints as CK,
     Skeleton2D,
     Skeleton3D,
 )
 
+NAN = float("nan")
 # Minimum limb-segment length (m) in 3D for a stable angle.
 _MIN_SEGMENT_M = 0.05
+# Minimum horizontal foot length (m) for a usable foot direction.
+_MIN_FOOT_M = 0.05
+# Minimum sine of the angle between the hip-ankle line and the foot direction
+# for a well-conditioned knee-tracking plane.
+_MIN_PLANE_SINE = 0.1
 # Minimum horizontal ankle separation (px) for a stable 2D ratio.
 _MIN_ANKLE_SEP_PX = 1.0
 # Minimum hip-to-ankle vertical span (px) for a stable FPPA. A near-zero span
@@ -43,10 +52,11 @@ _MIN_ANKLE_SEP_M = 0.02
 # single-camera valgus confidence saturates to full. Below it, confidence decays
 # linearly toward zero as the subject rotates out of the frontal plane.
 _FRONTAL_NOMINAL = 0.35
-# Neutral separation ratio (knees exactly over ankles).
-_NEUTRAL_KASR = 1.0
 # Keypoint confidence floor for a usable measurement.
 _MIN_CONFIDENCE = 0.1
+# Medial direction along the pelvis ML axis (left hip - right hip) per side.
+_MEDIAL_SIGN_LEFT = -1.0
+_MEDIAL_SIGN_RIGHT = 1.0
 
 
 class ValgusResult(NamedTuple):
@@ -56,8 +66,8 @@ class ValgusResult(NamedTuple):
     foot_confidence_l: float
     foot_confidence_r: float
     kasr: float
-    hip_rotation_l: float = 0.0
-    hip_rotation_r: float = 0.0
+    hip_rotation_l: float = NAN
+    hip_rotation_r: float = NAN
 
 
 class ValgusEstimator(Protocol):
@@ -69,7 +79,7 @@ class ValgusEstimator(Protocol):
         ...
 
 
-_NEUTRAL_RESULT = ValgusResult(0.0, 0.0, 0.0, 0.0, _NEUTRAL_KASR, 0.0, 0.0)
+_MISSING_RESULT = ValgusResult(NAN, NAN, 0.0, 0.0, NAN, NAN, NAN)
 
 
 def _xy(skeleton_2d: Skeleton2D, index: int) -> tuple[np.ndarray | None, float]:
@@ -117,7 +127,7 @@ class SingleCameraValgusEstimator:
         skeleton_3d: Skeleton3D | None = None,
     ) -> ValgusResult:
         if skeleton_2d is None:
-            return _NEUTRAL_RESULT
+            return _MISSING_RESULT
 
         l_hip, c_lh = _xy(skeleton_2d, CK.LEFT_HIP)
         r_hip, c_rh = _xy(skeleton_2d, CK.RIGHT_HIP)
@@ -127,7 +137,7 @@ class SingleCameraValgusEstimator:
         r_ankle, c_ra = _xy(skeleton_2d, CK.RIGHT_ANKLE)
 
         if l_ankle is None or r_ankle is None:
-            return _NEUTRAL_RESULT
+            return _MISSING_RESULT
         midline_x = (l_ankle[0] + r_ankle[0]) / 2.0
 
         pelvis_width = (
@@ -156,12 +166,12 @@ class SingleCameraValgusEstimator:
         pelvis_width: float,
     ) -> float:
         if hip is None or knee is None or ankle is None:
-            return 0.0
+            return NAN
 
         if abs(ankle[1] - hip[1]) < _MIN_LEG_SPAN_PX:
-            return 0.0
+            return NAN
         if pelvis_width < _MIN_PELVIS_WIDTH_PX:
-            return 0.0
+            return NAN
 
         # Expected knee x if it tracked the hip-ankle line at the knee's height.
         # Clamp to the hip-ankle segment: a knee's y should fall between hip and
@@ -185,11 +195,11 @@ class SingleCameraValgusEstimator:
         r_ankle: np.ndarray | None,
     ) -> float:
         if l_knee is None or r_knee is None or l_ankle is None or r_ankle is None:
-            return _NEUTRAL_KASR
+            return NAN
         knee_sep = abs(l_knee[0] - r_knee[0])
         ankle_sep = abs(l_ankle[0] - r_ankle[0])
         if ankle_sep < _MIN_ANKLE_SEP_PX:
-            return _NEUTRAL_KASR
+            return NAN
         return float(knee_sep / ankle_sep)
 
     @staticmethod
@@ -220,15 +230,17 @@ class SingleCameraValgusEstimator:
 
 class TriangulatedValgusEstimator:
     """
-    True 3D knee abduction from triangulated (multi-camera) keypoints.
+    3D knee deviation from the knee-tracking plane, from triangulated keypoints.
 
-    Uses a Grood-Suntay-style knee coordinate system: the abduction/adduction
-    angle is 90 degrees minus the angle between the femoral medio-lateral axis
-    (pelvic ML axis made perpendicular to the femur) and the tibial long axis.
-    Pure sagittal-plane knee flexion keeps the tibia perpendicular to the ML axis
-    (abduction 0); knee cave tilts it, and the metric is robust to hip axial
-    rotation because it is defined in the joint's own frame, not the world
-    frontal plane. Positive = knee medial (valgus).
+    The plane spanned by the hip-ankle line and the foot's horizontal forward
+    direction is where the knee sits when it tracks over the toes. Valgus is the
+    femur's tilt out of that plane, signed positive when the knee lies medial
+    to it (knee cave) and negative when lateral (varus). Magnitude and sign
+    come from the same signed projection, and the reading is invariant to
+    toe-out and stance width by construction. The earlier Grood-Suntay
+    variant took its magnitude from the pelvic ML axis and its sign from the
+    hip-ankle line, which read a 10 degree knee cave as varus at 15 degrees of
+    toe-out.
     """
 
     def estimate(
@@ -237,7 +249,7 @@ class TriangulatedValgusEstimator:
         skeleton_3d: Skeleton3D | None = None,
     ) -> ValgusResult:
         if skeleton_3d is None:
-            return _NEUTRAL_RESULT
+            return _MISSING_RESULT
 
         l_hip, c_lh = _xyz(skeleton_3d, CK.LEFT_HIP)
         r_hip, c_rh = _xyz(skeleton_3d, CK.RIGHT_HIP)
@@ -245,65 +257,61 @@ class TriangulatedValgusEstimator:
         r_knee, c_rk = _xyz(skeleton_3d, CK.RIGHT_KNEE)
         l_ankle, c_la = _xyz(skeleton_3d, CK.LEFT_ANKLE)
         r_ankle, c_ra = _xyz(skeleton_3d, CK.RIGHT_ANKLE)
-        l_foot, _ = _xyz(skeleton_3d, CK.LEFT_FOOT_INDEX)
-        r_foot, _ = _xyz(skeleton_3d, CK.RIGHT_FOOT_INDEX)
+        l_toe, c_lt = _xyz(skeleton_3d, CK.LEFT_FOOT_INDEX)
+        r_toe, c_rt = _xyz(skeleton_3d, CK.RIGHT_FOOT_INDEX)
 
         if l_hip is None or r_hip is None:
-            return _NEUTRAL_RESULT
+            return _MISSING_RESULT
         ml_pelvis = normalize_vector(l_hip - r_hip)
 
-        valgus_l = self._abduction(l_hip, l_knee, l_ankle, ml_pelvis, medial_sign=-1.0)
-        valgus_r = self._abduction(r_hip, r_knee, r_ankle, ml_pelvis, medial_sign=1.0)
+        valgus_l = self._knee_deviation(l_hip, l_knee, l_ankle, l_toe, ml_pelvis, _MEDIAL_SIGN_LEFT)
+        valgus_r = self._knee_deviation(r_hip, r_knee, r_ankle, r_toe, ml_pelvis, _MEDIAL_SIGN_RIGHT)
 
-        hip_rot_l = self._hip_internal_rotation(l_hip, l_knee, l_ankle, l_foot, ml_pelvis)
-        hip_rot_r = self._hip_internal_rotation(r_hip, r_knee, r_ankle, r_foot, ml_pelvis)
+        hip_rot_l = self._hip_internal_rotation(l_hip, l_knee, l_ankle, l_toe, ml_pelvis, _MEDIAL_SIGN_LEFT)
+        hip_rot_r = self._hip_internal_rotation(r_hip, r_knee, r_ankle, r_toe, ml_pelvis, _MEDIAL_SIGN_RIGHT)
 
-        # Valgus confidence tracks the leg keypoints (GS abduction needs no toe).
-        conf_l = min(c_lh, c_lk, c_la)
-        conf_r = min(c_rh, c_rk, c_ra)
+        # Valgus confidence tracks every keypoint the metric needs, toe included.
+        conf_l = min(c_lh, c_lk, c_la, c_lt)
+        conf_r = min(c_rh, c_rk, c_ra, c_rt)
 
         kasr = self._kasr_3d(l_knee, r_knee, l_ankle, r_ankle)
 
         return ValgusResult(valgus_l, valgus_r, conf_l, conf_r, kasr, hip_rot_l, hip_rot_r)
 
     @staticmethod
-    def _abduction(
+    def _knee_deviation(
         hip: np.ndarray | None,
         knee: np.ndarray | None,
         ankle: np.ndarray | None,
+        toe: np.ndarray | None,
         ml_pelvis: np.ndarray,
         medial_sign: float,
     ) -> float:
-        if hip is None or knee is None or ankle is None:
-            return 0.0
+        if hip is None or knee is None or ankle is None or toe is None:
+            return NAN
 
+        leg_line = ankle - hip
         femur = knee - hip
-        tibia = ankle - knee
-        if np.linalg.norm(femur) < _MIN_SEGMENT_M or np.linalg.norm(tibia) < _MIN_SEGMENT_M:
-            return 0.0
+        foot = toe - ankle
+        foot_horizontal = foot - np.dot(foot, WORLD_UP) * WORLD_UP
 
-        femur_axis = normalize_vector(femur)
-        # Femoral medio-lateral axis: pelvic ML axis orthogonalized against the femur.
-        e_ml = ml_pelvis - np.dot(ml_pelvis, femur_axis) * femur_axis
-        if np.linalg.norm(e_ml) < 1e-6:
-            return 0.0
-        e_ml = normalize_vector(e_ml)
-        e_tibia = normalize_vector(tibia)
+        leg_len = float(np.linalg.norm(leg_line))
+        femur_len = float(np.linalg.norm(femur))
+        foot_len = float(np.linalg.norm(foot_horizontal))
+        if leg_len < _MIN_SEGMENT_M or femur_len < _MIN_SEGMENT_M or foot_len < _MIN_FOOT_M:
+            return NAN
 
-        # Neutral flexion keeps the tibia perpendicular to the ML axis (angle 90).
-        magnitude = abs(90.0 - angle_between_vectors(e_ml, e_tibia))
+        # Normal of the plane the knee tracks in when it follows the toes.
+        plane_normal = np.cross(leg_line, foot_horizontal)
+        if float(np.linalg.norm(plane_normal)) < _MIN_PLANE_SINE * leg_len * foot_len:
+            return NAN
+        plane_normal = normalize_vector(plane_normal)
+        # Orient the normal toward the midline so medial deviation is positive.
+        if np.dot(plane_normal, medial_sign * ml_pelvis) < 0:
+            plane_normal = -plane_normal
 
-        # Sign: positive when the knee sits medial to the hip-ankle line.
-        line = ankle - hip
-        line_len_sq = float(np.dot(line, line))
-        if line_len_sq < 1e-9:
-            return 0.0
-        proj = hip + (np.dot(knee - hip, line) / line_len_sq) * line
-        deviation = knee - proj
-        medial_axis = medial_sign * ml_pelvis
-        sign = 1.0 if np.dot(deviation, medial_axis) >= 0 else -1.0
-
-        return magnitude * sign
+        sine = float(np.dot(femur, plane_normal)) / femur_len
+        return float(np.degrees(np.arcsin(np.clip(sine, -1.0, 1.0))))
 
     @staticmethod
     def _hip_internal_rotation(
@@ -312,26 +320,31 @@ class TriangulatedValgusEstimator:
         ankle: np.ndarray | None,
         foot: np.ndarray | None,
         ml_pelvis: np.ndarray,
+        medial_sign: float,
     ) -> float:
         # Transverse-plane yaw of the foot relative to the pelvis forward axis,
         # about the thigh long axis. Diagnostic only (needs real 3D depth, so it
-        # is meaningful in triangulated mode). Positive = internal rotation.
+        # is meaningful in triangulated mode). Positive = internal rotation
+        # (toes turned toward the midline), negative = external rotation.
         if hip is None or knee is None or ankle is None or foot is None:
-            return 0.0
+            return NAN
 
         thigh_axis = normalize_vector(knee - hip)
         if np.linalg.norm(thigh_axis) < 1e-6:
-            return 0.0
+            return NAN
 
-        # Pelvis forward = ML axis crossed with the thigh (down) axis.
-        forward = normalize_vector(np.cross(ml_pelvis, thigh_axis))
+        # Pelvis forward (-Z when standing) = thigh (down) axis crossed with the ML axis.
+        forward = normalize_vector(np.cross(thigh_axis, ml_pelvis))
         foot_vec = foot - ankle
         # Project the foot and reference onto the transverse plane (normal = thigh).
         foot_t = foot_vec - np.dot(foot_vec, thigh_axis) * thigh_axis
         fwd_t = forward - np.dot(forward, thigh_axis) * thigh_axis
         if np.linalg.norm(foot_t) < 1e-6 or np.linalg.norm(fwd_t) < 1e-6:
-            return 0.0
-        return angle_between_vectors(fwd_t, foot_t)
+            return NAN
+        rotation = angle_between_vectors(fwd_t, foot_t)
+        if np.dot(foot_t, medial_sign * ml_pelvis) < 0:
+            rotation = -rotation
+        return rotation
 
     @staticmethod
     def _kasr_3d(
@@ -341,11 +354,11 @@ class TriangulatedValgusEstimator:
         r_ankle: np.ndarray | None,
     ) -> float:
         if l_knee is None or r_knee is None or l_ankle is None or r_ankle is None:
-            return _NEUTRAL_KASR
+            return NAN
         knee_sep = float(np.linalg.norm(l_knee - r_knee))
         ankle_sep = float(np.linalg.norm(l_ankle - r_ankle))
         if ankle_sep < _MIN_ANKLE_SEP_M:
-            return _NEUTRAL_KASR
+            return NAN
         return knee_sep / ankle_sep
 
 

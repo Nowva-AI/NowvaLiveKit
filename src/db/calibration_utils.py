@@ -70,6 +70,9 @@ def save_user_calibration(
     """Upsert calibration profile to DB.
 
     If a row for (user_id, movement_pattern) already exists, it is updated.
+    athlete_params / baseline of None mean "not measured this time": stored
+    values are kept, so a calibration that lost its body measurements can't
+    leave a returning user without diagnosis.
     """
     row = (
         db.query(UserCalibration)
@@ -84,8 +87,15 @@ def save_user_calibration(
         row.peaks = peaks
         row.thresholds = thresholds
         row.calibration_reps = calibration_reps
-        row.athlete_params = athlete_params
-        row.baseline = baseline
+        if athlete_params is not None:
+            row.athlete_params = athlete_params
+        elif row.athlete_params is not None:
+            logger.warning(
+                f"[CALIBRATION] No athlete_params in new calibration for user={user_id} "
+                f"pattern={movement_pattern} — keeping stored body measurements"
+            )
+        if baseline is not None:
+            row.baseline = baseline
         logger.info(
             f"[CALIBRATION] Updated calibration for user={user_id} pattern={movement_pattern}"
         )

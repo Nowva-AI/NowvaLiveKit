@@ -12,15 +12,39 @@ The signal is exercise-specific and provided by the active ExerciseProfile:
 
 State machine:
     IDLE  →  DESCENDING  →  BOTTOM  →  ASCENDING  →  IDLE
+
+Velocity is a least-squares slope over the last few samples (no lagging
+filter), BOTTOM is entered on a sign-aware velocity test so no-pause reps
+are never merged, and a false start falls back to IDLE once the signal is
+back at the standing baseline.
 """
 
-from enum import Enum
-from typing import Callable, Dict, Optional, List, Tuple
+from __future__ import annotations
+
+import math
 import time
+from collections import deque
+from enum import Enum
+from typing import Callable, Dict, List, Optional, Tuple
 
 from biomechanics.config import HipPositionCounterConfig
-from biomechanics.utils.types import JointAngles, FaultEvent, RepData
-from biomechanics.utils.filters import OneEuroFilter, ExponentialMovingAverage
+from biomechanics.utils.filters import ExponentialMovingAverage
+from biomechanics.utils.types import FaultEvent, JointAngles, RepData
+
+# Least-squares velocity window (samples). Five samples at 30 Hz is ~2 frames of lag.
+VELOCITY_WINDOW_FRAMES = 5
+# Position used by the state machine = mean of the last N samples.
+POSITION_WINDOW_FRAMES = 2
+# A rep may only start once the signal has moved this fraction of min_depth
+# away from the standing baseline (0.1 x 10 cm = 1 cm for squats).
+ENTRY_GATE_DEPTH_FRACTION = 0.1
+# BOTTOM requires the descent to have peaked at this multiple of the bottom
+# velocity threshold first, so the slow first frames of a descent never count
+# as the bottom.
+BOTTOM_ARM_VELOCITY_RATIO = 2.0
+# A gap longer than this re-initialises the velocity window.
+MAX_GAP_S = 0.5
+BASELINE_EMA_ALPHA = 0.15
 
 
 class SignalRepState(str, Enum):
@@ -63,35 +87,35 @@ class SignalRepCounter:
             lambda a: {"knee": a.knee_asymmetry, "hip": a.hip_asymmetry}
         )
 
-        # ---- signal processing ----
-        self._pos_filter = OneEuroFilter(
-            min_cutoff=self.config.position_min_cutoff,
-            beta=self.config.position_beta,
-        )
-        self._vel_ema = ExponentialMovingAverage(alpha=self.config.velocity_ema_alpha)
-        self._prev_position: Optional[float] = None
-        self._prev_timestamp: Optional[float] = None
+        # ---- signal window (raw samples) ----
+        self._signal_times: deque[float] = deque(maxlen=VELOCITY_WINDOW_FRAMES)
+        self._signal_values: deque[float] = deque(maxlen=VELOCITY_WINDOW_FRAMES)
 
         # ---- standing baseline ----
         self._standing_baseline: Optional[float] = None
-        self._baseline_ema = ExponentialMovingAverage(alpha=0.15)
+        self._baseline_ema = ExponentialMovingAverage(alpha=BASELINE_EMA_ALPHA)
 
         # ---- state dwell tracking ----
         self._frames_in_state: int = 0
 
         # ---- current-rep signal tracking ----
         self._max_position_in_rep: float = 0.0  # peak signal = rep bottom
+        self._peak_descent_velocity: float = 0.0
 
         # ---- current-rep metric tracking (from JointAngles) ----
         self._rep_start_time: float = 0.0
         self._rep_start_frame: int = 0
         self._frames_in_rep: int = 0
-        self._max_depth_angle: float = 0.0
-        self._min_depth_angle: float = 180.0
+        self._max_depth_angle: float = math.nan
+        self._min_depth_angle: float = math.nan
         self._bottom_time: float = 0.0
         self._current_faults: List[FaultEvent] = []
         self._asymmetry_sums: Dict[str, float] = {}
         self._angle_samples: int = 0
+
+        # Max depth metric of the last rep rejected for insufficient depth, so
+        # the pipeline can still report a depth fault for it.
+        self.rejected_rep_max_depth_angle: float = math.nan
 
         # ---- assessment mode ----
         self._assessment_mode: bool = False
@@ -112,6 +136,11 @@ class SignalRepCounter:
     def phase(self) -> str:
         return self.state.value
 
+    @property
+    def entry_gate_cm(self) -> float:
+        """Signal displacement from the standing baseline required to start a rep."""
+        return ENTRY_GATE_DEPTH_FRACTION * self.config.min_depth_cm
+
     # ------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------
@@ -125,12 +154,11 @@ class SignalRepCounter:
         self.rep_count = 0
         self._reset_rep_tracking()
         self._frames_in_state = 0
-        self._pos_filter.reset()
-        self._vel_ema.reset()
+        self._signal_times.clear()
+        self._signal_values.clear()
         self._baseline_ema.reset()
-        self._prev_position = None
-        self._prev_timestamp = None
         self._standing_baseline = None
+        self.rejected_rep_max_depth_angle = math.nan
 
     def add_fault(self, fault: FaultEvent) -> None:
         self._current_faults.append(fault)
@@ -138,11 +166,12 @@ class SignalRepCounter:
     def clear_current_faults(self) -> None:
         self._current_faults.clear()
 
-    def snapshot_rep_metrics(self) -> dict:
+    def snapshot_rep_metrics(self, now: float | None = None) -> dict:
         avg_asymmetry = {}
         for key, total in self._asymmetry_sums.items():
             avg_asymmetry[key] = total / self._angle_samples if self._angle_samples > 0 else 0.0
-        now = time.time()
+        if now is None:
+            now = time.time()
         return {
             "max_depth_angle": self._max_depth_angle,
             "min_depth_angle": self._min_depth_angle,
@@ -186,7 +215,8 @@ class SignalRepCounter:
         Returns:
             (RepData, None) when a rep completes.
             (None, "go_deeper") when a rep ends but depth was insufficient.
-            (None, None) otherwise.
+            (None, None) otherwise, including frames with a NaN signal or a
+            timestamp that has not advanced (duplicates), which are ignored.
         """
         # Backward compatibility: accept hip_position_cm as alias
         if signal_value is None and hip_position_cm is not None:
@@ -196,23 +226,26 @@ class SignalRepCounter:
         if faults:
             self._current_faults.extend(faults)
 
-        # ---- smooth position & compute causal velocity ----
-        smoothed_pos = self._pos_filter.filter(signal_value, timestamp)
+        if math.isnan(signal_value):
+            return None, None
+        if self._signal_times:
+            dt = timestamp - self._signal_times[-1]
+            if dt <= 0.0:
+                return None, None
+            if dt > MAX_GAP_S:
+                self._signal_times.clear()
+                self._signal_values.clear()
 
-        velocity = 0.0
-        if self._prev_position is not None and self._prev_timestamp is not None:
-            dt = timestamp - self._prev_timestamp
-            if dt > 0:
-                raw_vel = (smoothed_pos - self._prev_position) / dt
-                velocity = self._vel_ema.filter(raw_vel)
-
-        self._prev_position = smoothed_pos
-        self._prev_timestamp = timestamp
+        # ---- causal position & velocity from the raw sample window ----
+        self._signal_times.append(timestamp)
+        self._signal_values.append(signal_value)
+        position = self._window_position()
+        velocity = self._window_velocity()
 
         # ---- initialise standing baseline from first frames ----
         if self._standing_baseline is None:
-            self._standing_baseline = smoothed_pos
-            self._baseline_ema.value = smoothed_pos
+            self._standing_baseline = position
+            self._baseline_ema.value = position
 
         # ---- track state dwell ----
         self._frames_in_state += 1
@@ -226,50 +259,58 @@ class SignalRepCounter:
         # ---- state machine ----
         completed_rep: Optional[RepData] = None
         feedback: Optional[str] = None
+        cfg = self.config
 
         if self.state == SignalRepState.IDLE:
-            # Update standing baseline while idle
-            self._standing_baseline = self._baseline_ema.filter(smoothed_pos)
+            # Update the standing baseline only while actually standing still,
+            # so a slow descent cannot drag the baseline down with it.
+            if abs(velocity) < cfg.entry_vel_threshold:
+                self._standing_baseline = self._baseline_ema.filter(position)
 
-            if velocity > self.config.entry_vel_threshold:
+            if velocity > cfg.entry_vel_threshold and position > self._standing_baseline + self.entry_gate_cm:
                 self._change_state(SignalRepState.DESCENDING)
-                self._start_rep(smoothed_pos, timestamp, angles)
+                self._start_rep(position, timestamp, angles)
+                self._peak_descent_velocity = velocity
 
         elif self.state == SignalRepState.DESCENDING:
-            # Track peak position (squat bottom = local max)
-            if smoothed_pos > self._max_position_in_rep:
-                self._max_position_in_rep = smoothed_pos
-                self._bottom_time = timestamp
+            self._track_bottom(position, timestamp)
+            self._peak_descent_velocity = max(self._peak_descent_velocity, velocity)
 
-            if self._frames_in_state >= self.config.min_frames_descending:
-                if abs(velocity) < self.config.bottom_vel_threshold:
-                    self._change_state(SignalRepState.BOTTOM)
+            if self._is_false_start(position):
+                self._abort_rep()
+            elif (
+                self._frames_in_state >= cfg.min_frames_descending
+                and self._peak_descent_velocity >= BOTTOM_ARM_VELOCITY_RATIO * cfg.bottom_vel_threshold
+                and velocity < cfg.bottom_vel_threshold
+            ):
+                self._change_state(SignalRepState.BOTTOM)
 
         elif self.state == SignalRepState.BOTTOM:
             # Still track depth in case bottom drifts deeper
-            if smoothed_pos > self._max_position_in_rep:
-                self._max_position_in_rep = smoothed_pos
-                self._bottom_time = timestamp
+            self._track_bottom(position, timestamp)
 
-            if self._frames_in_state >= self.config.min_frames_bottom:
-                if velocity < -self.config.ascending_vel_threshold:
+            if self._is_false_start(position):
+                self._abort_rep()
+            elif self._frames_in_state >= cfg.min_frames_bottom:
+                if velocity < -cfg.ascending_vel_threshold:
                     self._change_state(SignalRepState.ASCENDING)
 
         elif self.state == SignalRepState.ASCENDING:
-            if self._frames_in_state >= self.config.min_frames_ascending:
-                returned = smoothed_pos < self._standing_baseline + self.config.standing_return_cm
+            if self._frames_in_state >= cfg.min_frames_ascending:
+                returned = position < self._standing_baseline + cfg.standing_return_cm
                 if returned:
                     # Validate rep
                     depth = self._max_position_in_rep - self._standing_baseline
-                    depth_ok = self._assessment_mode or depth >= self.config.min_depth_cm
+                    depth_ok = self._assessment_mode or depth >= cfg.min_depth_cm
                     if (
-                        self._frames_in_rep >= self.config.min_rep_duration_frames
+                        self._frames_in_rep >= cfg.min_rep_duration_frames
                         and depth_ok
                     ):
                         self.rep_count += 1
                         completed_rep = self._create_rep_data(timestamp, angles)
                     elif not depth_ok:
                         feedback = "go_deeper"
+                        self.rejected_rep_max_depth_angle = self._max_depth_angle
 
                     self._change_state(SignalRepState.IDLE)
                     self._reset_rep_tracking()
@@ -279,6 +320,43 @@ class SignalRepCounter:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _window_position(self) -> float:
+        recent = list(self._signal_values)[-POSITION_WINDOW_FRAMES:]
+        return sum(recent) / len(recent)
+
+    def _window_velocity(self) -> float:
+        n = len(self._signal_times)
+        if n < 2:
+            return 0.0
+        time_mean = sum(self._signal_times) / n
+        value_mean = sum(self._signal_values) / n
+        covariance = 0.0
+        variance = 0.0
+        for sample_time, sample_value in zip(self._signal_times, self._signal_values):
+            time_offset = sample_time - time_mean
+            covariance += time_offset * (sample_value - value_mean)
+            variance += time_offset * time_offset
+        if variance <= 0.0:
+            return 0.0
+        return covariance / variance
+
+    def _track_bottom(self, position: float, timestamp: float) -> None:
+        if position > self._max_position_in_rep:
+            self._max_position_in_rep = position
+            self._bottom_time = timestamp
+
+    def _is_false_start(self, position: float) -> bool:
+        # The signal is back at the standing baseline without ever ascending:
+        # noise, a shuffle, or an aborted descent — not a rep.
+        return (
+            self._frames_in_rep > self.config.min_frames_descending
+            and position < self._standing_baseline + self.entry_gate_cm
+        )
+
+    def _abort_rep(self) -> None:
+        self._change_state(SignalRepState.IDLE)
+        self._reset_rep_tracking()
 
     def _change_state(self, new_state: HipPositionState) -> None:
         self.state = new_state
@@ -294,12 +372,14 @@ class SignalRepCounter:
         self._rep_start_frame = angles.frame_index if angles else 0
         self._frames_in_rep = 1
         self._max_position_in_rep = position
-        self._max_depth_angle = 0.0
-        self._min_depth_angle = 180.0
+        self._peak_descent_velocity = 0.0
+        self._max_depth_angle = math.nan
+        self._min_depth_angle = math.nan
         self._bottom_time = 0.0
         self._current_faults = []
         self._asymmetry_sums = {}
         self._angle_samples = 0
+        self.rejected_rep_max_depth_angle = math.nan
 
         if angles is not None:
             self._track_angles(angles)
@@ -307,13 +387,18 @@ class SignalRepCounter:
     def _track_angles(self, angles: JointAngles) -> None:
         depth = self._depth_metric_fn(angles)
 
-        if depth > self._max_depth_angle:
+        if math.isnan(depth):
+            return
+
+        if math.isnan(self._max_depth_angle) or depth > self._max_depth_angle:
             self._max_depth_angle = depth
 
-        if depth < self._min_depth_angle:
+        if math.isnan(self._min_depth_angle) or depth < self._min_depth_angle:
             self._min_depth_angle = depth
 
         asym = self._asymmetry_fn(angles)
+        if any(math.isnan(val) for val in asym.values()):
+            return
         for key, val in asym.items():
             self._asymmetry_sums[key] = self._asymmetry_sums.get(key, 0.0) + val
         self._angle_samples += 1
@@ -323,8 +408,9 @@ class SignalRepCounter:
         self._rep_start_frame = 0
         self._frames_in_rep = 0
         self._max_position_in_rep = 0.0
-        self._max_depth_angle = 0.0
-        self._min_depth_angle = 180.0
+        self._peak_descent_velocity = 0.0
+        self._max_depth_angle = math.nan
+        self._min_depth_angle = math.nan
         self._bottom_time = 0.0
         self._current_faults = []
         self._asymmetry_sums = {}

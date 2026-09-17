@@ -1,36 +1,45 @@
 """
 Knee Valgus Fault Detection Rule
 
-Detects knee cave (valgus) using the frontal-plane deviation of the knee
-from the hip-to-big-toe reference line (primary), with fallback to hip
-adduction angle when foot landmarks are unavailable.
+Detects knee cave (valgus) using the mode-aware knee valgus metric (primary),
+with fallback to hip adduction angle when foot landmarks are unavailable.
 """
 
+from __future__ import annotations
+
+import math
 from collections import deque
 from typing import Optional
 
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
-from biomechanics.faults.fault_types import FaultRule, FaultType, DEFAULT_THRESHOLDS, FAULT_MESSAGES
+from biomechanics.faults.fault_types import FaultRule, FaultType, FAULT_MESSAGES
 
-# Minimum foot landmark confidence to use toe-based valgus metric
+# Minimum foot landmark confidence to use the toe-based valgus metric
 FOOT_CONFIDENCE_THRESHOLD = 0.3
+# Minimum time between two valgus reports (was 30 frames at 30 fps)
+KNEE_VALGUS_COOLDOWN_S = 1.0
+# Both sides within this many degrees of each other report as "both"
+BILATERAL_AGREEMENT_DEG = 2.0
 
 
 class KneeValgusRule(FaultRule):
     """
-    Knee valgus detection using knee-to-toe deviation with hip adduction fallback.
+    Knee valgus detection using the knee valgus metric with hip adduction fallback.
 
     Primary metric (when foot landmarks available):
-    - Frontal-plane angle between the hip-to-toe reference line and the
-      hip-to-knee vector. Positive = knee medial to toe (valgus).
+    - knee_valgus_l/r from the pipeline's valgus estimator (2D FPPA or 3D
+      knee deviation). Positive = knee medial (valgus).
 
     Fallback metric (when foot landmarks unavailable):
     - Hip adduction angle (thigh medial deviation from sagittal plane).
       Used when foot_confidence is below FOOT_CONFIDENCE_THRESHOLD.
 
     The primary metric's scale depends on capture mode (2D FPPA vs. 3D
-    abduction), but hip adduction's scale does not — so the fallback has its
+    deviation), but hip adduction's scale does not — so the fallback has its
     own threshold triple, defaulting to the primary one when not given.
+
+    Thresholds are not scaled by body proportions: the metric has no valid
+    hip-width dependence (C8).
     """
 
     def __init__(
@@ -55,19 +64,11 @@ class KneeValgusRule(FaultRule):
             fallback_severe_threshold if fallback_severe_threshold is not None else severe_threshold
         )
 
-        self._last_fault_frame: int = -30
+        self._last_fault_time_s: float = float("-inf")
 
     @property
     def fault_type(self) -> FaultType:
         return FaultType.KNEE_VALGUS
-
-    def scale_for_proportions(self, proportions) -> None:
-        self.mild_threshold *= proportions.valgus_scale
-        self.moderate_threshold *= proportions.valgus_scale
-        self.severe_threshold *= proportions.valgus_scale
-        self.fallback_mild_threshold *= proportions.valgus_scale
-        self.fallback_moderate_threshold *= proportions.valgus_scale
-        self.fallback_severe_threshold *= proportions.valgus_scale
 
     def evaluate(
         self,
@@ -77,15 +78,16 @@ class KneeValgusRule(FaultRule):
         rep_number: int = 0,
     ) -> Optional[FaultEvent]:
         """
-        Evaluate for knee valgus using toe-based metric or hip adduction fallback.
+        Evaluate for knee valgus using the toe-based metric or hip adduction fallback.
 
-        Only fires during reps and when valgus exceeds the mild threshold.
+        Only fires at the bottom of a rep, when valgus exceeds the mild
+        threshold, and skips frames where either side's metric is NaN.
         """
         if not in_rep or self._phase != "bottom":
             return None
 
         # Cooldown between fault reports
-        if angles.frame_index - self._last_fault_frame < 30:
+        if angles.timestamp - self._last_fault_time_s < KNEE_VALGUS_COOLDOWN_S:
             return None
 
         # Prefer toe-based valgus when both feet have sufficient confidence
@@ -106,6 +108,9 @@ class KneeValgusRule(FaultRule):
                 self.fallback_severe_threshold,
             )
 
+        if math.isnan(valgus_l) or math.isnan(valgus_r):
+            return None
+
         max_valgus = max(valgus_l, valgus_r)
 
         if max_valgus < mild:
@@ -119,11 +124,11 @@ class KneeValgusRule(FaultRule):
         if severity == FaultSeverity.NONE:
             return None
 
-        self._last_fault_frame = angles.frame_index
+        self._last_fault_time_s = angles.timestamp
 
         # Determine which side has worse valgus (higher positive = more cave)
         affected_side = "left" if valgus_l > valgus_r else "right"
-        if abs(valgus_l - valgus_r) < 2.0:
+        if abs(valgus_l - valgus_r) < BILATERAL_AGREEMENT_DEG:
             affected_side = "both"
 
         message_key = severity.value

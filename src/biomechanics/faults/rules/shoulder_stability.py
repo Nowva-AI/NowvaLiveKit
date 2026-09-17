@@ -11,6 +11,9 @@ from typing import Callable, Optional
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
 from biomechanics.faults.fault_types import FaultRule, FaultType
 
+# Minimum time between two shoulder-stability reports (was 60 frames at 30 fps)
+SHOULDER_STABILITY_COOLDOWN_S = 2.0
+
 
 class ShoulderStabilityRule(FaultRule):
     """
@@ -44,7 +47,7 @@ class ShoulderStabilityRule(FaultRule):
         self._variance_threshold = variance_threshold
         self._fault_message = fault_message
 
-        self._last_fault_frame: int = -60
+        self._last_fault_time_s: float = float("-inf")
 
     @property
     def fault_type(self) -> FaultType:
@@ -60,7 +63,7 @@ class ShoulderStabilityRule(FaultRule):
         if not in_rep:
             return None
 
-        if angles.frame_index - self._last_fault_frame < 60:
+        if angles.timestamp - self._last_fault_time_s < SHOULDER_STABILITY_COOLDOWN_S:
             return None
 
         val_l = self._getter_l(angles)
@@ -73,7 +76,7 @@ class ShoulderStabilityRule(FaultRule):
         if max_drift < self._variance_threshold:
             return None
 
-        self._last_fault_frame = angles.frame_index
+        self._last_fault_time_s = angles.timestamp
 
         excess = max_drift - self._variance_threshold
         if excess > 20.0:

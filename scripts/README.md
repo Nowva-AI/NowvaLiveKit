@@ -24,7 +24,6 @@ Live hardware validation scripts (not pytest — these require a webcam or physi
 - `test_ik_live.py` — inverse kinematics joint angle overlay
 - `test_bilstm_live.py` — BiLSTM rep counter live validation
 - `test_barbell_detection.py` — YOLO barbell detection on webcam
-- `compare_skeletons.py` — side-by-side raw vs filtered skeleton comparison
 
 ### tools/
 Utilities for data generation, model management, and audio:
@@ -33,4 +32,4 @@ Utilities for data generation, model management, and audio:
 - `generate_opensim_data.py` — generate synthetic squat training data
 - `generate_cue_audio.py` — generate pre-cached coaching cue audio via OpenAI TTS
 - `simulate_squat_workout.py` — simulate a full workout through the IPC pipeline
-- `debug_filters.py` — step-by-step filter layer visualization
+- `capture_audit.py` — record a webcam clip and audit every pre-IK chain stage frame by frame

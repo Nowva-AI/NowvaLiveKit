@@ -37,11 +37,11 @@ from biomechanics.calibration import (
 from biomechanics.coaching.ipc_bridge import IPCBridge
 from biomechanics.coaching.session_tracker import SessionTracker
 from biomechanics.config import load_pipeline_config
-from biomechanics.utils.types import CocoKeypoints as CK
 from biomechanics.diagnosis.bridge import build_anthro_dict, build_rom_dict
 from biomechanics.diagnosis.demo_builder import build_demo_data
 from biomechanics.diagnosis.engine import HypothesisEngine
 from biomechanics.diagnosis.rep_scoring import score_set
+from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.diagnosis.types import SetFeatures
 from biomechanics.viz import draw_skeleton, draw_fps, FPSCounter
 from biomechanics.viz.live_stream import get_display_sink
@@ -68,6 +68,19 @@ DEMO_FINISH_TIMEOUT_S = 6.0
 # Re-arm the readiness gate this long before rest ends, so the gate is
 # already latched when the timer expires and the user can start at once.
 GATE_PREARM_SECONDS = 3.0
+
+# ROM baseline used until calibration reps measure the real peaks.
+DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0}
+
+# Body measurement accumulates during the assessment reps. Reps finished
+# before it completes are held (their bottom frames are kept) so they still
+# get kinematics; past this wait after the last rep they go through without.
+ASSESSMENT_MEASUREMENT_WAIT_S = 5.0
+
+# Camera extrinsics are a property of the rig, so they persist across
+# sessions: one file per camera set, reused until deleted.
+RIG_CALIBRATION_DIR = Path.home() / ".nowva"
+FALLBACK_USER_HEIGHT_M = 1.885
 
 # --- HUD styling (BGR brand palette) ---
 HUD_CYAN = (255, 229, 0)
@@ -212,31 +225,70 @@ def _save_calibration_report(peaks: dict, profile: dict, cal_reps: int, out_dir:
     print(f"  Saved: {md_path}")
 
 
+def _throttle(pipeline, result, target_fps: float) -> None:
+    # Multi-camera get_pose already waits for the next synced frame; sleeping on
+    # top of it skips frames because the next call returns the newest set.
+    if pipeline._multi_camera:
+        return
+    total_ms = sum(result.latency_ms.values())
+    target_ms = 1000.0 / target_fps
+    if total_ms < target_ms:
+        time.sleep((target_ms - total_ms) / 1000.0)
+
+
 def _extract_athlete_params(pipeline) -> dict | None:
-    """Extract athlete body proportions from calibrated bone constraints."""
-    if not (
-        pipeline._bone_constraints.is_calibrated
-        and pipeline._bone_constraints.body_proportions is not None
-    ):
-        return None
-    proportions = pipeline._bone_constraints.body_proportions
-    shoulder_width = pipeline._bone_constraints._calibrated_lengths.get(
-        (CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER), 0.40,
-    )
-    foot_l = pipeline._bone_constraints._calibrated_lengths.get(
-        (CK.LEFT_ANKLE, CK.LEFT_FOOT_INDEX), 0.26,
-    )
-    foot_r = pipeline._bone_constraints._calibrated_lengths.get(
-        (CK.RIGHT_ANKLE, CK.RIGHT_FOOT_INDEX), 0.26,
-    )
-    return {
-        "shoulder_width_m": shoulder_width,
-        "femur_avg_m": proportions.femur_length_avg,
-        "torso_avg_m": proportions.torso_length_avg,
-        "hip_width_m": proportions.hip_width,
-        "tibia_avg_m": proportions.tibia_length_avg,
-        "foot_avg_m": (foot_l + foot_r) / 2.0,
+    return pipeline.body_calibration.to_athlete_params()
+
+
+def _adopt_measured_athlete_params(pipeline, session_tracker, bridge, baseline: dict) -> dict | None:
+    athlete_params = _extract_athlete_params(pipeline)
+    if athlete_params is not None:
+        session_tracker.set_athlete_params(athlete_params, baseline)
+        bridge.set_athlete_params(athlete_params, baseline)
+        print(
+            f"  [DIAGNOSIS] Body measured: "
+            f"shoulder={athlete_params['shoulder_width_m']:.3f}m "
+            f"femur={athlete_params['femur_avg_m']:.3f}m "
+            f"tibia={athlete_params['tibia_avg_m']:.3f}m"
+        )
+    return athlete_params
+
+
+def _build_calibration_complete_message(
+    movement_pattern: str,
+    peaks: dict,
+    cal_profile: dict,
+    athlete_params: dict | None,
+    baseline: dict,
+) -> dict:
+    message = {
+        "type": "calibration_complete",
+        "movement_pattern": movement_pattern,
+        "peaks": peaks,
+        "thresholds": {k: v for k, v in cal_profile.items() if k != "defaults"},
     }
+    # Omitted, never None, when the body was not measured: the voice agent
+    # persists whatever arrives here.
+    if athlete_params is not None:
+        message["athlete_params"] = athlete_params
+        message["baseline"] = baseline
+    return message
+
+
+def _rig_calibration_path(device_ids: list[int]) -> Path:
+    camera_key = "-".join(str(device_id) for device_id in device_ids)
+    return RIG_CALIBRATION_DIR / f"rig_calibration_cams_{camera_key}.json"
+
+
+def _resolve_user_height_m(user_height_cm: float | None) -> float:
+    if user_height_cm:
+        return user_height_cm / 100.0
+    height_m = float(os.getenv("NOWVA_USER_HEIGHT_M", str(FALLBACK_USER_HEIGHT_M)))
+    print(
+        f"[MULTI-CAM] WARNING: no user height in profile — T-pose calibration "
+        f"assumes {height_m} m (NOWVA_USER_HEIGHT_M); every 3D length scales with it"
+    )
+    return height_m
 
 
 def _serialize_diagnosis(diagnosis_result, score_summary) -> tuple[dict, dict]:
@@ -349,6 +401,7 @@ def run_biomechanics_pipeline(
     calibration_mode: bool = False,
     calibration_reps: int = 5,
     preload: bool = False,
+    user_height_cm: float | None = None,
 ):
     """
     Run the full biomechanics pipeline as a subprocess.
@@ -399,16 +452,26 @@ def run_biomechanics_pipeline(
             pipeline.start_capture()
             print("[PRELOAD] Camera opened — entering frame loop")
 
-        # Multi-camera calibration (if needed)
+        # Multi-camera calibration: config triangulation.calibration_file (loaded
+        # by the pipeline) wins, then this rig's saved calibration, then T-pose.
         if pipeline._multi_camera and pipeline._multi_camera_provider is not None:
             if not pipeline._multi_camera_provider.is_calibrated:
-                height_m = float(os.getenv("NOWVA_USER_HEIGHT_M", "1.885"))
-                print(f"[MULTI-CAM] Running T-pose calibration (height={height_m}m)...")
-                pipeline._multi_camera_provider.calibrate(
-                    height_m=height_m,
-                    save_path="outputs/calibration.json",
-                )
-                print("[MULTI-CAM] Calibration complete")
+                rig_calibration_path = _rig_calibration_path(config.triangulation.device_ids)
+                if rig_calibration_path.exists():
+                    pipeline._multi_camera_provider.load_calibration(str(rig_calibration_path))
+                    print(
+                        f"[MULTI-CAM] Loaded rig calibration {rig_calibration_path} "
+                        f"(delete it to recalibrate after moving cameras)"
+                    )
+                else:
+                    height_m = _resolve_user_height_m(user_height_cm)
+                    print(f"[MULTI-CAM] Running T-pose calibration (height={height_m}m)...")
+                    rig_calibration_path.parent.mkdir(parents=True, exist_ok=True)
+                    pipeline._multi_camera_provider.calibrate(
+                        height_m=height_m,
+                        save_path=str(rig_calibration_path),
+                    )
+                    print(f"[MULTI-CAM] Calibration complete — saved to {rig_calibration_path}")
 
         bridge = IPCBridge(ipc_client)
         session_tracker = SessionTracker(bridge, config=config.coaching)
@@ -443,9 +506,16 @@ def run_biomechanics_pipeline(
         ipc_client = valgus_recorder.tap(ipc_client)
         bridge.ipc_client = ipc_client
 
-    pipeline_inspector = build_inspector(out_dir, config.target_fps, pipeline._multi_camera)
+    pipeline_inspector = build_inspector(
+        out_dir, config.target_fps, pipeline._multi_camera, pipeline.preik_stage_names,
+    )
     if pipeline_inspector is not None:
         pipeline.enable_inspect()
+
+    # Session-scoped body measurements feeding diagnosis: restored from the
+    # stored calibration, or adopted once the pipeline finishes measuring.
+    athlete_params: dict | None = None
+    athlete_baseline: dict = dict(DEFAULT_ROM_BASELINE)
 
     # --- Apply existing calibration if provided ---
     if calibration_file and os.path.exists(calibration_file):
@@ -463,6 +533,9 @@ def run_biomechanics_pipeline(
             stored_params = stored.get("athlete_params")
             if stored_params:
                 stored_baseline = stored.get("baseline") or {}
+                pipeline.apply_athlete_params(stored_params)
+                athlete_params = stored_params
+                athlete_baseline = stored_baseline
                 session_tracker.set_athlete_params(stored_params, stored_baseline)
                 bridge.set_athlete_params(stored_params, stored_baseline)
                 print(
@@ -491,18 +564,12 @@ def run_biomechanics_pipeline(
         print(f"  ASSESSMENT PHASE ({ASSESSMENT_TARGET_REPS} bodyweight squats)")
         print(f"{'='*60}\n")
 
-        # Wait for readiness gate + bone constraint calibration.
-        # The pre-IK chain no longer calls bone_constraints (stages commented
-        # out in preik_chain.py), so drive the record-only calibration pass
-        # from here instead: during its calibration window enforce() measures
-        # bone lengths and returns the skeleton unchanged, and nothing calls
-        # it after this loop exits — the skeleton stream stays unfiltered.
-        print("  [ASSESSMENT] Waiting for readiness gate + bone measurement...")
+        # Wait for the readiness gate only. Body measurements accumulate inside
+        # the pipeline on every ready frame during the assessment reps.
+        print("  [ASSESSMENT] Waiting for readiness gate...")
         try:
-            while not (pipeline.is_ready and pipeline._bone_constraints.is_calibrated):
+            while not pipeline.is_ready:
                 result = pipeline.process_frame()
-                if pipeline.is_ready and result.skeleton_3d is not None:
-                    pipeline._bone_constraints.enforce(result.skeleton_3d)
 
                 frame = pipeline.last_frame
                 if frame is not None:
@@ -512,23 +579,15 @@ def run_biomechanics_pipeline(
                     fps_counter.update()
                     draw_fps(display, fps_counter.fps)
 
-                    standing_gate = pipeline._standing_gate
-                    if not standing_gate.is_ready:
-                        current, required = standing_gate.progress
-                        hint = GATE_FAILURE_HINTS.get(standing_gate.last_failure, "HOLD STILL")
-                        pill_text = f"{hint}  {current}/{required}"
-                    else:
-                        current, required = pipeline._bone_constraints.progress
-                        pill_text = f"CALIBRATING {current}/{required}"
-                    _draw_hud_pill(display, pill_text, accent=HUD_VIOLET)
+                    readiness_gate = pipeline._readiness_gate
+                    current, required = readiness_gate.progress
+                    hint = GATE_FAILURE_HINTS.get(readiness_gate.last_failure, "HOLD STILL")
+                    _draw_hud_pill(display, f"{hint}  {current}/{required}", accent=HUD_VIOLET)
                     _draw_wordmark(display)
 
                     display_sink.show(display)
 
-                total_ms = sum(result.latency_ms.values())
-                target_ms = 1000.0 / config.target_fps
-                if total_ms < target_ms:
-                    time.sleep((target_ms - total_ms) / 1000.0)
+                _throttle(pipeline, result, config.target_fps)
         except KeyboardInterrupt:
             print("\nAssessment stopped by user")
             pipeline.release()
@@ -537,22 +596,7 @@ def run_biomechanics_pipeline(
 
         # Tracking is locked in — tell the agent it can cue the first squat
         ipc_client.send_message({"type": "assessment_ready"})
-        print("  [ASSESSMENT] Gate passed + bones measured — sent assessment_ready")
-
-        # Extract athlete params from bone constraints
-        athlete_params = _extract_athlete_params(pipeline)
-        if athlete_params is not None:
-            baseline_stub = {"peakDorsi": 35.0, "peakKneeFlex": 120.0}
-            session_tracker.set_athlete_params(athlete_params, baseline_stub)
-            bridge.set_athlete_params(athlete_params, baseline_stub)
-            print(
-                f"  [ASSESSMENT] Athlete params set: "
-                f"shoulder={athlete_params['shoulder_width_m']:.3f}m "
-                f"femur={athlete_params['femur_avg_m']:.3f}m "
-                f"tibia={athlete_params['tibia_avg_m']:.3f}m"
-            )
-        else:
-            print("  [ASSESSMENT] WARNING: Bone constraints not calibrated — diagnosis unavailable")
+        print("  [ASSESSMENT] Gate passed — sent assessment_ready")
 
         def _run_demo_phase(demo_data) -> bool:
             """Drive the choreographed demo from agent messages. Returns False if user quit."""
@@ -574,8 +618,9 @@ def run_biomechanics_pipeline(
                 while True:
                     result = pipeline.process_frame()
 
-                    if result.skeleton_3d is not None:
-                        bridge.send_live_pose(result.skeleton_3d.to_numpy())
+                    live_pose = result.skeleton_3d_display or result.skeleton_3d_raw
+                    if live_pose is not None:
+                        bridge.send_live_pose(live_pose.to_numpy())
 
                     if not started_ack_sent and bridge.wait_started(timeout=0):
                         ipc_client.send_message({"type": "demo_started"})
@@ -622,10 +667,7 @@ def run_biomechanics_pipeline(
                         fps_counter.update()
                         display_sink.show(display)
 
-                    total_ms = sum(result.latency_ms.values())
-                    target_ms = 1000.0 / config.target_fps
-                    if total_ms < target_ms:
-                        time.sleep((target_ms - total_ms) / 1000.0)
+                    _throttle(pipeline, result, config.target_fps)
             finally:
                 bridge.stop()
                 display_sink.send_event({"type": "demo", "action": "end"})
@@ -650,15 +692,25 @@ def run_biomechanics_pipeline(
 
                 print(f"\n  [ASSESSMENT] Round {assessment_round} — collecting {ASSESSMENT_TARGET_REPS} reps")
 
-                while assessment_reps_done < ASSESSMENT_TARGET_REPS:
+                # Reps finished before the body is measured wait here with their
+                # bottom frames, so they still get kinematics once it is.
+                pending_reps: list[tuple] = []
+                last_rep_time = 0.0
+
+                while assessment_reps_done < ASSESSMENT_TARGET_REPS or pending_reps:
                     result = pipeline.process_frame()
+
+                    if athlete_params is None:
+                        athlete_params = _adopt_measured_athlete_params(
+                            pipeline, session_tracker, bridge, athlete_baseline,
+                        )
 
                     if pipeline.is_ready and result.skeleton_3d is not None:
                         bridge.send_frame_data(result, rep_phase=pipeline.rep_counter.phase)
                         for fault in result.faults:
                             bridge.send_fault(fault)
 
-                        if result.rep_data is not None:
+                        if result.rep_data is not None and assessment_reps_done < ASSESSMENT_TARGET_REPS:
                             bottom_kpts = None
                             bottom_angles = None
                             standing_kpts = None
@@ -670,25 +722,39 @@ def run_biomechanics_pipeline(
                             if hasattr(pipeline, 'consume_rep_trajectory'):
                                 trajectory_samples = pipeline.consume_rep_trajectory()
 
-                            session_tracker.on_rep_complete(
-                                result.rep_data,
-                                bottom_kpts=bottom_kpts,
-                                bottom_angles=bottom_angles,
-                                standing_kpts=standing_kpts,
-                                trajectory_samples=trajectory_samples,
+                            pending_reps.append(
+                                (result.rep_data, bottom_kpts, bottom_angles, standing_kpts, trajectory_samples)
                             )
+                            last_rep_time = time.time()
                             assessment_reps_done += 1
 
                             depth = result.rep_data.max_depth_angle
                             print(f"  [ASSESSMENT REP {assessment_reps_done}/{ASSESSMENT_TARGET_REPS}] depth={depth:.1f}°")
 
-                            ipc_client.send_message({
+                            ipc_client.send_message(nan_to_none({
                                 "type": "assessment_rep",
                                 "rep_number": assessment_reps_done,
                                 "total_required": ASSESSMENT_TARGET_REPS,
                                 "round": assessment_round,
                                 "depth_angle": round(depth, 1),
-                            })
+                            }))
+
+                    measurement_overdue = (
+                        assessment_reps_done >= ASSESSMENT_TARGET_REPS
+                        and time.time() - last_rep_time > ASSESSMENT_MEASUREMENT_WAIT_S
+                    )
+                    if pending_reps and (athlete_params is not None or measurement_overdue):
+                        if athlete_params is None:
+                            print("  [ASSESSMENT] WARNING: body measurement unfinished — reps pass without kinematics")
+                        for rep_data, bottom_kpts, bottom_angles, standing_kpts, trajectory_samples in pending_reps:
+                            session_tracker.on_rep_complete(
+                                rep_data,
+                                bottom_kpts=bottom_kpts,
+                                bottom_angles=bottom_angles,
+                                standing_kpts=standing_kpts,
+                                trajectory_samples=trajectory_samples,
+                            )
+                        pending_reps.clear()
 
                     # Display
                     frame = pipeline.last_frame
@@ -699,11 +765,12 @@ def run_biomechanics_pipeline(
                         fps_counter.update()
                         draw_fps(display, fps_counter.fps)
 
-                        _draw_hud_pill(
-                            display,
-                            f"ASSESSMENT  ROUND {assessment_round}",
-                            accent=HUD_CYAN,
-                        )
+                        if pipeline.body_calibration.is_complete:
+                            status_text = f"ASSESSMENT  ROUND {assessment_round}"
+                        else:
+                            measured, required = pipeline.body_calibration.progress
+                            status_text = f"MEASURING BODY  {measured}/{required}"
+                        _draw_hud_pill(display, status_text, accent=HUD_CYAN)
                         _draw_hud_pill(
                             display,
                             f"REP {assessment_reps_done}/{ASSESSMENT_TARGET_REPS}",
@@ -713,10 +780,7 @@ def run_biomechanics_pipeline(
 
                         display_sink.show(display)
 
-                    total_ms = sum(result.latency_ms.values())
-                    target_ms = 1000.0 / config.target_fps
-                    if total_ms < target_ms:
-                        time.sleep((target_ms - total_ms) / 1000.0)
+                    _throttle(pipeline, result, config.target_fps)
 
                 # --- Run diagnosis on assessment reps ---
                 kinematic_buffer = list(session_tracker._rep_kinematic_buffer)
@@ -724,7 +788,7 @@ def run_biomechanics_pipeline(
 
                 if kinematic_buffer and athlete_params is not None:
                     anthro = build_anthro_dict(athlete_params)
-                    rom = build_rom_dict(athlete_params, baseline_stub)
+                    rom = build_rom_dict(athlete_params, athlete_baseline)
                     set_features = SetFeatures(
                         user_id=0,
                         set_id=f"assessment_{assessment_round}",
@@ -760,7 +824,7 @@ def run_biomechanics_pipeline(
                     if pending_demo is not None:
                         print(f"  [DEMO] Pose stack ready: {len(pending_demo.cues)} cue(s)")
 
-                    ipc_client.send_message({
+                    ipc_client.send_message(nan_to_none({
                         "type": "assessment_result",
                         "round": assessment_round,
                         "passed": not has_immediate,
@@ -771,7 +835,7 @@ def run_biomechanics_pipeline(
                             "cues": [cue.model_dump() for cue in pending_demo.cues]
                             if pending_demo is not None else [],
                         },
-                    })
+                    }))
 
                     if not has_immediate:
                         assessment_passed = True
@@ -801,10 +865,7 @@ def run_biomechanics_pipeline(
                                 _draw_wordmark(display)
 
                                 display_sink.show(display)
-                            total_ms = sum(result.latency_ms.values())
-                            target_ms = 1000.0 / config.target_fps
-                            if total_ms < target_ms:
-                                time.sleep((target_ms - total_ms) / 1000.0)
+                            _throttle(pipeline, result, config.target_fps)
                 else:
                     # No kinematic data (athlete_params missing) — pass through
                     print("  [ASSESSMENT] No kinematic data — skipping diagnosis, passing assessment")
@@ -863,12 +924,12 @@ def run_biomechanics_pipeline(
                         print(f"  [CAL REP {tracker.reps_completed}/{calibration_reps}] depth={depth:.1f}°")
 
                         # Notify voice agent of calibration rep
-                        ipc_client.send_message({
+                        ipc_client.send_message(nan_to_none({
                             "type": "calibration_rep",
                             "rep_number": tracker.reps_completed,
                             "total_required": calibration_reps,
                             "depth_angle": round(depth, 1),
-                        })
+                        }))
 
                 # Display
                 frame = pipeline.last_frame
@@ -895,34 +956,27 @@ def run_biomechanics_pipeline(
                     display_sink.show(display)
 
                 # Throttle
-                total_ms = sum(result.latency_ms.values())
-                target_ms = 1000.0 / config.target_fps
-                if total_ms < target_ms:
-                    time.sleep((target_ms - total_ms) / 1000.0)
+                _throttle(pipeline, result, config.target_fps)
 
             # --- Calibration complete ---
             peaks = tracker.get_peaks()
             cal_profile = build_calibration_profile(peaks, config)
             apply_calibration_to_rule_engine(pipeline._rule_engine, cal_profile)
 
+            # Body measurements are session-scoped (per-set resets never touch
+            # them); the params adopted during assessment back that up.
+            cal_athlete_params = _extract_athlete_params(pipeline) or athlete_params
             # Build real baseline from calibration peaks
-            cal_athlete_params = _extract_athlete_params(pipeline)
             cal_baseline = {
                 "peakDorsi": peaks["peak_dorsiflexion"],
                 "peakKneeFlex": peaks["avg_depth"],
             }
+            athlete_baseline = cal_baseline
 
             # Send calibration results + athlete data to voice agent
-            cal_complete_msg = {
-                "type": "calibration_complete",
-                "movement_pattern": movement_pattern,
-                "peaks": peaks,
-                "thresholds": {k: v for k, v in cal_profile.items() if k != "defaults"},
-            }
-            if cal_athlete_params is not None:
-                cal_complete_msg["athlete_params"] = cal_athlete_params
-                cal_complete_msg["baseline"] = cal_baseline
-            ipc_client.send_message(cal_complete_msg)
+            ipc_client.send_message(nan_to_none(_build_calibration_complete_message(
+                movement_pattern, peaks, cal_profile, cal_athlete_params, cal_baseline,
+            )))
 
             print(f"\n{'='*60}")
             print(f"  CALIBRATION COMPLETE ({tracker.reps_completed} reps)")
@@ -938,6 +992,7 @@ def run_biomechanics_pipeline(
 
             # Wire athlete params for diagnosis engine
             if cal_athlete_params is not None:
+                athlete_params = cal_athlete_params
                 session_tracker.set_athlete_params(cal_athlete_params, cal_baseline)
                 bridge.set_athlete_params(cal_athlete_params, cal_baseline)
                 print(
@@ -947,7 +1002,7 @@ def run_biomechanics_pipeline(
                     f"tibia={cal_athlete_params['tibia_avg_m']:.3f}m"
                 )
             else:
-                print("  [DIAGNOSIS] Bone constraints not yet calibrated — diagnosis unavailable")
+                print("  [DIAGNOSIS] Body measurement not finished — diagnosis starts once it completes")
 
             # Reset pipeline for workout phase
             pipeline.reset_readiness_gate()
@@ -1137,7 +1192,7 @@ def run_biomechanics_pipeline(
                         if snapshot.get("kinematic_summary"):
                             resp["kinematic_summary"] = snapshot["kinematic_summary"]
                         resp["rep_data"] = rep_data
-                        ipc_client.send_message(resp)
+                        ipc_client.send_message(nan_to_none(resp))
                     else:
                         ipc_client.send_message({
                             "type": "last_rep_snapshot",
@@ -1208,11 +1263,18 @@ def run_biomechanics_pipeline(
 
             result = pipeline.process_frame()
 
+            # Returning users without stored params get measured during sets
+            if athlete_params is None:
+                athlete_params = _adopt_measured_athlete_params(
+                    pipeline, session_tracker, bridge, athlete_baseline,
+                )
+
             if on_demand_bridge is not None:
                 # Replay shows a frozen past rep — streaming the live pose
                 # would repaint over it every frame.
-                if not on_demand_replay and result.skeleton_3d is not None:
-                    on_demand_bridge.send_live_pose(result.skeleton_3d.to_numpy())
+                live_pose = result.skeleton_3d_display or result.skeleton_3d_raw
+                if not on_demand_replay and live_pose is not None:
+                    on_demand_bridge.send_live_pose(live_pose.to_numpy())
                 if not on_demand_started_ack_sent and on_demand_bridge.wait_started(timeout=0):
                     ipc_client.send_message({"type": "demo_started"})
                     on_demand_started_ack_sent = True
@@ -1359,10 +1421,7 @@ def run_biomechanics_pipeline(
                 display_sink.show(display)
 
             # Throttle to target FPS
-            total_ms = sum(result.latency_ms.values())
-            target_ms = 1000.0 / config.target_fps
-            if total_ms < target_ms:
-                time.sleep((target_ms - total_ms) / 1000.0)
+            _throttle(pipeline, result, config.target_fps)
 
     except KeyboardInterrupt:
         print("\nPipeline stopped by user")
@@ -1462,6 +1521,7 @@ if __name__ == "__main__":
     cal_mode = False
     cal_reps = 5
     preload_flag = False
+    height_cm = None
     i = 4
     while i < len(sys.argv):
         if sys.argv[i] == "--calibration-file" and i + 1 < len(sys.argv):
@@ -1476,6 +1536,9 @@ if __name__ == "__main__":
         elif sys.argv[i] == "--preload":
             preload_flag = True
             i += 1
+        elif sys.argv[i] == "--user-height-cm" and i + 1 < len(sys.argv):
+            height_cm = float(sys.argv[i + 1])
+            i += 2
         elif sys.argv[i] == "--valgus":
             os.environ["NOWVA_VALGUS_DEBUG"] = "1"
             i += 1
@@ -1493,4 +1556,5 @@ if __name__ == "__main__":
         calibration_mode=cal_mode,
         calibration_reps=cal_reps,
         preload=preload_flag,
+        user_height_cm=height_cm,
     )

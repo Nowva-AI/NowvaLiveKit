@@ -3,11 +3,10 @@
 Live-capture squat visualizer.
 
 Flow:
-  1. Open webcam with live skeleton preview
-  2. Calibration: wait for stable keypoint detection (low jitter)
-  3. Press SPACE to start recording
-  4. Record until 5 reps are detected (rep counter runs live)
-  5. Save video, generate 3D replay HTML, open in browser
+  1. Run the production BiomechanicsPipeline (single-camera) with a live preview
+  2. Wait for the pipeline readiness gate to pass
+  3. Record until 5 reps are detected (pipeline rep counter; body measured during reps)
+  4. Save video, generate 3D replay HTML, open in browser
 
 Usage:
     python scripts/visualize_video_squats.py
@@ -19,10 +18,10 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 import webbrowser
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -31,18 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 import cv2
 import numpy as np
 
-from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator
-from biomechanics.kinematics.analytical_ik import AnalyticalIKSolver
-from biomechanics.kinematics.valgus import SingleCameraValgusEstimator
-from biomechanics.faults.rep_counter import RepCounter, RepCounterConfig
-from biomechanics.utils.filters import JointAngleFilter
-from biomechanics.utils.derivatives import DerivativeTracker
-from biomechanics.utils.confidence_blend import ConfidenceBlender
-from biomechanics.utils.velocity_clamp import VelocityClamp
-from biomechanics.utils.bone_constraints import BoneLengthConstraints
-from biomechanics.utils.position_filter import KeypointPositionSmoother
-from biomechanics.utils.predictive_state import PredictiveStateEstimator
-from biomechanics.utils.standing_gate import StandingPoseGate
+from biomechanics.config import load_pipeline_config
+from biomechanics.pipeline import BiomechanicsPipeline
 
 
 def eur_size_to_foot_length_m(eur_size: float) -> float:
@@ -60,8 +49,7 @@ COCO_CONNECTIONS = [
 ]
 
 TARGET_REPS = 5
-CALIBRATION_FRAMES = 30  # frames of stable detection before ready
-JITTER_THRESHOLD = 8.0   # max pixel stddev across calibration window
+VIEWER_KEYPOINTS = 19  # the Three.js replay draws COCO-17 + toes; heels are not rendered
 SESSION_VERSION = 1
 LAST_SESSION_POINTER = "last_session.path"
 
@@ -74,7 +62,7 @@ def draw_skeleton(frame, skeleton_2d, color=(0, 255, 0)):
         if kp1.confidence > 0.3 and kp2.confidence > 0.3:
             cv2.line(frame, (int(kp1.x), int(kp1.y)),
                      (int(kp2.x), int(kp2.y)), color, 2)
-    for kp in skeleton_2d.keypoints[:19]:
+    for kp in skeleton_2d.keypoints:
         if kp.confidence > 0.3:
             cv2.circle(frame, (int(kp.x), int(kp.y)), 5, color, -1)
 
@@ -93,18 +81,9 @@ def draw_status(frame, lines, y_start=80):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
 
 
-def check_stability(history):
-    """Check if recent keypoint positions are stable (low jitter)."""
-    if len(history) < CALIBRATION_FRAMES:
-        return False, 999.0
-    arr = np.array(history)  # (N, 17, 2)
-    stddev = arr.std(axis=0).mean()
-    return stddev < JITTER_THRESHOLD, stddev
-
-
 def extract_frame_data(skeleton_3d, angles, frame_idx):
     """Convert a single frame's 3D skeleton + angles to viewer format."""
-    kpts_mp = skeleton_3d.to_numpy()[:19]
+    kpts_mp = skeleton_3d.to_numpy()[:VIEWER_KEYPOINTS]
     kpts_vis = np.zeros_like(kpts_mp)
     kpts_vis[:, 0] = kpts_mp[:, 2]   # vis_x = mp_z
     kpts_vis[:, 1] = -kpts_mp[:, 1]  # vis_y = -mp_y
@@ -188,15 +167,13 @@ def compute_baseline(rep_frames):
     }
 
 
-def compute_athlete_params(frames_data, rep_boundaries, bone_constraints):
-    """Reverse-compute athlete parameters for the synthetic visualizer."""
-    from biomechanics.utils.types import CocoKeypoints as CK
+def compute_athlete_params(frames_data, rep_boundaries, measured):
+    """Reverse-compute athlete parameters for the synthetic visualizer.
 
-    props = bone_constraints.body_proportions
-    if props is None:
+    measured is SegmentLengthEstimator.to_athlete_params() (metres). Arms are
+    not measured; they are assumed to follow the overall body scale."""
+    if measured is None:
         return None
-
-    cal = bone_constraints._calibrated_lengths
 
     REF_TORSO = 0.50
     REF_THIGH = 0.42
@@ -204,33 +181,27 @@ def compute_athlete_params(frames_data, rep_boundaries, bone_constraints):
     REF_UPPER_ARM = 0.30
     REF_FOREARM = 0.26
     REF_SHOULDER_W = 0.36
+    REF_FOOT = 0.26
 
-    raw_torso = props.torso_length_avg / REF_TORSO
-    raw_thigh = props.femur_length_avg / REF_THIGH
-    raw_shin = props.tibia_length_avg / REF_SHIN
+    hip_width = measured["hip_width_m"]
+    raw_torso = measured["torso_avg_m"] / REF_TORSO
+    raw_thigh = measured["femur_avg_m"] / REF_THIGH
+    raw_shin = measured["tibia_avg_m"] / REF_SHIN
     body_scale = (raw_torso + raw_thigh + raw_shin) / 3.0
     torso_ratio = raw_torso / body_scale
     thigh_ratio = raw_thigh / body_scale
     shin_ratio = raw_shin / body_scale
 
-    # Arm ratios from calibrated bone lengths (split upper arm / forearm)
-    upper_arm_l = cal.get((CK.LEFT_SHOULDER, CK.LEFT_ELBOW), REF_UPPER_ARM)
-    upper_arm_r = cal.get((CK.RIGHT_SHOULDER, CK.RIGHT_ELBOW), REF_UPPER_ARM)
-    forearm_l = cal.get((CK.LEFT_ELBOW, CK.LEFT_WRIST), REF_FOREARM)
-    forearm_r = cal.get((CK.RIGHT_ELBOW, CK.RIGHT_WRIST), REF_FOREARM)
-    upper_arm_avg = (upper_arm_l + upper_arm_r) / 2.0
-    forearm_avg = (forearm_l + forearm_r) / 2.0
-    upper_arm_ratio = (upper_arm_avg / REF_UPPER_ARM) / body_scale
-    forearm_ratio = (forearm_avg / REF_FOREARM) / body_scale
-    arm_ratio = (upper_arm_ratio + forearm_ratio) / 2.0
+    upper_arm_avg = REF_UPPER_ARM * body_scale
+    forearm_avg = REF_FOREARM * body_scale
+    upper_arm_ratio = 1.0
+    forearm_ratio = 1.0
+    arm_ratio = 1.0
 
-    shoulder_width = cal.get((CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER), REF_SHOULDER_W)
+    shoulder_width = measured["shoulder_width_m"]
     shoulder_width_ratio = (shoulder_width / REF_SHOULDER_W) / body_scale
 
-    REF_FOOT = 0.26
-    foot_l = cal.get((CK.LEFT_ANKLE, CK.LEFT_FOOT_INDEX), REF_FOOT)
-    foot_r = cal.get((CK.RIGHT_ANKLE, CK.RIGHT_FOOT_INDEX), REF_FOOT)
-    foot_avg = (foot_l + foot_r) / 2.0
+    foot_avg = measured["foot_avg_m"]
     foot_ratio = (foot_avg / REF_FOOT) / body_scale
 
     # Stance width & toe-out from standing frames (before first rep)
@@ -243,14 +214,14 @@ def compute_athlete_params(frames_data, rep_boundaries, bone_constraints):
 
     for f in sample:
         kpts = np.array(f["kpts"])
-        if len(kpts) < 19:
+        if len(kpts) < VIEWER_KEYPOINTS:
             continue
 
         l_ankle, r_ankle = kpts[15], kpts[16]
         ankle_dx = l_ankle[0] - r_ankle[0]
         ankle_dz = l_ankle[2] - r_ankle[2]
         ankle_xz_dist = np.sqrt(ankle_dx**2 + ankle_dz**2)
-        stance_widths.append(ankle_xz_dist / props.hip_width)
+        stance_widths.append(ankle_xz_dist / hip_width)
 
         # Toe-out: ankle→foot_index projected onto ground plane vs forward
         # vis_x = mp_z which points backward (away from person), so forward = -x
@@ -305,10 +276,10 @@ def compute_athlete_params(frames_data, rep_boundaries, bone_constraints):
         "kneeValgus": peak_valgus,
         "shoulderFlex": peak_shoulder_flex,
         "elbowFlex": peak_elbow_flex,
-        "hip_width_m": props.hip_width,
-        "femur_avg_m": props.femur_length_avg,
-        "tibia_avg_m": props.tibia_length_avg,
-        "torso_avg_m": props.torso_length_avg,
+        "hip_width_m": hip_width,
+        "femur_avg_m": measured["femur_avg_m"],
+        "tibia_avg_m": measured["tibia_avg_m"],
+        "torso_avg_m": measured["torso_avg_m"],
         "upper_arm_avg_m": upper_arm_avg,
         "forearm_avg_m": forearm_avg,
         "shoulder_width_m": shoulder_width,
@@ -346,7 +317,7 @@ def _round_athlete_params(params):
     }
 
 
-def process_captured_reps(frames_data, rep_boundaries, bone_constraints):
+def process_captured_reps(frames_data, rep_boundaries, measured):
     """Turn raw capture into baseline, replay reps, and athlete params."""
     rep_frame_slices = []
     for start, end in rep_boundaries:
@@ -358,7 +329,7 @@ def process_captured_reps(frames_data, rep_boundaries, bone_constraints):
         add_phase_to_rep(rep_frames)
 
     baseline = compute_baseline(rep_frame_slices[0])
-    athlete_params = compute_athlete_params(frames_data, rep_boundaries, bone_constraints)
+    athlete_params = compute_athlete_params(frames_data, rep_boundaries, measured)
     replay_reps = rep_frame_slices[1:]
     return baseline, replay_reps, athlete_params
 
@@ -487,60 +458,22 @@ def run_refit(session_path, html_path, open_browser, shoe_size_eur=46):
 
 
 def run_capture(camera_id, video_output_path):
-    """Run the full capture session: calibrate → record → return data."""
-    cap = cv2.VideoCapture(camera_id)
-    if not cap.isOpened():
-        print(f"ERROR: Could not open camera {camera_id}")
-        sys.exit(1)
+    """Run the production pipeline: readiness gate → record reps → return data."""
+    os.environ["NOWVA_MULTI_CAMERA"] = "false"
+    config = load_pipeline_config()
+    config.capture.device_id = camera_id
+    fps = float(config.target_fps)
+    frame_budget_s = 1.0 / fps
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    pipeline = BiomechanicsPipeline(config, exercise_name="squat")
+    pipeline.preload_pose_model()
 
-    print(f"Camera {camera_id}: {w}x{h} @ {fps:.0f}fps")
+    print(f"Camera {camera_id}: pipeline paced at {fps:.0f} fps")
     print("Stand back so your full body is visible.")
-    print("Recording starts automatically after calibration. Q=quit\n")
-
-    pose = MediaPipePoseEstimator(model_complexity=1)
-    ik = AnalyticalIKSolver()
-    valgus_estimator = SingleCameraValgusEstimator()
-    angle_filter = JointAngleFilter(min_cutoff=1.0, beta=0.007)
-    deriv_tracker = DerivativeTracker(smoothing_alpha=0.3)
-    rep_counter = RepCounter(RepCounterConfig(
-        entry_knee_angle=30.0,
-        exit_knee_angle=25.0,
-        min_depth_knee_angle=95.0,
-        min_rep_duration_frames=15,
-    ))
-
-    # Pre-IK filters (matches production pipeline)
-    standing_gate = StandingPoseGate(
-        min_confidence=0.5,
-        max_knee_flexion_deg=20.0,
-        max_trunk_flexion_deg=25.0,
-        min_torso_length_m=0.25,
-        max_torso_length_m=0.80,
-        required_consecutive_frames=5,
-    )
-    confidence_blender = ConfidenceBlender(min_confidence=0.1, max_confidence=0.9)
-    velocity_clamp = VelocityClamp(max_velocity_m_per_s=2.5, target_fps=int(fps))
-    bone_constraints = BoneLengthConstraints(
-        calibration_frames=30, tolerance=0.0, standing_gate=standing_gate,
-    )
-    position_smoother = KeypointPositionSmoother(min_cutoff=0.8, beta=4.0, d_cutoff=1.0)
-    predictive_estimator = PredictiveStateEstimator(
-        horizon_seconds=0.2, max_extrapolation_deg=15.0,
-    )
-    proportions_applied = False
+    print("Recording starts automatically once the readiness gate passes. Q=quit\n")
 
     # State
     state = "calibrating"  # calibrating → recording → done
-    kpt_history = deque(maxlen=CALIBRATION_FRAMES)
-    stable = False
-    jitter = 999.0
-
     video_writer = None
     frames_data = []
     reps = []
@@ -550,87 +483,41 @@ def run_capture(camera_id, video_output_path):
     rec_frame_idx = 0
     rec_start_time = None
 
+    def _shutdown():
+        if video_writer is not None:
+            video_writer.release()
+        cv2.destroyAllWindows()
+        pipeline.release()
+
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        frame_start = time.time()
+        result = pipeline.process_frame()
+        frame = pipeline.last_frame
+        if frame is None:
+            time.sleep(frame_budget_s)
+            continue
 
         display = frame.copy()
-        skeleton_2d, skeleton_3d = pose.estimate_both(frame)
-        angles = None
+        angles = result.joint_angles
 
-        if skeleton_3d is not None:
-            # Standing gate (feeds bone constraint calibration)
-            standing_gate.check(skeleton_3d)
-
-            # Pre-IK filtering chain (matches production pipeline)
-            skeleton_3d = confidence_blender.blend(skeleton_3d)
-            skeleton_3d = velocity_clamp.clamp(skeleton_3d)
-            skeleton_3d = bone_constraints.enforce(skeleton_3d)
-            skeleton_3d = position_smoother.smooth(skeleton_3d)
-            skeleton_3d = bone_constraints.enforce(skeleton_3d)
-
-            # Apply body proportions once after bone calibration
-            if (
-                not proportions_applied
-                and bone_constraints.is_calibrated
-                and bone_constraints.body_proportions is not None
-            ):
-                ik.set_body_proportions(bone_constraints.body_proportions)
-                proportions_applied = True
-
-            # IK solve on filtered skeleton
-            raw_angles = ik.solve(skeleton_3d)
-
-            # Mode-aware valgus estimation (2D FPPA — this demo is single-camera)
-            vr = valgus_estimator.estimate(skeleton_2d, skeleton_3d)
-            raw_angles.knee_valgus_l = vr.valgus_l
-            raw_angles.knee_valgus_r = vr.valgus_r
-            raw_angles.foot_confidence_l = vr.foot_confidence_l
-            raw_angles.foot_confidence_r = vr.foot_confidence_r
-            raw_angles.knee_ankle_sep_ratio = vr.kasr
-            raw_angles.hip_rotation_l = vr.hip_rotation_l
-            raw_angles.hip_rotation_r = vr.hip_rotation_r
-
-            raw_angles.timestamp = time.time()
-            angles = angle_filter.filter_angles(raw_angles)
-            angles.timestamp = raw_angles.timestamp
-
-        # --- CALIBRATING ---
+        # --- CALIBRATING: the pipeline's readiness gate decides ---
         if state == "calibrating":
-            if skeleton_2d is not None:
-                pts = [(kp.x, kp.y) for kp in skeleton_2d.keypoints[:17]
-                       if kp.confidence > 0.3]
-                if len(pts) >= 12:
-                    kpt_history.append(pts[:12])  # use first 12 visible
-                else:
-                    kpt_history.clear()
+            if pipeline.is_ready:
+                state = "recording"
+                rec_start_time = time.time()
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                h, w = frame.shape[:2]
+                video_writer = cv2.VideoWriter(str(video_output_path), fourcc, fps, (w, h))
+                print("Readiness gate passed — recording started automatically.")
+                print(f"Recording → {video_output_path}")
 
-                # Need uniform length for stability check
-                if len(kpt_history) == CALIBRATION_FRAMES:
-                    min_len = min(len(p) for p in kpt_history)
-                    trimmed = [p[:min_len] for p in kpt_history]
-                    stable, jitter = check_stability(trimmed)
-                    if stable:
-                        state = "recording"
-                        rec_start_time = time.time()
-                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        video_writer = cv2.VideoWriter(str(video_output_path), fourcc, fps, (w, h))
-                        angle_filter = JointAngleFilter(min_cutoff=1.0, beta=0.007)
-                        deriv_tracker = DerivativeTracker(smoothing_alpha=0.3)
-                        print("Calibration complete — recording started automatically.")
-                        print(f"Recording → {video_output_path}")
-
-            draw_skeleton(display, skeleton_2d, (100, 200, 255))
-            pct = min(100, int(len(kpt_history) / CALIBRATION_FRAMES * 100))
-            bone_cal = "done" if bone_constraints.is_calibrated else "calibrating"
-            draw_banner(display, f"CALIBRATING... {pct}%  (jitter: {jitter:.1f}px)",
+            draw_skeleton(display, result.skeleton_2d, (100, 200, 255))
+            passes, required = pipeline._readiness_gate.progress
+            failure = pipeline._readiness_gate.last_failure
+            draw_banner(display, f"WAITING FOR READINESS GATE  {passes}/{required}",
                         (40, 60, 80), (200, 220, 255))
             status = [
-                (f"Visible keypoints: {sum(1 for kp in (skeleton_2d.keypoints[:17] if skeleton_2d else []) if kp.confidence > 0.3)}/17",
-                 (180, 180, 200)),
-                (f"Bone calibration: {bone_cal} | Standing gate: {'ready' if standing_gate.is_ready else 'waiting'}",
-                 (180, 180, 200)),
+                (f"Gate check: {failure or 'passing'}", (180, 180, 200)),
                 ("Stand still with full body visible", (150, 150, 170)),
             ]
             draw_status(display, status)
@@ -638,21 +525,10 @@ def run_capture(camera_id, video_output_path):
         # --- RECORDING ---
         elif state == "recording":
             elapsed = time.time() - rec_start_time
-            if video_writer is not None:
-                video_writer.write(frame)
+            video_writer.write(frame)
 
-            if skeleton_3d is not None and angles is not None:
-                derivs = deriv_tracker.update(angles)
-
-                # Predictive estimation for fault evaluation (200ms lookahead)
-                eval_angles = predictive_estimator.predict(angles, derivs)
-
-                rep_data, _ = rep_counter.update(angles, derivs)
-
-                # Phase-aware smoothing (heavier during idle, lighter during movement)
-                angle_filter.update_phase(rep_counter.phase)
-
-                in_rep = rep_counter.in_rep
+            if result.skeleton_3d is not None and angles is not None:
+                in_rep = pipeline.rep_counter.in_rep
                 if in_rep and not prev_in_rep:
                     current_rep_start = rec_frame_idx
                 if not in_rep and prev_in_rep and current_rep_start is not None:
@@ -660,12 +536,11 @@ def run_capture(camera_id, video_output_path):
                     current_rep_start = None
                 prev_in_rep = in_rep
 
-                if rep_data is not None:
-                    reps.append(rep_data)
-                    print(f"  Rep {rep_data.rep_number}: depth={rep_data.max_depth_angle:.1f}°")
+                if result.rep_data is not None:
+                    reps.append(result.rep_data)
+                    print(f"  Rep {result.rep_data.rep_number}: depth={result.rep_data.max_depth_angle:.1f}°")
 
-                fd = extract_frame_data(skeleton_3d, angles, rec_frame_idx)
-                frames_data.append(fd)
+                frames_data.append(extract_frame_data(result.skeleton_3d, angles, rec_frame_idx))
             else:
                 frames_data.append(None)
 
@@ -676,22 +551,25 @@ def run_capture(camera_id, video_output_path):
                 state = "done"
                 print(f"\n{TARGET_REPS} reps captured!")
 
-            skel_color = (0, 200, 255) if rep_counter.in_rep else (0, 255, 0)
-            draw_skeleton(display, skeleton_2d, skel_color)
+            skel_color = (0, 200, 255) if pipeline.rep_counter.in_rep else (0, 255, 0)
+            draw_skeleton(display, result.skeleton_2d, skel_color)
 
-            phase_name = rep_counter.phase.upper() if hasattr(rep_counter, 'phase') else ""
+            phase_name = pipeline.rep_counter.phase.upper()
             draw_banner(display,
                         f"RECORDING  Rep {len(reps)}/{TARGET_REPS}  "
                         f"[{phase_name}]  {elapsed:.1f}s",
                         (80, 20, 20), (255, 100, 100))
-            if angles:
-                status = [
-                    (f"Knee: {angles.avg_knee_flexion:.1f}°  "
-                     f"Trunk: {angles.trunk_flexion:.1f}°  "
-                     f"Depth: {rep_counter._max_depth_angle:.0f}°",
-                     (200, 200, 220)),
-                ]
-                draw_status(display, status)
+            if pipeline.body_calibration.is_complete:
+                body_line = "Body measured"
+            else:
+                measured, required = pipeline.body_calibration.progress
+                body_line = f"Measuring body: {measured}/{required}"
+            status = [(body_line, (200, 200, 220))]
+            if angles is not None:
+                status.append((f"Knee: {angles.avg_knee_flexion:.1f}°  "
+                               f"Trunk: {angles.trunk_flexion:.1f}°",
+                               (200, 200, 220)))
+            draw_status(display, status)
 
         # --- DONE ---
         elif state == "done":
@@ -706,21 +584,20 @@ def run_capture(camera_id, video_output_path):
 
         if key == ord('q'):
             print("Quit.")
-            cap.release()
-            if video_writer:
-                video_writer.release()
-            cv2.destroyAllWindows()
-            pose.release()
+            _shutdown()
             sys.exit(0)
 
+        # Pace to the pipeline's target fps so video frames match frames_data
+        remaining_s = frame_budget_s - (time.time() - frame_start)
+        if remaining_s > 0:
+            time.sleep(remaining_s)
 
-    cap.release()
-    if video_writer:
-        video_writer.release()
-    cv2.destroyAllWindows()
-    pose.release()
+    measured = pipeline.body_calibration.to_athlete_params()
+    if measured is None:
+        print("WARNING: body measurement did not complete; sandbox sliders won't pre-fill.")
+    _shutdown()
 
-    return frames_data, reps, rep_boundaries, fps, bone_constraints
+    return frames_data, reps, rep_boundaries, fps, measured
 
 
 def build_html(
@@ -3508,7 +3385,7 @@ def main():
     print(f"  Reps to capture: {TARGET_REPS}")
     print("=" * 50)
 
-    frames_data, reps, rep_boundaries, fps, bone_cstr = run_capture(args.camera, video_path)
+    frames_data, reps, rep_boundaries, fps, measured = run_capture(args.camera, video_path)
 
     if len(reps) < 2:
         print(f"ERROR: Need at least 2 reps, got {len(reps)}.")
@@ -3518,7 +3395,7 @@ def main():
     print(f"  Using rep 1 as baseline, replaying reps 2-{len(reps)}")
 
     baseline, replay_reps, athlete_params = process_captured_reps(
-        frames_data, rep_boundaries, bone_cstr,
+        frames_data, rep_boundaries, measured,
     )
     print(f"  Baseline trunk offset: {baseline['peakTrunkOffset']}°")
     print(f"  Lean thresholds: {baseline['leanThresholds']}")

@@ -364,33 +364,19 @@ Each camera runs in a dedicated thread with a ring buffer. Primary camera (devic
 
 ---
 
-### 3. Pre-IK Skeleton Filtering
+### 3. Pre-IK Chain
 
-**Files:** `src/biomechanics/utils/confidence_blend.py`, `src/biomechanics/utils/velocity_clamp.py`, `src/biomechanics/utils/bone_constraints.py`, `src/biomechanics/utils/predictive_state.py`
+**Files:** `src/biomechanics/utils/preik_chain.py`, `src/biomechanics/utils/keypoint_kalman.py`, `src/biomechanics/utils/foot_contact.py`, `src/biomechanics/utils/segment_lengths.py`
 
-Four sequential stages that clean noisy pose estimates before inverse kinematics:
+One chain definition (`build_preik_chain(config, multi_camera)`) runs between pose estimation and the IK solver, on numpy arrays, converting `Skeleton3D` exactly once at entry and exit:
 
-| Stage | Method | Parameters | Purpose |
-|-------|--------|------------|---------|
-| **Confidence Blend** | Weighted interpolation between current and previous keypoint positions | Range: 0.1-0.9 | Suppress low-confidence keypoints; lower confidence → heavier interpolation with previous frame |
-| **Velocity Clamp** | Physical velocity limit enforcement | Max: 2.5 m/s | Prevent teleporting joints; if displacement/dt exceeds limit, clamp to max velocity in that direction |
-| **Bone Constraints** | Calibrated bone length enforcement | 12 pairs, ±15% tolerance, 30-frame calibration | Enforce anatomical consistency; proximal→distal cascade correction |
-| **Predictive State** | Lookahead extrapolation from velocity | 0.2s horizon, max 15° extrapolation | Pre-cue faults before they fully manifest; enables faster coaching response |
+| Stage | Mode | Purpose |
+|-------|------|---------|
+| **Fixed-lag Kalman** (`kalman:`) | both | Constant-velocity smoother per keypoint; measurement noise from the triangulator's metric confidence; innovation gate with re-acquisition; predicts through dropouts for up to `max_predicted_frames`. Emits a 2-frame-lagged **analysis** stream (IK, rules, buffers) and an undelayed **display** stream (HUD/avatar). |
+| **Foot contact** (`foot_contact:`) | multi-camera | World-frame planted-foot anchors; heel rise, stance width, toe-out, floor roll (`FootState` → `HeelRiseRule`). |
+| **Hip re-centring** | multi-camera | Analysis and display skeletons are hip-centred; `analysis_world` keeps the floor for body measurement and foot metrics. |
 
-#### Bone Constraints: Deep Dive
-
-The bone constraint system has two phases:
-
-**Calibration (first 30 frames):**
-1. Measure distances for 14 COCO bone pairs (torso, limbs, feet)
-2. Only use frames where both keypoints have confidence ≥ 0.1
-3. Waits for StandingPoseGate to confirm upright pose
-4. Store median length for each pair
-
-**Enforcement (after calibration):**
-1. For each bone pair, compute: `deviation = |current_len - target_len| / target_len`
-2. If deviation > 15%: project the distal keypoint back along the bone direction to target length
-3. Corrections are applied **proximal → distal** so parent joint corrections don't get invalidated by child corrections
+The Kalman state resets per set (`reset_readiness_gate()`); foot contact anchors and body measurements (`pipeline.body_calibration`, a `SegmentLengthEstimator`) are session-scoped. Proportion scaling of fault thresholds is applied once when the measurement completes (or via `pipeline.apply_athlete_params()` for returning users). `PipelineFrame.skeleton_3d` is always the analysis skeleton; `skeleton_3d_display` / `skeleton_3d_raw` serve display.
 
 **Body Proportions Derivation:**
 
@@ -1181,7 +1167,6 @@ Optional:
 | `LLM_MODEL` | `gemini-3.1-flash-lite` | Console agent LLM |
 | `PROGRAM_CREATION_MODEL` | `gpt-5.2` | Program generator LLM |
 | `COMPACTION_MODEL` | `gpt-4.1-mini` | Context compaction LLM |
-| `ENABLE_PREIK_FILTERS` | `true` | Enable pre-IK filtering pipeline |
 | `USE_RAG` | `true` | Enable RAG for coaching |
 | `ALLOWED_ORIGINS` | — | CORS origins (comma-separated) |
 

@@ -1,7 +1,7 @@
 """Pipeline inspection recorder.
 
-Records the preview video, raw and filtered 3D skeletons at every
-pre-IK filter stage, joint angles (raw and filtered), and pipeline
+Records the preview video, the 3D skeleton after every pre-IK chain stage
+(stage names come from the chain itself), joint angles, and pipeline
 metadata for every frame, then builds a self-contained HTML report
 with synchronized video + skeleton + angle-trace scrubbing.
 Enabled by the --inspect flag; inert otherwise.
@@ -22,6 +22,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import PipelineFrame
 
 TEMPLATE_PATH = Path(__file__).with_name("pipeline_inspector_template.html")
@@ -30,25 +31,6 @@ MAX_VIDEO_WIDTH = 960
 VIDEO_CRF = "26"
 MIN_RETIME_FPS = 1.0
 MAX_RETIME_FPS = 120.0
-
-STAGE_NAMES = [
-    "raw",
-    "confidence_blend",
-    "velocity_clamp",
-    "bone_constraints_1",
-    "ground_clamp",
-    "position_smoother",
-    "bone_constraints_2",
-]
-STAGE_LABELS = [
-    "Raw MediaPipe",
-    "Conf. Blend",
-    "Vel. Clamp",
-    "Bone (1)",
-    "Ground",
-    "Pos. Smooth",
-    "Bone (2)",
-]
 
 ANGLE_KEYS = [
     "knee_flexion_l", "knee_flexion_r",
@@ -68,6 +50,10 @@ def _round(value: float | None, digits: int = 2) -> float | None:
     return round(float(value), digits)
 
 
+def _stage_label(stage_name: str) -> str:
+    return stage_name.replace("_", " ").title()
+
+
 def _flatten_kpts(kpts: np.ndarray | None) -> list[float] | None:
     """(N, 3+) numpy array to flat [x0, y0, z0, x1, y1, z1, ...] list."""
     if kpts is None:
@@ -81,11 +67,18 @@ def _flatten_kpts(kpts: np.ndarray | None) -> list[float] | None:
 class PipelineInspector:
     """Records every pipeline stage per frame and writes an HTML debug report."""
 
-    def __init__(self, out_dir: str, nominal_fps: float, multi_camera: bool) -> None:
+    def __init__(
+        self,
+        out_dir: str,
+        nominal_fps: float,
+        multi_camera: bool,
+        stage_names: tuple[str, ...],
+    ) -> None:
         self._dir = Path(out_dir) / "pipeline_inspect"
         self._dir.mkdir(parents=True, exist_ok=True)
         self._nominal_fps = max(1.0, float(nominal_fps))
         self._multi_camera = multi_camera
+        self._stage_names = tuple(stage_names)
         self._started_at = datetime.now()
         self._clock_start = time.perf_counter()
 
@@ -94,7 +87,7 @@ class PipelineInspector:
             "ready": [], "resting": [], "standing_gate": [],
         }
 
-        self._skeletons: dict[str, list] = {name: [] for name in STAGE_NAMES}
+        self._skeletons: dict[str, list] = {name: [] for name in self._stage_names}
         self._angles_raw: dict[str, list] = {key: [] for key in ANGLE_KEYS}
         self._angles_filtered: dict[str, list] = {key: [] for key in ANGLE_KEYS}
 
@@ -136,11 +129,8 @@ class PipelineInspector:
         self._series["resting"].append(bool(resting))
         self._series["standing_gate"].append(bool(pipeline._standing_gate.is_ready))
 
-        raw_kpts = getattr(pipeline, "_inspect_raw_kpts", None)
         intermediates = getattr(pipeline, "_inspect_intermediates", None) or {}
-
-        self._skeletons["raw"].append(_flatten_kpts(raw_kpts))
-        for stage in STAGE_NAMES[1:]:
+        for stage in self._stage_names:
             self._skeletons[stage].append(_flatten_kpts(intermediates.get(stage)))
 
         raw_angles = getattr(pipeline, "_inspect_raw_angles", None)
@@ -296,8 +286,8 @@ class PipelineInspector:
             "measured_fps": round(measured_fps, 2),
             "duration_s": round(self._series["t"][-1], 2),
             "has_video": self._video_path.exists() and not self._encode_failed,
-            "stage_names": STAGE_NAMES,
-            "stage_labels": STAGE_LABELS,
+            "stage_names": list(self._stage_names),
+            "stage_labels": [_stage_label(name) for name in self._stage_names],
             "series": self._series,
             "skeletons": self._skeletons,
             "angle_keys": ANGLE_KEYS,
@@ -306,6 +296,7 @@ class PipelineInspector:
             "faults": self._faults,
             "reps": self._rep_events,
         }
+        data = nan_to_none(data)
         (self._dir / "data.json").write_text(json.dumps(data))
 
         video_b64 = ""
@@ -321,7 +312,7 @@ class PipelineInspector:
         report_path = self._dir / "pipeline_inspector.html"
         report_path.write_text(html)
 
-        n_skel = sum(1 for v in self._skeletons["raw"] if v is not None)
+        n_skel = sum(1 for v in self._skeletons[self._stage_names[0]] if v is not None)
         print(
             f"\n[INSPECT] {self.frame_count} frames, "
             f"{n_skel} with skeleton data, "
@@ -333,11 +324,11 @@ class PipelineInspector:
 
 
 def build_inspector(
-    out_dir: str, nominal_fps: float, multi_camera: bool,
+    out_dir: str, nominal_fps: float, multi_camera: bool, stage_names: tuple[str, ...],
 ) -> PipelineInspector | None:
     """Create an inspector when --inspect / NOWVA_PIPELINE_INSPECT is active."""
     if os.getenv("NOWVA_PIPELINE_INSPECT", "").lower() not in ("1", "true", "yes"):
         return None
-    inspector = PipelineInspector(out_dir, nominal_fps, multi_camera)
+    inspector = PipelineInspector(out_dir, nominal_fps, multi_camera, stage_names)
     print(f"[INSPECT] Pipeline inspection enabled → {inspector.path}")
     return inspector

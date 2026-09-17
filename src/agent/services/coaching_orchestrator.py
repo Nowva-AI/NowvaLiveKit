@@ -419,13 +419,17 @@ class CoachingOrchestrator:
 
         if self._resting:
             return
-        knee_l = angles_dict.get("knee_flexion_l", 0.0)
-        knee_r = angles_dict.get("knee_flexion_r", 0.0)
-        self._set_angle_samples.append({
-            "wall_time": time.time(),
-            "avg_knee": (knee_l + knee_r) / 2.0,
-            "trunk_flexion": angles_dict.get("trunk_flexion", 0.0),
-        })
+        knee_l = angles_dict.get("knee_flexion_l")
+        knee_r = angles_dict.get("knee_flexion_r")
+        trunk_flexion = angles_dict.get("trunk_flexion", 0.0)
+        # The pipeline sends None for angles whose keypoints were missing;
+        # such frames add nothing to the set's angle series.
+        if knee_l is not None and knee_r is not None and trunk_flexion is not None:
+            self._set_angle_samples.append({
+                "wall_time": time.time(),
+                "avg_knee": (knee_l + knee_r) / 2.0,
+                "trunk_flexion": trunk_flexion,
+            })
 
         # After-cue adjustment monitoring — only while standing between reps
         if self._adjustment_active and angles_dict.get("rep_phase") == "idle":

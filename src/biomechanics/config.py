@@ -44,7 +44,7 @@ class TriangulationConfig(BaseModel):
     enabled: bool = False
     device_ids: List[int] = [0, 1, 2]
     primary_camera: int = 0
-    max_sync_delta_ms: float = 15.0
+    max_sync_delta_ms: float = 20.0
     focal_length_factor: float = 0.8
     min_views: int = 2
     max_reprojection_error: float = 15.0
@@ -87,12 +87,22 @@ class KneeValgusConfig(BaseModel):
     severe_2d: float = 16.0
 
 
+class HeelRiseConfig(BaseModel):
+    """Heel-rise fault thresholds (ankle rise above its planted floor reference; multi-camera only)."""
+    mild_cm: float = 1.5
+    moderate_cm: float = 3.0
+    severe_cm: float = 5.0
+    cooldown_s: float = 2.0
+    min_rise_duration_s: float = 0.23
+
+
 class FaultsConfig(BaseModel):
     """Fault detection configuration."""
     depth: DepthFaultConfig = Field(default_factory=DepthFaultConfig)
     bilateral_asymmetry: BilateralAsymmetryConfig = Field(default_factory=BilateralAsymmetryConfig)
     forward_lean: ForwardLeanConfig = Field(default_factory=ForwardLeanConfig)
     knee_valgus: KneeValgusConfig = Field(default_factory=KneeValgusConfig)
+    heel_rise: HeelRiseConfig = Field(default_factory=HeelRiseConfig)
 
 
 class BiLSTMConfig(BaseModel):
@@ -171,11 +181,6 @@ class HipPositionCounterConfig(BaseModel):
     # Rep validation
     min_rep_duration_frames: int = 15       # ~0.5s at 30fps
 
-    # Smoothing parameters
-    position_min_cutoff: float = 1.5        # One Euro filter min_cutoff for hip position
-    position_beta: float = 0.01             # One Euro filter beta for hip position
-    velocity_ema_alpha: float = 0.3         # EMA alpha for velocity smoothing
-
 
 class CoachingConfig(BaseModel):
     """Coaching integration configuration."""
@@ -190,53 +195,32 @@ class IPCConfig(BaseModel):
     fault_cooldown_seconds: float = 3.0
 
 
-class VelocityClampConfig(BaseModel):
-    """Velocity clamping configuration."""
-    max_velocity_m_per_s: float = 2.5
-    target_fps: int = 30
+class KalmanSmootherConfig(BaseModel):
+    """Fixed-lag constant-velocity Kalman smoother — the only temporal filter before IK."""
+    lag_frames: int = 2
+    process_noise: float = 10.0
+    # Measurement std from triangulator confidence, clipped to [floor, ceiling].
+    measurement_std_floor_m: float = 0.003
+    # MediaPipe confidences carry no metric meaning, so single-camera mode uses a larger floor.
+    single_camera_measurement_std_floor_m: float = 0.01
+    measurement_std_ceiling_m: float = 0.08
+    gate_sigma: float = 4.0
+    gate_min_radius_m: float = 0.08
+    max_predicted_frames: int = 5
+    min_output_confidence: float = 0.15
 
 
-class BoneConstraintsConfig(BaseModel):
-    """Bone length constraint configuration."""
-    calibration_frames: int = 30
-    tolerance: float = 0.0
-
-
-class ConfidenceBlendConfig(BaseModel):
-    """Confidence-weighted blending configuration."""
-    min_confidence: float = 0.1
-    max_confidence: float = 0.9
-
-
-class GroundClampConfig(BaseModel):
-    """Ground plane clamping configuration."""
-    calibration_frames: int = 30
-    stance_width_tolerance_m: float = 0.02
-    ankle_y_tolerance_m: float = 0.01
-    # Stricter than the gates: real standing medians sit >= 0.87, while a
-    # held upright half-squat scores 0.62-0.85 and must not calibrate.
-    min_leg_extension_ratio: float = 0.75
-
-
-class PositionFilterConfig(BaseModel):
-    """One Euro Filter for 3D keypoint position smoothing."""
-    min_cutoff: float = 0.8
-    beta: float = 4.0
-    d_cutoff: float = 1.0
+class FootContactConfig(BaseModel):
+    """World-frame foot contact model (multi-camera only)."""
+    enabled: bool = True
 
 
 class DisplayFilterConfig(BaseModel):
-    """One Euro Filter for 2D skeleton overlay smoothing (display-only)."""
+    """One Euro Filter for 2D skeleton overlay smoothing (display-only, pixel units)."""
     enabled: bool = True
-    min_cutoff: float = 1.5
-    beta: float = 0.5
+    min_cutoff: float = 1.0
+    beta: float = 0.02
     d_cutoff: float = 1.0
-
-
-class PredictiveStateConfig(BaseModel):
-    """Predictive fault pre-cueing configuration."""
-    horizon_seconds: float = 0.2
-    max_extrapolation_deg: float = 15.0
 
 
 class StandingGateConfig(BaseModel):
@@ -283,13 +267,9 @@ class BiomechanicsConfig(BaseModel):
     ipc: IPCConfig = Field(default_factory=IPCConfig)
     bilstm: BiLSTMConfig = Field(default_factory=BiLSTMConfig)
     barbell_tracking: BarbellTrackingConfig = Field(default_factory=BarbellTrackingConfig)
-    velocity_clamp: VelocityClampConfig = Field(default_factory=VelocityClampConfig)
-    bone_constraints: BoneConstraintsConfig = Field(default_factory=BoneConstraintsConfig)
-    ground_clamp: GroundClampConfig = Field(default_factory=GroundClampConfig)
-    confidence_blend: ConfidenceBlendConfig = Field(default_factory=ConfidenceBlendConfig)
-    position_filter: PositionFilterConfig = Field(default_factory=PositionFilterConfig)
+    kalman: KalmanSmootherConfig = Field(default_factory=KalmanSmootherConfig)
+    foot_contact: FootContactConfig = Field(default_factory=FootContactConfig)
     display_filter: DisplayFilterConfig = Field(default_factory=DisplayFilterConfig)
-    predictive_state: PredictiveStateConfig = Field(default_factory=PredictiveStateConfig)
     standing_gate: StandingGateConfig = Field(default_factory=StandingGateConfig)
     readiness_gate: ReadinessGateConfig = Field(default_factory=ReadinessGateConfig)
     hip_counter: HipPositionCounterConfig = Field(default_factory=HipPositionCounterConfig)
@@ -383,6 +363,7 @@ def load_pipeline_config(path: Optional[str] = None) -> BiomechanicsConfig:
             bilateral_asymmetry=BilateralAsymmetryConfig(**faults_data.get("bilateral_asymmetry", {})),
             forward_lean=ForwardLeanConfig(**faults_data.get("forward_lean", {})),
             knee_valgus=KneeValgusConfig(**faults_data.get("knee_valgus", {})),
+            heel_rise=HeelRiseConfig(**faults_data.get("heel_rise", {})),
         )
         config_dict["faults"] = faults_config
 
@@ -401,26 +382,14 @@ def load_pipeline_config(path: Optional[str] = None) -> BiomechanicsConfig:
     if "barbell_tracking" in raw_config:
         config_dict["barbell_tracking"] = BarbellTrackingConfig(**raw_config["barbell_tracking"])
 
-    if "velocity_clamp" in raw_config:
-        config_dict["velocity_clamp"] = VelocityClampConfig(**raw_config["velocity_clamp"])
+    if "kalman" in raw_config:
+        config_dict["kalman"] = KalmanSmootherConfig(**raw_config["kalman"])
 
-    if "bone_constraints" in raw_config:
-        config_dict["bone_constraints"] = BoneConstraintsConfig(**raw_config["bone_constraints"])
-
-    if "ground_clamp" in raw_config:
-        config_dict["ground_clamp"] = GroundClampConfig(**raw_config["ground_clamp"])
-
-    if "confidence_blend" in raw_config:
-        config_dict["confidence_blend"] = ConfidenceBlendConfig(**raw_config["confidence_blend"])
-
-    if "position_filter" in raw_config:
-        config_dict["position_filter"] = PositionFilterConfig(**raw_config["position_filter"])
+    if "foot_contact" in raw_config:
+        config_dict["foot_contact"] = FootContactConfig(**raw_config["foot_contact"])
 
     if "display_filter" in raw_config:
         config_dict["display_filter"] = DisplayFilterConfig(**raw_config["display_filter"])
-
-    if "predictive_state" in raw_config:
-        config_dict["predictive_state"] = PredictiveStateConfig(**raw_config["predictive_state"])
 
     if "standing_gate" in raw_config:
         config_dict["standing_gate"] = StandingGateConfig(**raw_config["standing_gate"])

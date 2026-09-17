@@ -79,7 +79,7 @@ class PoseEstimator(ABC):
 
     # Class-level keypoint names
     KEYPOINT_NAMES = COCO_KEYPOINT_NAMES
-    NUM_KEYPOINTS = 19
+    NUM_KEYPOINTS = 21
 
     def __init__(self, confidence_threshold: float = 0.3):
         """

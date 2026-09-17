@@ -12,6 +12,9 @@ from typing import Optional
 from biomechanics.faults.fault_types import FaultRule, FaultType, DEFAULT_THRESHOLDS, FAULT_MESSAGES
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
 
+# Minimum time between two eccentric-tempo reports (was 30 frames at 30 fps)
+ECCENTRIC_TEMPO_COOLDOWN_S = 1.0
+
 
 class EccentricTempoRule(FaultRule):
     """
@@ -31,8 +34,7 @@ class EccentricTempoRule(FaultRule):
                           Default 100 deg/sec based on research.
         """
         self.max_velocity = max_velocity
-        self._cooldown_frames = 0
-        self._cooldown_duration = 30  # Don't re-trigger for 1 second at 30fps
+        self._last_fault_time_s: float = float("-inf")
 
     @property
     def fault_type(self) -> FaultType:
@@ -47,8 +49,7 @@ class EccentricTempoRule(FaultRule):
     ) -> Optional[FaultEvent]:
         """Evaluate for too-fast eccentric movement."""
         # Cooldown check
-        if self._cooldown_frames > 0:
-            self._cooldown_frames -= 1
+        if angles.timestamp - self._last_fault_time_s < ECCENTRIC_TEMPO_COOLDOWN_S:
             return None
 
         # Only check during descending phase
@@ -65,7 +66,7 @@ class EccentricTempoRule(FaultRule):
         # During descent, velocity should be negative (angle increasing)
         # We check if the magnitude is too high
         if velocity < -self.max_velocity:
-            self._cooldown_frames = self._cooldown_duration
+            self._last_fault_time_s = angles.timestamp
 
             # Calculate severity based on how fast
             excess = abs(velocity) - self.max_velocity
@@ -96,7 +97,7 @@ class EccentricTempoRule(FaultRule):
 
     def reset(self):
         """Reset cooldown."""
-        self._cooldown_frames = 0
+        self._last_fault_time_s = float("-inf")
 
 
 class StallingRule(FaultRule):
