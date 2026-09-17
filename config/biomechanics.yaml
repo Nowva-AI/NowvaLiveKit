@@ -18,6 +18,17 @@ triangulation:
   enabled: true
   max_sync_delta_ms: 20.0
 
+camera_calibration:               # person-based camera calibration (multi-camera only)
+  # camera_keys: {0: macbook, 1: usb_left, 2: usb_right}   # device id -> ~/.nowva/intrinsics_<key>.json
+  calibration_buffer_frames: 450  # ring buffer of 2D views seen by >= 2 cameras (~15 s)
+  use_bar_scale: false            # barbell as metric ruler while a capture window is open
+  bar_detection_stride: 3         # bar detection on every Nth captured frame
+  min_calibration_frames: 240     # no calibration file: capture this many frames...
+  min_squat_excursions: 2         # ...and this many slow squats before solving
+  capture_timeout_s: 90.0         # then fall back to the T-pose calibration
+  drift_ratio: 1.5                # refine between sets when reprojection RMS > ratio x stored
+  drift_check_frames: 150
+
 kinematics:
   backend: analytical           # analytical | opensim
 

@@ -1,5 +1,8 @@
 """Public API: evaluate one chain or many chains over scenarios x seeds with shared, cached inputs.
 
+calibration: "perfect", "tpose" or a person-based bundle-adjustment mode from cameras.PERSON_BA_MODES
+("person_ba", "person_ba_height", "person_ba_from_tpose", "person_ba_k+10", ...); see CALIBRATION_MODES.
+
 Every chain sees byte-identical inputs for a given (scenario, seed, calibration, noise), so chain comparisons
 are paired. Runs are deterministic given the seed (timing metrics excepted).
 """
@@ -14,13 +17,14 @@ from typing import Callable
 import numpy as np
 
 from .body import SCENARIOS
-from .cameras import RigConfig
+from .cameras import PERSON_BA_MODES, RigConfig
 from .delivery import DeliveryConfig
 from .detector import NoiseProfile
 from .metrics import compute_metrics
-from .runner import PreparedRun, prepare_run, run_chain
+from .runner import PreparedRun, person_ba_for_seed, prepare_run, run_chain
 
 ChainFactory = Callable[[], object]
+CALIBRATION_MODES = ("perfect", "tpose", *PERSON_BA_MODES)
 
 _PREPARED_CACHE: dict[tuple, PreparedRun] = {}
 _POOL_FACTORIES: dict[str, ChainFactory] = {}
@@ -100,8 +104,18 @@ def evaluate_chains(chain_factories: dict[str, ChainFactory], scenarios: list[st
     if unknown:
         raise ValueError(f"unknown scenarios {unknown}")
     calibrations = [calibration] if isinstance(calibration, str) else list(calibration)
+    unknown_modes = [cal for cal in calibrations if cal not in CALIBRATION_MODES]
+    if unknown_modes:
+        raise ValueError(f"unknown calibration modes {unknown_modes}; choose from {list(CALIBRATION_MODES)}")
     jobs = [(scenario, s, cal) for cal in calibrations for scenario in scenarios
             for s in range(seed, seed + n_seeds)]
+    if workers > 1:
+        # person-based calibrations are solved HERE, before forking: forked workers inherit the cache (the
+        # calibrator's dense solve can deadlock inside fork()ed children on macOS/Accelerate)
+        for cal in calibrations:
+            if cal in PERSON_BA_MODES:
+                for s in range(seed, seed + n_seeds):
+                    person_ba_for_seed(s, cal, noise, rig_config, delivery_config)
     global _POOL_FACTORIES, _POOL_KWARGS
     _POOL_FACTORIES = dict(chain_factories)
     _POOL_KWARGS = {"noise": noise, "rig_config": rig_config, "delivery_config": delivery_config or DeliveryConfig(),

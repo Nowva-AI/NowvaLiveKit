@@ -19,6 +19,7 @@ import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -105,10 +106,15 @@ class BiomechanicsPipeline:
         self._valgus_estimator = build_valgus_estimator(self._multi_camera)
         self._multi_camera_provider = None
 
+        # One barbell detector serves Layer 3b tracking and, inside a camera-calibration
+        # capture window, the provider (the bar as a metric ruler).
+        bar_detector = self._build_bar_detector()
+
         if self._multi_camera:
             from biomechanics.pose.multi_camera import MultiCameraPoseProvider
 
             tri = self.config.triangulation
+            camera_calibration = self.config.camera_calibration
             self._multi_camera_provider = MultiCameraPoseProvider(
                 device_ids=tri.device_ids,
                 confidence_threshold=self.config.pose.confidence_threshold,
@@ -119,6 +125,10 @@ class BiomechanicsPipeline:
                 resolution=self.config.capture.resolution,
                 primary_camera=tri.primary_camera,
                 focal_length_factor=tri.focal_length_factor,
+                camera_keys=camera_calibration.camera_keys,
+                calibration_buffer_frames=camera_calibration.calibration_buffer_frames,
+                bar_detection_stride=camera_calibration.bar_detection_stride,
+                bar_detector=bar_detector,
             )
             if tri.calibration_file:
                 self._multi_camera_provider.load_calibration(tri.calibration_file)
@@ -209,15 +219,10 @@ class BiomechanicsPipeline:
         self._barbell_detector = None
         self._bar_tracker = None
         if self.config.barbell_tracking.enabled:
-            from biomechanics.barbell_tracking import BarbellDetector, BarPathTracker
+            from biomechanics.barbell_tracking import BarPathTracker
 
             bt = self.config.barbell_tracking
-            self._barbell_detector = BarbellDetector(
-                model_path=bt.model_path,
-                conf_threshold=bt.conf_threshold,
-                imgsz=bt.imgsz,
-                device=bt.device,
-            )
+            self._barbell_detector = bar_detector
             self._bar_tracker = BarPathTracker(
                 bar_length_m=bt.bar_length_m,
                 kalman_q=bt.kalman_q,
@@ -286,6 +291,28 @@ class BiomechanicsPipeline:
 
         # Store last raw frame for dashboard access
         self.last_frame: np.ndarray | None = None
+
+    def _build_bar_detector(self):
+        bt = self.config.barbell_tracking
+        calibration_ruler = self._multi_camera and self.config.camera_calibration.use_bar_scale
+        if not bt.enabled and not calibration_ruler:
+            return None
+        if not bt.enabled and not Path(bt.model_path).exists():
+            logger.warning(
+                "[PIPELINE] camera_calibration.use_bar_scale is on but %s is missing; "
+                "camera calibration takes its scale from the user's height instead",
+                bt.model_path,
+            )
+            return None
+
+        from biomechanics.barbell_tracking import BarbellDetector
+
+        return BarbellDetector(
+            model_path=bt.model_path,
+            conf_threshold=bt.conf_threshold,
+            imgsz=bt.imgsz,
+            device=bt.device,
+        )
 
     def _open_capture(self) -> None:
         self._cap = cv2.VideoCapture(self.config.capture.device_id)
@@ -389,6 +416,20 @@ class BiomechanicsPipeline:
 
         if self._display_smoother is not None:
             self._display_smoother.reset()
+
+    def on_calibration_changed(self, world_frame_changed: bool) -> None:
+        """
+        A new camera calibration was installed in the provider. Temporal state always
+        restarts; when the world frame itself moved (first calibration, board -> person
+        re-anchor) the foot contact anchors and floor go too. Body measurements are
+        lengths, so they survive either way.
+        """
+        if world_frame_changed:
+            self._preik.reset_world_state()
+        else:
+            self._preik.reset()
+        if self._multi_camera_provider is not None:
+            self._multi_camera_provider.reset_temporal_state()
 
     def apply_athlete_params(self, params: dict) -> None:
         """Adopt a returning user's stored body measurements and scale thresholds once."""

@@ -80,6 +80,15 @@ class PreIKChain:
         self._smoother.reset()
         self._recent.clear()
 
+    def reset_world_state(self) -> None:
+        """
+        The world frame itself changed (new camera calibration origin, heading or vertical):
+        clear the temporal state and the foot contact anchors and floor, which live in the old frame.
+        """
+        self.reset()
+        if self._foot_contact is not None:
+            self._foot_contact.reset()
+
     def run(self, skeleton: Skeleton3D) -> PreIKResult | None:
         """Process one measured frame. None means the hips are unavailable (dropout path)."""
         points = skeleton.to_numpy()

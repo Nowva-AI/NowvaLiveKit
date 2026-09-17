@@ -59,3 +59,19 @@ chains (conf floor diagnostic: knee MAE moving 14.3 -> 4.3 deg). Verified API ex
 - proposed.py: FixedLagKeypointSmoother(lag 2) [-> FootContactModel] -> recentre_at_hips, outputs aligned by tick.
 - run_proposed.py -> proposed_results.json + proposed_summary.md (tables + proposed_findings.md). 23 s, 6 workers.
 - Diagnostics: trace_foot.py, repro_kalman_reacquire.py (B1), repro_foot_step.py (B2).
+
+## Milestone 5 — person-based extrinsic calibration mode (DONE 2026-09-17, contract K2 / WS-B)
+- New calibration modes `person_ba*` (cameras.PERSON_BA_MODES; api.CALIBRATION_MODES lists all): the production
+  `PersonCalibrator` (src/biomechanics/triangulation/person_calibration.py) runs on ONE simulated capture per seed
+  (runner.person_ba_capture: `walkout` generator with seed + 1000, walk-in + 2 reps, same detector / occlusion / swap /
+  delivery models; barbell.py simulates the two bar ends per camera, ordered by image x like the YOLO detector).
+  Variants: true K + bar, true K + height prior, refine() from the T-pose calibration, focal +-10 % (bar / height).
+- Gauge: the calibrator's world is anchored on the lifter, the harness truth on the T-pose spot -> cameras.
+  person_ba_calibration removes ONLY heading (yaw about the true vertical) + origin, fitted on noise-free triangulations
+  of the capture's true joints. Tilt, relative poses and scale errors stay in the metrics. Same fit changes `tpose`
+  by < 0.2 mm, so modes are comparable.
+- runner stats gained `calibration_floor_mm` (noise-free true projections triangulated with the calibration under test).
+- run_person_ba.py -> person_ba_results.json + person_ba_summary.md (75 s, 6 workers).
+- macOS gotcha: numpy/scipy use Accelerate; the calibrator's dense camera-only solve deadlocks inside fork()ed workers.
+  api.evaluate_chains therefore solves person_ba calibrations in the parent before forking; run_person_ba.py instead
+  sets VECLIB_MAXIMUM_THREADS=1 before importing numpy and warms them in a pool.

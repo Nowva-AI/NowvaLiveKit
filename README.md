@@ -311,13 +311,46 @@ Both backends output `Skeleton2D` (pixel coordinates) and `Skeleton3D` (world co
 
 ### 2. Multi-Camera Triangulation
 
-**Files:** `src/biomechanics/triangulation/calibration.py`, `src/biomechanics/triangulation/triangulator.py`, `src/biomechanics/triangulation/multi_capture.py`
+**Files:** `src/biomechanics/triangulation/calibration.py`, `src/biomechanics/triangulation/person_calibration.py`, `src/biomechanics/triangulation/charuco.py`, `src/biomechanics/triangulation/triangulator.py`, `src/biomechanics/triangulation/multi_capture.py`, `src/biomechanics/pose/multi_camera.py`, `scripts/tools/calibrate_cameras.py`
 
 Optional stereo/multi-camera mode for true 3D reconstruction (disabled by default — single camera uses MediaPipe's built-in depth estimation).
 
-#### T-Pose Calibration
+#### Camera Calibration
 
-Calibration uses a canonical T-pose model scaled to the user's height (188.5cm default) with anthropometric segment-to-height ratios:
+Calibration has two halves. **Intrinsics** (focal length, principal point, lens distortion) are a property of each camera and are measured once with a ChArUco board. **Extrinsics** (where the cameras sit) are solved from the lifter: nothing but the person squatting is needed, with the barbell as an optional metric ruler. Everything lives in `~/.nowva/` and runs on the edge device — no cloud step.
+
+| File in `~/.nowva/` | Written by | Meaning |
+|---|---|---|
+| `intrinsics_<camera_key>.json` | `calibrate_cameras.py intrinsics` | Real K + distortion for one camera at one resolution |
+| `rig_calibration_cams_<ids>.json` | first session (person calibration or T-pose), or `calibrate_cameras.py extrinsics` at the factory | The rig calibration; never overwritten by refines |
+| `rig_calibration_cams_<ids>_refined.json` | board re-anchor and drift refines | Field refinement; loaded instead of the file above when newer |
+
+**1. Intrinsics, once per camera (recommended):**
+
+```bash
+venv/bin/python scripts/tools/calibrate_cameras.py board --out board.png        # print it, measure the squares
+venv/bin/python scripts/tools/calibrate_cameras.py intrinsics --camera 0          # repeat for each device id
+```
+
+The pipeline looks intrinsics up at the resolution each camera **actually opened at** (a webcam that refuses 1280×720 is handled). A camera without a file falls back to the guessed pinhole (`f = 0.8 × width`, centred, no distortion) and the log prints one warning with the exact command to run. `camera_calibration.camera_keys` maps a device id to a named file (`{1: usb_left}` → `intrinsics_usb_left.json`).
+
+**2. Session flow (`CameraCalibrationSession` in `pipeline_process.py`):**
+
+1. Load order: `_refined` file if newer → factory / previous file → none. `triangulation.calibration_file`, when set, replaces the `~/.nowva` rig file as the factory file.
+2. No file: the HUD shows **CALIBRATING CAMERAS - STEP IN AND DO TWO SLOW SQUATS** with a `FRAMES n/240  SQUATS n/2` counter. Pose estimation runs 2D-only, the provider buffers frames seen by ≥ 2 cameras, and once both targets are met `PersonCalibrator.calibrate` runs in a worker thread (HUD: *SOLVING, ONE MOMENT*; ~1–3 s on an M2). The result is saved to `rig_calibration_cams_<ids>.json` and installed, and the session continues into the normal assessment. Scale comes from the barbell when a detector is available (`barbell_tracking.enabled` or `camera_calibration.use_bar_scale`), else from the user's height.
+3. No two squats within `capture_timeout_s`, or the solve fails: fall back to the T-pose calibration below after a 5 s on-screen countdown.
+4. A factory calibration (`world_anchor: "board"`) is refined once on the assessment reps (or at the first rest for returning users) to move the world frame onto the lifter, and saved as `_refined`.
+5. **Drift monitor:** at every rest start the reprojection health of the set's last `drift_check_frames` frames is compared with the RMS stored in the calibration. Above `drift_ratio` × stored, a refine (`keep_world_frame=True`, scale kept) runs in a thread during the rest and installs before the readiness gate re-arms — never mid-set. A refine that does not improve health is discarded.
+
+Installing a calibration calls `pipeline.on_calibration_changed(world_frame_changed)`: the Kalman state and triangulator history always restart; the foot contact anchors and floor reset only when the world frame itself moved (first calibration, board → person). Body measurements are never reset. To recalibrate after moving cameras, delete `~/.nowva/rig_calibration_cams_*`.
+
+Config (`camera_calibration:` in `config/biomechanics.yaml`): `camera_keys`, `calibration_buffer_frames` (450), `use_bar_scale` (false), `bar_detection_stride` (3), `min_calibration_frames` (240), `min_squat_excursions` (2), `capture_timeout_s` (90), `drift_ratio` (1.5), `drift_check_frames` (150).
+
+`venv/bin/python scripts/tools/calibrate_cameras.py check --cameras 0,1,2` prints the current reprojection health on live frames.
+
+#### T-Pose Calibration (fallback)
+
+The fallback uses a canonical T-pose model scaled to the user's height (188.5cm default) with anthropometric segment-to-height ratios:
 
 | Segment | Ratio |
 |---------|-------|
@@ -338,7 +371,7 @@ Calibration uses a canonical T-pose model scaled to the user's height (188.5cm d
 5. Compute projection matrix `P = K @ [R|t]` per camera
 6. Validate with reprojection error (warns if >10px)
 
-Intrinsic matrix: `focal_length = 0.8 × resolution_width`, no lens distortion.
+Intrinsics come from `~/.nowva/intrinsics_<camera_key>.json` when present; otherwise `focal_length = 0.8 × resolution_width`, no lens distortion.
 
 #### DLT Triangulation
 

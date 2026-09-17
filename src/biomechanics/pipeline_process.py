@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import select
 import signal
 import sys
@@ -18,6 +19,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Callable
 
 # Add src/ to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -36,13 +38,26 @@ from biomechanics.calibration import (
 )
 from biomechanics.coaching.ipc_bridge import IPCBridge
 from biomechanics.coaching.session_tracker import SessionTracker
-from biomechanics.config import load_pipeline_config
+from biomechanics.config import BiomechanicsConfig, load_pipeline_config
 from biomechanics.diagnosis.bridge import build_anthro_dict, build_rom_dict
 from biomechanics.diagnosis.demo_builder import build_demo_data
 from biomechanics.diagnosis.engine import HypothesisEngine
 from biomechanics.diagnosis.rep_scoring import score_set
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.diagnosis.types import SetFeatures
+from biomechanics.triangulation.calibration import (
+    WORLD_ANCHOR_BOARD,
+    CalibrationResult,
+    TPoseCalibrator,
+    rig_calibration_path,
+)
+from biomechanics.triangulation.person_calibration import (
+    PersonCalibrationResult,
+    PersonCalibrator,
+    reprojection_health_px,
+)
+from biomechanics.utils.types import CocoKeypoints as CK
+from biomechanics.utils.types import PipelineFrame, Skeleton2D
 from biomechanics.viz import draw_skeleton, draw_fps, FPSCounter
 from biomechanics.viz.live_stream import get_display_sink
 from biomechanics.viz.demo_ws_bridge import (
@@ -77,10 +92,28 @@ DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0}
 # get kinematics; past this wait after the last rep they go through without.
 ASSESSMENT_MEASUREMENT_WAIT_S = 5.0
 
-# Camera extrinsics are a property of the rig, so they persist across
-# sessions: one file per camera set, reused until deleted.
-RIG_CALIBRATION_DIR = Path.home() / ".nowva"
+# Camera extrinsics are a property of the rig, so they persist across sessions: one
+# file per camera set (calibration.rig_calibration_path), reused until deleted. Refines
+# made in the field go to a sibling file so the factory / first calibration is never overwritten.
+REFINED_CALIBRATION_SUFFIX = "_refined"
 FALLBACK_USER_HEIGHT_M = 1.885
+
+# No calibration file: the lifter is the calibration target. Hershey fonts are ASCII-only.
+CALIBRATION_CAPTURE_HEADLINE = "CALIBRATING CAMERAS - STEP IN AND DO TWO SLOW SQUATS"
+CALIBRATION_SOLVING_HEADLINE = "CALIBRATING CAMERAS - SOLVING, ONE MOMENT"
+WORLD_ANCHOR_HEADLINE = "ALIGNING CAMERAS TO YOU - ONE MOMENT"
+TPOSE_FALLBACK_HEADLINE = "HOLD A T-POSE FACING THE FRONT CAMERA"
+TPOSE_COUNTDOWN_S = 5.0
+
+# Squat-like excursion from the 2D knee-flexion proxy: down for a few frames, then back up.
+SQUAT_DOWN_KNEE_FLEXION_2D_DEG = 60.0
+SQUAT_UP_KNEE_FLEXION_2D_DEG = 25.0
+SQUAT_MIN_DOWN_FRAMES = 3
+MIN_LEG_KEYPOINT_SCORE = 0.5
+LEG_KEYPOINT_TRIPLES = (
+    (CK.LEFT_HIP, CK.LEFT_KNEE, CK.LEFT_ANKLE),
+    (CK.RIGHT_HIP, CK.RIGHT_KNEE, CK.RIGHT_ANKLE),
+)
 
 # --- HUD styling (BGR brand palette) ---
 HUD_CYAN = (255, 229, 0)
@@ -158,6 +191,29 @@ def _draw_wordmark(frame):
     frame_h = frame.shape[0]
     cv2.putText(frame, "N O W V A", (18, frame_h - 18),
                 HUD_FONT, 0.5, (150, 138, 112), 1, cv2.LINE_AA)
+
+
+def _show_status_frame(
+    pipeline: BiomechanicsPipeline,
+    result: PipelineFrame,
+    display_sink,
+    fps_counter: FPSCounter,
+    headline: str,
+    detail: str | None,
+) -> None:
+    frame = pipeline.last_frame
+    if frame is None:
+        return
+    display = frame.copy()
+    if result.skeleton_2d is not None:
+        draw_skeleton(display, result.skeleton_2d)
+    fps_counter.update()
+    draw_fps(display, fps_counter.fps)
+    _draw_hud_pill(display, headline, accent=HUD_VIOLET)
+    if detail is not None:
+        _draw_hud_pill(display, detail, align="left", accent=HUD_CYAN, font_scale=1.1, y=48)
+    _draw_wordmark(display)
+    display_sink.show(display)
 
 
 def _save_calibration_report(peaks: dict, profile: dict, cal_reps: int, out_dir: str):
@@ -275,20 +331,349 @@ def _build_calibration_complete_message(
     return message
 
 
-def _rig_calibration_path(device_ids: list[int]) -> Path:
-    camera_key = "-".join(str(device_id) for device_id in device_ids)
-    return RIG_CALIBRATION_DIR / f"rig_calibration_cams_{camera_key}.json"
-
-
 def _resolve_user_height_m(user_height_cm: float | None) -> float:
     if user_height_cm:
         return user_height_cm / 100.0
     height_m = float(os.getenv("NOWVA_USER_HEIGHT_M", str(FALLBACK_USER_HEIGHT_M)))
     print(
-        f"[MULTI-CAM] WARNING: no user height in profile — T-pose calibration "
-        f"assumes {height_m} m (NOWVA_USER_HEIGHT_M); every 3D length scales with it"
+        f"[MULTI-CAM] WARNING: no user height in profile — camera calibration "
+        f"assumes {height_m} m (NOWVA_USER_HEIGHT_M); without a barbell every 3D length scales with it"
     )
     return height_m
+
+
+def refined_calibration_path(factory_path: Path) -> Path:
+    return factory_path.with_name(f"{factory_path.stem}{REFINED_CALIBRATION_SUFFIX}{factory_path.suffix}")
+
+
+def select_calibration_file(factory_path: Path) -> Path | None:
+    """Load order: the refined calibration when newer than the factory / previous file, then that file, else None."""
+    refined_path = refined_calibration_path(factory_path)
+    if refined_path.exists() and (
+        not factory_path.exists() or refined_path.stat().st_mtime > factory_path.stat().st_mtime
+    ):
+        return refined_path
+    return factory_path if factory_path.exists() else None
+
+
+def knee_flexion_2d_deg(views: dict[str, Skeleton2D]) -> float:
+    """
+    Largest 2D knee flexion over cameras and legs, in degrees; NaN when no camera sees a whole
+    leg. Foreshortening only ever lowers the 2D angle, so the most side-on camera reads closest.
+    """
+    flexions_deg = []
+    for skeleton in views.values():
+        keypoints = skeleton.to_numpy()
+        for hip, knee, ankle in LEG_KEYPOINT_TRIPLES:
+            if keypoints[[hip, knee, ankle], 2].min() < MIN_LEG_KEYPOINT_SCORE:
+                continue
+            thigh = keypoints[hip, :2] - keypoints[knee, :2]
+            shank = keypoints[ankle, :2] - keypoints[knee, :2]
+            length_product = float(np.linalg.norm(thigh) * np.linalg.norm(shank))
+            if length_product <= 0.0:
+                continue
+            cosine = float(np.clip(np.dot(thigh, shank) / length_product, -1.0, 1.0))
+            flexions_deg.append(180.0 - math.degrees(math.acos(cosine)))
+    return max(flexions_deg) if flexions_deg else math.nan
+
+
+class SquatExcursionCounter:
+    """Counts squat-like excursions of the 2D knee-flexion proxy: held down a few frames, then back up."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self._down_frames = 0
+        self._is_down = False
+
+    def update(self, knee_flexion_deg: float) -> None:
+        if math.isnan(knee_flexion_deg):
+            return
+        if knee_flexion_deg >= SQUAT_DOWN_KNEE_FLEXION_2D_DEG:
+            self._down_frames += 1
+            if self._down_frames >= SQUAT_MIN_DOWN_FRAMES:
+                self._is_down = True
+            return
+        self._down_frames = 0
+        if self._is_down and knee_flexion_deg <= SQUAT_UP_KNEE_FLEXION_2D_DEG:
+            self._is_down = False
+            self.count += 1
+
+
+class CalibrationSolve:
+    """
+    One person-calibration solve on a worker thread, so frames keep flowing. Never a forked
+    process: on macOS Accelerate deadlocks in forked children.
+    """
+
+    def __init__(self, solve_fn: Callable[[], PersonCalibrationResult]) -> None:
+        self.result: PersonCalibrationResult | None = None
+        self.error: Exception | None = None
+        self._solve_fn = solve_fn
+        self._thread = threading.Thread(target=self._run, name="camera-calibration", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Any failed solve has a fallback (T-pose, or keeping the current calibration),
+        # so it is reported to the session instead of killing the thread silently.
+        try:
+            self.result = self._solve_fn()
+        except Exception as error:
+            self.error = error
+
+    @property
+    def done(self) -> bool:
+        return not self._thread.is_alive()
+
+
+ShowStatusFn = Callable[[PipelineFrame, str, str | None], None]
+
+
+class CameraCalibrationSession:
+    """
+    Owns the rig's camera calibration for one multi-camera session: loads it or bootstraps
+    it from the lifter's own squats, re-anchors a board (factory) calibration on the lifter,
+    and refines it between sets when the reprojection health drifts.
+    """
+
+    def __init__(
+        self,
+        pipeline: BiomechanicsPipeline,
+        config: BiomechanicsConfig,
+        factory_path: Path,
+        user_height_cm: float | None,
+        show_status_fn: ShowStatusFn,
+        clock_fn: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._pipeline = pipeline
+        self._provider = pipeline._multi_camera_provider
+        self._settings = config.camera_calibration
+        self._bar_length_m = config.barbell_tracking.bar_length_m
+        self._factory_path = factory_path
+        self._refined_path = refined_calibration_path(factory_path)
+        self._user_height_cm = user_height_cm
+        self._show_status_fn = show_status_fn
+        self._clock_fn = clock_fn
+
+        # Drift baseline: the RMS stored with the calibration; 0 = measure it at the first set boundary.
+        self._baseline_rms_px = 0.0
+        self._world_anchor_pending = False
+        # Background refine between sets: the solve, the health that triggered it and its views.
+        self._refine: CalibrationSolve | None = None
+        self._refine_keeps_world_frame = True
+        self._refine_health_before_px = math.nan
+        self._refine_check_views: list[dict[str, Skeleton2D]] = []
+
+    @property
+    def needs_world_anchor(self) -> bool:
+        """A board-anchored (factory) calibration is loaded and has not been re-anchored on the lifter yet."""
+        return self._world_anchor_pending
+
+    @property
+    def is_refining(self) -> bool:
+        """A between-set refine is running or waiting for its install window."""
+        return self._refine is not None
+
+    def establish(self) -> None:
+        """Refined file (if newer) -> factory / previous file -> bootstrap from the lifter -> T-pose."""
+        selected_path = select_calibration_file(self._factory_path)
+        if selected_path is None:
+            self._bootstrap()
+            return
+        self._provider.load_calibration(str(selected_path))
+        self._adopt(self._provider.calibration)
+        print(
+            f"[MULTI-CAM] Loaded rig calibration {selected_path} "
+            f"(delete rig_calibration_cams_* in {selected_path.parent} to recalibrate after moving cameras)"
+        )
+        if self._world_anchor_pending:
+            print("[MULTI-CAM] Board-anchored calibration: the world frame moves onto the lifter after the first reps")
+
+    def anchor_world_on_lifter(self) -> None:
+        """
+        One refine of a board-anchored calibration on the buffered views (the reps just done),
+        re-anchoring the world frame on the lifter. Frames keep flowing while it solves; the
+        factory file is never overwritten. Call between sets only.
+        """
+        refine = self._start_refine(keep_world_frame=False)
+        was_presence_only = self._pipeline.presence_only
+        self._pipeline.presence_only = True
+        self._show_until_done(refine, WORLD_ANCHOR_HEADLINE)
+        self._pipeline.presence_only = was_presence_only
+        self._finish_refine()
+
+    def on_rest_start(self) -> None:
+        """
+        A set just ended: install a refine that finished too late for the previous rest, else
+        check the reprojection health of the set's last frames and start a refine if it drifted.
+        """
+        if self._refine is not None:
+            if self._refine.done:
+                self._finish_refine()
+            return
+        if self._world_anchor_pending:
+            self._start_refine(keep_world_frame=False)
+            return
+
+        check_views = self._provider.recent_views(self._settings.drift_check_frames)
+        health_px = reprojection_health_px(self._provider.calibration, check_views)
+        if not math.isfinite(health_px):
+            return
+        if self._baseline_rms_px <= 0.0:
+            self._baseline_rms_px = health_px
+            print(f"[MULTI-CAM] Reprojection baseline measured: {health_px:.2f} px")
+            return
+        limit_px = self._settings.drift_ratio * self._baseline_rms_px
+        if health_px <= limit_px:
+            print(f"[MULTI-CAM] Reprojection health {health_px:.2f} px (limit {limit_px:.2f} px) — calibration holds")
+            return
+        print(
+            f"[MULTI-CAM] Reprojection health {health_px:.2f} px exceeds {limit_px:.2f} px "
+            f"({self._settings.drift_ratio:.1f} x {self._baseline_rms_px:.2f}) — refining cameras during rest"
+        )
+        self._refine_health_before_px = health_px
+        self._refine_check_views = check_views
+        self._start_refine(keep_world_frame=True)
+
+    def poll(self, can_install: bool) -> None:
+        """Every frame. can_install is True only between sets (resting before the gate re-arms): never mid-set."""
+        if self._refine is not None and self._refine.done and can_install:
+            self._finish_refine()
+
+    def _adopt(self, calibration: CalibrationResult) -> None:
+        self._baseline_rms_px = calibration.rms_reprojection_px
+        self._world_anchor_pending = calibration.world_anchor == WORLD_ANCHOR_BOARD
+
+    def _install(self, calibration: CalibrationResult, world_frame_changed: bool) -> None:
+        self._provider.install_calibration(calibration)
+        self._pipeline.on_calibration_changed(world_frame_changed)
+        self._adopt(calibration)
+
+    def _show_until_done(self, solve: CalibrationSolve, headline: str) -> None:
+        while not solve.done:
+            self._show_status_fn(self._pipeline.process_frame(), headline, None)
+
+    def _bootstrap(self) -> None:
+        settings = self._settings
+        provider = self._provider
+        height_m = _resolve_user_height_m(self._user_height_cm)
+        print(
+            f"[MULTI-CAM] No rig calibration at {self._factory_path} — calibrating from the lifter: "
+            f"step in and do two slow squats"
+        )
+
+        self._pipeline.presence_only = True
+        provider.begin_calibration_capture()
+        excursions = SquatExcursionCounter()
+        newest_views: dict[str, Skeleton2D] | None = None
+        deadline_s = self._clock_fn() + settings.capture_timeout_s
+        captured = False
+        while self._clock_fn() < deadline_s:
+            result = self._pipeline.process_frame()
+            recent = provider.recent_views(1)
+            if recent and recent[0] is not newest_views:
+                newest_views = recent[0]
+                excursions.update(knee_flexion_2d_deg(newest_views))
+            frame_count = provider.calibration_frame_count
+            if frame_count >= settings.min_calibration_frames and excursions.count >= settings.min_squat_excursions:
+                captured = True
+                break
+            self._show_status_fn(
+                result,
+                CALIBRATION_CAPTURE_HEADLINE,
+                f"FRAMES {min(frame_count, settings.min_calibration_frames)}/{settings.min_calibration_frames}"
+                f"  SQUATS {min(excursions.count, settings.min_squat_excursions)}/{settings.min_squat_excursions}",
+            )
+        provider.end_calibration_capture()
+
+        failure = f"no two slow squats seen by two cameras within {settings.capture_timeout_s:.0f} s"
+        if captured:
+            views = provider.calibration_views()
+            bar_ends = provider.calibration_bar_ends()
+            calibrator = PersonCalibrator(
+                provider.rig_intrinsics(),
+                provider.capture_resolution,
+                bar_length_m=self._bar_length_m if provider.has_bar_detector else None,
+                height_m=height_m,
+            )
+            solve = CalibrationSolve(lambda: calibrator.calibrate(views, bar_ends, initial=None))
+            self._show_until_done(solve, CALIBRATION_SOLVING_HEADLINE)
+            if solve.result is not None:
+                self._save_and_install(solve.result, self._factory_path, world_frame_changed=True)
+                self._pipeline.presence_only = False
+                return
+            failure = f"person-based calibration failed ({solve.error})"
+
+        self._tpose_fallback(failure, height_m)
+        self._pipeline.presence_only = False
+
+    def _tpose_fallback(self, reason: str, height_m: float) -> None:
+        print(
+            f"[MULTI-CAM] {reason} — falling back to the T-pose calibration (height={height_m} m): "
+            f"face the front camera with both arms straight out at shoulder height"
+        )
+        countdown_end_s = self._clock_fn() + TPOSE_COUNTDOWN_S
+        while self._clock_fn() < countdown_end_s:
+            remaining_s = math.ceil(countdown_end_s - self._clock_fn())
+            self._show_status_fn(self._pipeline.process_frame(), TPOSE_FALLBACK_HEADLINE, f"T-POSE IN {remaining_s}")
+        self._factory_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration = self._provider.calibrate(height_m=height_m, save_path=str(self._factory_path))
+        self._pipeline.on_calibration_changed(world_frame_changed=True)
+        self._adopt(calibration)
+        print(f"[MULTI-CAM] T-pose calibration complete — saved to {self._factory_path}")
+
+    def _save_and_install(
+        self, result: PersonCalibrationResult, save_path: Path, world_frame_changed: bool
+    ) -> None:
+        calibration = result.calibration
+        calibration.rms_reprojection_px = result.rms_reprojection_px
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        TPoseCalibrator.save_calibration(calibration, str(save_path))
+        self._install(calibration, world_frame_changed)
+        print(
+            f"[MULTI-CAM] Camera calibration from {result.frames_used} frames (scale: {result.scale_source}): "
+            f"reprojection {result.initial_rms_reprojection_px:.2f} -> {result.rms_reprojection_px:.2f} px "
+            f"in {result.solve_time_s:.1f} s — saved to {save_path}"
+        )
+
+    def _start_refine(self, keep_world_frame: bool) -> CalibrationSolve:
+        calibration = self._provider.calibration
+        views = self._provider.calibration_views()
+        # A refine keeps the intrinsics and the metric scale of the calibration it starts from
+        # (no bar or height prior): segment lengths measured earlier in the session stay valid.
+        calibrator = PersonCalibrator(
+            {
+                cam_id: (camera.intrinsic_matrix, camera.distortion_coeffs)
+                for cam_id, camera in calibration.cameras.items()
+            },
+            self._provider.capture_resolution,
+        )
+        self._refine_keeps_world_frame = keep_world_frame
+        self._refine = CalibrationSolve(
+            lambda: calibrator.refine(calibration, views, keep_world_frame=keep_world_frame)
+        )
+        return self._refine
+
+    def _finish_refine(self) -> None:
+        refine = self._refine
+        keeps_world_frame = self._refine_keeps_world_frame
+        self._refine = None
+        if refine.result is None:
+            print(f"[MULTI-CAM] Camera refine failed ({refine.error}) — keeping the current calibration")
+            return
+        if keeps_world_frame:
+            health_after_px = reprojection_health_px(refine.result.calibration, self._refine_check_views)
+            health_before_px = self._refine_health_before_px
+            self._refine_check_views = []
+            if not health_after_px < health_before_px:
+                # The rig did not move: this is simply how well these cameras fit these frames.
+                self._baseline_rms_px = health_before_px
+                print(
+                    f"[MULTI-CAM] Drift refine did not help ({health_before_px:.2f} -> {health_after_px:.2f} px) "
+                    f"— keeping the current calibration"
+                )
+                return
+            print(f"[MULTI-CAM] Drift refine: reprojection health {health_before_px:.2f} -> {health_after_px:.2f} px")
+        self._save_and_install(refine.result, self._refined_path, world_frame_changed=not keeps_world_frame)
 
 
 def _serialize_diagnosis(diagnosis_result, score_summary) -> tuple[dict, dict]:
@@ -433,6 +818,10 @@ def run_biomechanics_pipeline(
     # Override camera device from CLI arg
     config.capture.device_id = cam0_id
 
+    fps_counter = FPSCounter()
+    display_sink = get_display_sink()
+    camera_calibration: CameraCalibrationSession | None = None
+
     # Initialize pipeline
     try:
         pipeline = BiomechanicsPipeline(
@@ -452,26 +841,25 @@ def run_biomechanics_pipeline(
             pipeline.start_capture()
             print("[PRELOAD] Camera opened — entering frame loop")
 
-        # Multi-camera calibration: config triangulation.calibration_file (loaded
-        # by the pipeline) wins, then this rig's saved calibration, then T-pose.
+        # Multi-camera calibration. The factory / previous file is config
+        # triangulation.calibration_file when set, else this rig's file in ~/.nowva;
+        # a newer "_refined" sibling wins, and with no file the lifter's first
+        # squats calibrate the cameras (T-pose as the last resort).
         if pipeline._multi_camera and pipeline._multi_camera_provider is not None:
-            if not pipeline._multi_camera_provider.is_calibrated:
-                rig_calibration_path = _rig_calibration_path(config.triangulation.device_ids)
-                if rig_calibration_path.exists():
-                    pipeline._multi_camera_provider.load_calibration(str(rig_calibration_path))
-                    print(
-                        f"[MULTI-CAM] Loaded rig calibration {rig_calibration_path} "
-                        f"(delete it to recalibrate after moving cameras)"
-                    )
-                else:
-                    height_m = _resolve_user_height_m(user_height_cm)
-                    print(f"[MULTI-CAM] Running T-pose calibration (height={height_m}m)...")
-                    rig_calibration_path.parent.mkdir(parents=True, exist_ok=True)
-                    pipeline._multi_camera_provider.calibrate(
-                        height_m=height_m,
-                        save_path=str(rig_calibration_path),
-                    )
-                    print(f"[MULTI-CAM] Calibration complete — saved to {rig_calibration_path}")
+            camera_calibration = CameraCalibrationSession(
+                pipeline,
+                config,
+                factory_path=(
+                    Path(config.triangulation.calibration_file)
+                    if config.triangulation.calibration_file
+                    else rig_calibration_path(config.triangulation.device_ids)
+                ),
+                user_height_cm=user_height_cm,
+                show_status_fn=lambda result, headline, detail: _show_status_frame(
+                    pipeline, result, display_sink, fps_counter, headline, detail,
+                ),
+            )
+            camera_calibration.establish()
 
         bridge = IPCBridge(ipc_client)
         session_tracker = SessionTracker(bridge, config=config.coaching)
@@ -492,8 +880,6 @@ def run_biomechanics_pipeline(
         ipc_client.disconnect()
         return
 
-    fps_counter = FPSCounter()
-    display_sink = get_display_sink()
     session_output = os.environ.get("NOWVA_SESSION_OUTPUT_DIR")
     out_dir = make_output_dir(base=os.path.join(session_output, "output") if session_output else "output")
 
@@ -878,6 +1264,11 @@ def run_biomechanics_pipeline(
                     })
                     assessment_passed = True
 
+            # A factory (board-anchored) camera calibration moves its world frame
+            # onto the lifter using the assessment reps just buffered.
+            if camera_calibration is not None and camera_calibration.needs_world_anchor:
+                camera_calibration.anchor_world_on_lifter()
+
         except KeyboardInterrupt:
             print("\nAssessment stopped by user")
             pipeline.release()
@@ -1144,6 +1535,9 @@ def run_biomechanics_pipeline(
                     else:
                         set_collector.reset()
 
+                    if camera_calibration is not None:
+                        camera_calibration.on_rest_start()
+
                     print(f"[REST] Starting {rest_seconds}s rest timer")
                 elif incoming.get("type") == "assessment_mode":
                     session_tracker.set_assessment_mode(incoming.get("enabled", False))
@@ -1260,6 +1654,13 @@ def run_biomechanics_pipeline(
                             set_plot_data, {"exercise": exercise_name},
                             out_dir, auto_open=False,
                         )
+
+            # A camera refine that finished installs between sets only: while
+            # resting before the gate re-arms, or once the workout is over.
+            if camera_calibration is not None:
+                camera_calibration.poll(
+                    can_install=(resting and not gate_prearmed) or workout_finished,
+                )
 
             result = pipeline.process_frame()
 

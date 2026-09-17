@@ -4,6 +4,9 @@ to each camera's averaged 2D keypoints with cv2.solvePnP. Height gives absolute 
 
 World frame: origin at hip midpoint, meters, right-handed. X = subject's left,
 Y = down, +Z = subject's BACK (the front camera sits at -Z; forward is -Z).
+
+Also owns the calibration file schema: per-camera real intrinsics + lens distortion
+(~/.nowva/intrinsics_<camera_key>.json) and keypoint undistortion for the triangulator.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -34,6 +38,18 @@ SEGMENT_RATIOS = {
 }
 
 NUM_TPOSE_KEYPOINTS = 17  # COCO-17; skeleton foot keypoints 17-20 are not in the model
+
+# Per-machine calibration files: intrinsics_<camera_key>.json and rig_calibration_cams_<ids>.json.
+NOWVA_CALIBRATION_DIR = Path.home() / ".nowva"
+NUM_DISTORTION_COEFFS = 5  # OpenCV order: k1, k2, p1, p2, k3
+UNDISTORT_MAX_ITERATIONS = 50
+UNDISTORT_CONVERGENCE_PX = 1e-5
+
+# CalibrationResult.world_anchor: "person" = origin at the lifter's hip midpoint (T-pose or
+# person calibration); "board" = factory ChArUco rig calibration, origin at the mean board
+# centre, which person_calibration.refine re-anchors to the lifter.
+WORLD_ANCHOR_PERSON = "person"
+WORLD_ANCHOR_BOARD = "board"
 
 # Keypoint gate on the per-camera mean raw RTMPose score (missed frames count as 0).
 # Raw scores: no-person images peak at 0.16-0.27; visible keypoints on tracked crops
@@ -67,6 +83,7 @@ class CameraCalibration:
     translation_vector: np.ndarray
     reprojection_error: float
     resolution: tuple[int, int]
+    distortion_coeffs: np.ndarray = field(default_factory=lambda: np.zeros(NUM_DISTORTION_COEFFS))
 
 
 @dataclass
@@ -76,6 +93,104 @@ class CalibrationResult:
     tpose_model_3d: np.ndarray | None = None
     athlete_height_m: float = 0.0
     timestamp: str = ""
+    world_anchor: str = WORLD_ANCHOR_PERSON
+    # Robust RMS reprojection residual at solve time, the drift monitor's baseline; 0 = not measured.
+    rms_reprojection_px: float = 0.0
+
+
+def undistort_keypoints(points_px: np.ndarray, calibration: CameraCalibration) -> np.ndarray:
+    """
+    Remove lens distortion from (N, 2) pixel coordinates, staying in the same K, so the
+    result is what projection_matrix predicts. Identity when every coefficient is zero.
+    """
+    points_px = np.asarray(points_px, dtype=np.float64)
+    if len(points_px) == 0 or not np.any(calibration.distortion_coeffs):
+        return points_px.copy()
+    criteria = (
+        cv2.TERM_CRITERIA_COUNT + cv2.TERM_CRITERIA_EPS,
+        UNDISTORT_MAX_ITERATIONS,
+        UNDISTORT_CONVERGENCE_PX,
+    )
+    undistorted = cv2.undistortPointsIter(
+        points_px.reshape(-1, 1, 2),
+        calibration.intrinsic_matrix,
+        calibration.distortion_coeffs,
+        None,
+        calibration.intrinsic_matrix,
+        criteria,
+    )
+    return undistorted.reshape(-1, 2)
+
+
+def intrinsics_path(camera_key: str, directory: Path | None = None) -> Path:
+    return (directory or NOWVA_CALIBRATION_DIR) / f"intrinsics_{camera_key}.json"
+
+
+def rig_calibration_path(device_ids: list[int], directory: Path | None = None) -> Path:
+    """The per-rig calibration file pipeline_process loads at session start."""
+    camera_ids = "-".join(str(device_id) for device_id in device_ids)
+    return (directory or NOWVA_CALIBRATION_DIR) / f"rig_calibration_cams_{camera_ids}.json"
+
+
+def save_intrinsics(
+    camera_key: str,
+    resolution: tuple[int, int],
+    intrinsic_matrix: np.ndarray,
+    distortion_coeffs: np.ndarray,
+    rms_reprojection_px: float,
+    directory: Path | None = None,
+) -> Path:
+    path = intrinsics_path(camera_key, directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "camera_key": camera_key,
+        "resolution": list(resolution),
+        "intrinsic_matrix": np.asarray(intrinsic_matrix, dtype=np.float64).tolist(),
+        "distortion_coeffs": np.asarray(distortion_coeffs, dtype=np.float64).ravel().tolist(),
+        "rms_reprojection_px": float(rms_reprojection_px),
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    logger.info("Intrinsics for camera %s saved to %s", camera_key, path)
+    return path
+
+
+def load_intrinsics(
+    camera_key: str, resolution: tuple[int, int], directory: Path | None = None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Return (K, distortion_coeffs) calibrated for this camera, or None when there is no
+    file or it was calibrated at another resolution (a different sensor mode may crop,
+    so K is not rescaled; recalibrate at the capture resolution instead).
+    """
+    path = intrinsics_path(camera_key, directory)
+    if not path.exists():
+        return None
+    with open(path) as f:
+        data = json.load(f)
+    if tuple(data["resolution"]) != tuple(resolution):
+        logger.warning(
+            "Intrinsics %s were calibrated at %s but capture runs at %s; ignoring them",
+            path, tuple(data["resolution"]), tuple(resolution),
+        )
+        return None
+    return (
+        np.array(data["intrinsic_matrix"], dtype=np.float64),
+        np.array(data["distortion_coeffs"], dtype=np.float64),
+    )
+
+
+def load_rig_intrinsics(
+    camera_keys: dict[str, str], resolution: tuple[int, int], directory: Path | None = None
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """camera_id -> (K, distortion_coeffs) for every camera_id -> camera_key with saved intrinsics."""
+    intrinsics = {}
+    for camera_id, camera_key in camera_keys.items():
+        loaded = load_intrinsics(camera_key, resolution, directory)
+        if loaded is not None:
+            intrinsics[camera_id] = loaded
+    return intrinsics
 
 
 def tpose_frame_mask(points_xy: np.ndarray, scores: np.ndarray) -> np.ndarray:
@@ -141,15 +256,21 @@ class TPoseCalibrator:
     3. Verify the subject holds a T-pose, then average keypoints per camera.
     4. Use cv2.solvePnP per camera to solve for rotation and translation.
     5. Compute projection matrices P = K @ [R|t].
+
+    intrinsics maps camera_id -> (K, distortion_coeffs) from load_rig_intrinsics; cameras
+    without an entry fall back to the guessed pinhole (f = focal_length_factor * width,
+    centred, no distortion).
     """
 
     def __init__(
         self,
         pose_estimator: PoseEstimator,
         focal_length_factor: float = 0.8,
+        intrinsics: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> None:
         self._estimator = pose_estimator
         self._focal_length_factor = focal_length_factor
+        self._intrinsics = intrinsics or {}
 
     def build_tpose_model(self, height_m: float) -> np.ndarray:
         """
@@ -221,6 +342,19 @@ class TPoseCalibrator:
             [0.0, 0.0, 1.0],
         ], dtype=np.float64)
 
+    def _camera_intrinsics(
+        self, camera_id: str, resolution: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if camera_id in self._intrinsics:
+            K, dist_coeffs = self._intrinsics[camera_id]
+            return np.asarray(K, dtype=np.float64), np.asarray(dist_coeffs, dtype=np.float64)
+        logger.warning(
+            "Camera %s: no calibrated intrinsics, guessing f = %.2f * width with no distortion "
+            "(run scripts/tools/calibrate_cameras.py intrinsics)",
+            camera_id, self._focal_length_factor,
+        )
+        return self._build_intrinsics(resolution), np.zeros(NUM_DISTORTION_COEFFS, dtype=np.float64)
+
     def _detect_keypoints(
         self, frames: list[np.ndarray], camera_id: str
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -252,8 +386,6 @@ class TPoseCalibrator:
         and RuntimeError if no camera calibrates.
         """
         model_3d = self.build_tpose_model(height_m)
-        K = self._build_intrinsics(resolution)
-        dist_coeffs = np.zeros(4, dtype=np.float64)
 
         result = CalibrationResult(
             tpose_model_3d=model_3d,
@@ -285,6 +417,7 @@ class TPoseCalibrator:
 
             object_points = model_3d[valid_indices].astype(np.float64)
             image_points = avg_kpts[valid_indices].astype(np.float64)
+            K, dist_coeffs = self._camera_intrinsics(cam_id, resolution)
 
             success, rvec, tvec = cv2.solvePnP(
                 object_points,
@@ -333,6 +466,7 @@ class TPoseCalibrator:
                 translation_vector=tvec,
                 reprojection_error=reproj_error,
                 resolution=resolution,
+                distortion_coeffs=dist_coeffs,
             )
 
         if not result.cameras:
@@ -346,6 +480,8 @@ class TPoseCalibrator:
         data = {
             "athlete_height_m": result.athlete_height_m,
             "timestamp": result.timestamp,
+            "world_anchor": result.world_anchor,
+            "rms_reprojection_px": result.rms_reprojection_px,
             "tpose_model_3d": result.tpose_model_3d.tolist() if result.tpose_model_3d is not None else None,
             "cameras": {},
         }
@@ -359,6 +495,7 @@ class TPoseCalibrator:
                 "translation_vector": cam.translation_vector.tolist(),
                 "reprojection_error": cam.reprojection_error,
                 "resolution": list(cam.resolution),
+                "distortion_coeffs": np.asarray(cam.distortion_coeffs).ravel().tolist(),
             }
 
         with open(path, "w") as f:
@@ -376,6 +513,8 @@ class TPoseCalibrator:
             athlete_height_m=data["athlete_height_m"],
             timestamp=data["timestamp"],
             tpose_model_3d=np.array(data["tpose_model_3d"]) if data.get("tpose_model_3d") else None,
+            world_anchor=data.get("world_anchor", WORLD_ANCHOR_PERSON),
+            rms_reprojection_px=data.get("rms_reprojection_px", 0.0),
         )
 
         for cam_id, cam_data in data["cameras"].items():
@@ -387,6 +526,9 @@ class TPoseCalibrator:
                 translation_vector=np.array(cam_data["translation_vector"]),
                 reprojection_error=cam_data["reprojection_error"],
                 resolution=tuple(cam_data["resolution"]),
+                distortion_coeffs=np.array(
+                    cam_data.get("distortion_coeffs", [0.0] * NUM_DISTORTION_COEFFS), dtype=np.float64
+                ),
             )
 
         logger.info("Calibration loaded from %s (%d cameras)", path, len(result.cameras))

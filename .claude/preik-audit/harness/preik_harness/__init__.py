@@ -17,9 +17,9 @@ if REPO_SRC not in sys.path:
 # the production gates/filters log every 30 failing frames; silence them for batch evaluation
 logging.getLogger("biomechanics").setLevel(logging.ERROR)
 
-from .api import compare, evaluate, evaluate_chains, get_prepared  # noqa: E402
+from .api import CALIBRATION_MODES, compare, evaluate, evaluate_chains, get_prepared  # noqa: E402
 from .delivery import DeliveryConfig  # noqa: E402
-from .cameras import RigConfig  # noqa: E402
+from .cameras import PERSON_BA_MODES, PersonBAConfig, RigConfig  # noqa: E402
 from .detector import PROFILES, NoiseProfile  # noqa: E402
 from .body import SCENARIOS  # noqa: E402
 from .chains import (BASELINE_CHAINS, DiagnosticConfidenceFloor, ProductionChain, baseline_factories,  # noqa: E402
@@ -27,5 +27,5 @@ from .chains import (BASELINE_CHAINS, DiagnosticConfidenceFloor, ProductionChain
 from .runner import FrameContext  # noqa: E402
 from .proposed import ProposedChain, proposed_chain  # noqa: E402
 
-__all__ = ["DeliveryConfig", "RigConfig", "PROFILES", "NoiseProfile", "evaluate", "evaluate_chains", "compare", "get_prepared", "SCENARIOS", "BASELINE_CHAINS",
+__all__ = ["CALIBRATION_MODES", "DeliveryConfig", "RigConfig", "PERSON_BA_MODES", "PersonBAConfig", "PROFILES", "NoiseProfile", "evaluate", "evaluate_chains", "compare", "get_prepared", "SCENARIOS", "BASELINE_CHAINS",
            "ProductionChain", "DiagnosticConfidenceFloor", "baseline_factories", "production_chain", "FrameContext", "ProposedChain", "proposed_chain"]

@@ -52,6 +52,24 @@ class TriangulationConfig(BaseModel):
     tpose_capture_frames: int = 30
 
 
+class CameraCalibrationConfig(BaseModel):
+    """Person-based camera calibration: capture buffer, bootstrap window and drift monitor (multi-camera only)."""
+    # Device id -> name of its ~/.nowva/intrinsics_<key>.json (default: the device id).
+    camera_keys: dict[int, str] = Field(default_factory=dict)
+    # Ring buffer of per-frame 2D views (>= 2 cameras) kept by the provider.
+    calibration_buffer_frames: int = 450
+    # Barbell as a metric ruler during a capture window, even with barbell_tracking off.
+    use_bar_scale: bool = False
+    bar_detection_stride: int = 3
+    # Bootstrap (no calibration file): capture until both are met, or the timeout.
+    min_calibration_frames: int = 240
+    min_squat_excursions: int = 2
+    capture_timeout_s: float = 90.0
+    # Drift monitor: refine between sets when health exceeds drift_ratio x the stored RMS.
+    drift_ratio: float = 1.5
+    drift_check_frames: int = 150
+
+
 class KinematicsConfig(BaseModel):
     """Inverse kinematics configuration."""
     backend: str = "analytical"  # analytical | opensim
@@ -260,6 +278,7 @@ class BiomechanicsConfig(BaseModel):
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     pose: PoseConfig = Field(default_factory=PoseConfig)
     triangulation: TriangulationConfig = Field(default_factory=TriangulationConfig)
+    camera_calibration: CameraCalibrationConfig = Field(default_factory=CameraCalibrationConfig)
     kinematics: KinematicsConfig = Field(default_factory=KinematicsConfig)
     faults: FaultsConfig = Field(default_factory=FaultsConfig)
     rep_detection: RepDetectionConfig = Field(default_factory=RepDetectionConfig)
@@ -352,6 +371,9 @@ def load_pipeline_config(path: Optional[str] = None) -> BiomechanicsConfig:
 
     if "triangulation" in raw_config:
         config_dict["triangulation"] = TriangulationConfig(**raw_config["triangulation"])
+
+    if "camera_calibration" in raw_config:
+        config_dict["camera_calibration"] = CameraCalibrationConfig(**raw_config["camera_calibration"])
 
     if "kinematics" in raw_config:
         config_dict["kinematics"] = KinematicsConfig(**raw_config["kinematics"])

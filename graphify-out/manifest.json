@@ -35,8 +35,8 @@
     "semantic_hash": "67592cbeb5794915322ca34effe4a7d0"
   },
   "src/biomechanics/config.py": {
-    "mtime": 1789672870.4177349,
-    "ast_hash": "2fcae8aaa92b4043a2eebbedebd19533",
+    "mtime": 1789682356.0379949,
+    "ast_hash": "404154f9ebb6b47b8a883d7090468efc",
     "semantic_hash": ""
   },
   "src/biomechanics/__init__.py": {
@@ -45,8 +45,8 @@
     "semantic_hash": "ea5e73bb8044d823025ebf8d07ae00cc"
   },
   "src/biomechanics/pipeline.py": {
-    "mtime": 1789673606.9329402,
-    "ast_hash": "ced659bd4b1883e75de2497cced46354",
+    "mtime": 1789676919.299943,
+    "ast_hash": "23c418fcc23ccd638c9d8471023b3d57",
     "semantic_hash": ""
   },
   "src/biomechanics/calibration.py": {
@@ -80,8 +80,8 @@
     "semantic_hash": "9e432a1522e1c9e146de4961d3880c43"
   },
   "src/biomechanics/faults/rule_engine.py": {
-    "mtime": 1789671228.2232215,
-    "ast_hash": "0cd5cac6a259eb1616a57af1b580c1b4",
+    "mtime": 1789676878.689507,
+    "ast_hash": "5501149c3c60cd85986c4a7a4cf49448",
     "semantic_hash": ""
   },
   "src/biomechanics/faults/rep_counter.py": {
@@ -95,13 +95,13 @@
     "semantic_hash": ""
   },
   "src/biomechanics/faults/hip_position_counter.py": {
-    "mtime": 1789671291.4206736,
-    "ast_hash": "dc7db9a8410e91165ecdaae35c194a98",
+    "mtime": 1789676878.6909757,
+    "ast_hash": "0eea5e7c04fcc31081750079fb92dfc5",
     "semantic_hash": ""
   },
   "src/biomechanics/faults/rules/symmetry.py": {
-    "mtime": 1789671167.2467446,
-    "ast_hash": "53430fef0052859c637f802919c173d5",
+    "mtime": 1789676878.6888838,
+    "ast_hash": "03804680b93748e2ba85f97dab417753",
     "semantic_hash": ""
   },
   "src/biomechanics/faults/rules/trunk_stability.py": {
@@ -115,8 +115,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/faults/rules/forward_lean.py": {
-    "mtime": 1789671149.9120529,
-    "ast_hash": "ff055b2a48e7c81d983284b8f8cb3ab3",
+    "mtime": 1789676878.6898594,
+    "ast_hash": "13aeb1560f41a77c5045ce0d1d59b405",
     "semantic_hash": ""
   },
   "src/biomechanics/faults/rules/elbow_flare.py": {
@@ -170,8 +170,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/utils/standing_gate.py": {
-    "mtime": 1785326708.8551033,
-    "ast_hash": "95f3d191c0cf1f5121280240e6baa7e6",
+    "mtime": 1789674550.9268463,
+    "ast_hash": "af271e99b6d46cfc669bdb9d7ca14e56",
     "semantic_hash": ""
   },
   "src/biomechanics/utils/__init__.py": {
@@ -325,8 +325,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/profiles/squat.py": {
-    "mtime": 1789672925.6469238,
-    "ast_hash": "ad849ceb2bc6538cea148e2e51b71955",
+    "mtime": 1789676878.6903832,
+    "ast_hash": "74100ce9385900335bccd79dd767cefc",
     "semantic_hash": ""
   },
   "src/biomechanics/profiles/registry.py": {
@@ -965,9 +965,9 @@
     "semantic_hash": "0a902fd9deebfd69697db37b39bcdedb"
   },
   "benchmarks/components/bench_derivatives.py": {
-    "mtime": 1781028347.5236483,
-    "ast_hash": "8e98d868ebb44260cc94cf2d635bffa8",
-    "semantic_hash": "8e98d868ebb44260cc94cf2d635bffa8"
+    "mtime": 1789674607.2607424,
+    "ast_hash": "0fc139970adbdcf54e89a7ccb62af687",
+    "semantic_hash": ""
   },
   "benchmarks/components/bench_diagnosis.py": {
     "mtime": 1781028347.5238712,
@@ -980,9 +980,9 @@
     "semantic_hash": "aff0c9b651aef0142305af57537817ee"
   },
   "benchmarks/components/bench_filters.py": {
-    "mtime": 1781028347.5249217,
-    "ast_hash": "30faee0b6f78ceff56cfdc126a195bdf",
-    "semantic_hash": "30faee0b6f78ceff56cfdc126a195bdf"
+    "mtime": 1789674607.156009,
+    "ast_hash": "b73a26e7616ea6d2cdf2290f2ca83ebe",
+    "semantic_hash": ""
   },
   "benchmarks/components/bench_gates.py": {
     "mtime": 1781028347.5255923,
@@ -1040,8 +1040,8 @@
     "semantic_hash": "73b30dd2196c81db6fc05dd05122f461"
   },
   "benchmarks/config.py": {
-    "mtime": 1789671377.557781,
-    "ast_hash": "3e3430ce87d66283d4547bd575fd4089",
+    "mtime": 1789675283.216747,
+    "ast_hash": "327a82f56429d4c09fcaf938dd83bef7",
     "semantic_hash": ""
   },
   "benchmarks/fixtures/__init__.py": {
@@ -1050,8 +1050,8 @@
     "semantic_hash": "0eb4f56a615b99eb3e33be4f1169460e"
   },
   "benchmarks/fixtures/data.py": {
-    "mtime": 1787098394.2306461,
-    "ast_hash": "30b78a509fabbc16214fe9bf370442ad",
+    "mtime": 1789674586.366557,
+    "ast_hash": "93d6134271ae415ac983031633aa865f",
     "semantic_hash": ""
   },
   "benchmarks/profiler.py": {
@@ -1075,13 +1075,13 @@
     "semantic_hash": ""
   },
   "calibrated_test_visualizer/run_test.sh": {
-    "mtime": 1778187880.8921068,
-    "ast_hash": "6deaee2c3297604a41117510077209f6",
-    "semantic_hash": "6deaee2c3297604a41117510077209f6"
+    "mtime": 1789675115.2746937,
+    "ast_hash": "c8859caed648da075d0db04447d67c9b",
+    "semantic_hash": ""
   },
   "calibrated_test_visualizer/visualize_triangulated.py": {
-    "mtime": 1785149748.8075275,
-    "ast_hash": "2fcdc6f9efc87095e013ad3303c97a95",
+    "mtime": 1789674973.2869928,
+    "ast_hash": "8a6d3e166253da55b34eea89e0af1e91",
     "semantic_hash": ""
   },
   "config/gunicorn_config.py": {
@@ -1115,13 +1115,13 @@
     "semantic_hash": "b44ca70b8188e54962ebd22969c28547"
   },
   "scripts/demos/demo_fault_detection.py": {
-    "mtime": 1781028347.5415103,
-    "ast_hash": "fba24f5cc7785a3245e0015107aa242a",
-    "semantic_hash": "fba24f5cc7785a3245e0015107aa242a"
+    "mtime": 1789674805.5322316,
+    "ast_hash": "79c7ff559f8f54a1b04cecd7fb126ce5",
+    "semantic_hash": ""
   },
   "scripts/demos/visualize_video_squats.py": {
-    "mtime": 1785240799.6876996,
-    "ast_hash": "f539b3bbc7afa3d612525ed543b534e9",
+    "mtime": 1789675333.111607,
+    "ast_hash": "d36653a3d6764078369c05a1627248c5",
     "semantic_hash": ""
   },
   "scripts/deploy/deploy_to_laptop.sh": {
@@ -1148,11 +1148,6 @@
     "mtime": 1781028347.544014,
     "ast_hash": "6c7dfb27144334abe33cb68d438c3806",
     "semantic_hash": "6c7dfb27144334abe33cb68d438c3806"
-  },
-  "scripts/tests/compare_skeletons.py": {
-    "mtime": 1781028347.5444362,
-    "ast_hash": "19f1404f631c80a2a732719155db1570",
-    "semantic_hash": "19f1404f631c80a2a732719155db1570"
   },
   "scripts/tests/test_api_integration.sh": {
     "mtime": 1781028347.5445259,
@@ -1224,19 +1219,14 @@
     "ast_hash": "5c22519d21e91279c988985cd94c0f38",
     "semantic_hash": "5c22519d21e91279c988985cd94c0f38"
   },
-  "scripts/tools/debug_filters.py": {
-    "mtime": 1781028347.5482776,
-    "ast_hash": "0d53453be6aff4150b71c834283c3c34",
-    "semantic_hash": "0d53453be6aff4150b71c834283c3c34"
-  },
   "scripts/tools/discord_setup/setup.py": {
     "mtime": 1781028347.5485992,
     "ast_hash": "fce12277f206ab4bb07b46d5bd09cf39",
     "semantic_hash": "fce12277f206ab4bb07b46d5bd09cf39"
   },
   "scripts/tools/download_models.py": {
-    "mtime": 1785149748.9267693,
-    "ast_hash": "787a93fda8743ff44e230135edf55c37",
+    "mtime": 1789674550.9041917,
+    "ast_hash": "833e350dc2b6c5facefcaa3380823e7e",
     "semantic_hash": ""
   },
   "scripts/tools/generate_cue_audio.py": {
@@ -1250,9 +1240,9 @@
     "semantic_hash": "78f01f99891b22428e560b37c3857f7a"
   },
   "scripts/tools/generate_opensim_data.py": {
-    "mtime": 1781028347.5499637,
-    "ast_hash": "45732a067d4d04c0e66a8d947287eae1",
-    "semantic_hash": "45732a067d4d04c0e66a8d947287eae1"
+    "mtime": 1789674559.6812482,
+    "ast_hash": "493a1fc1cf776b4ce4d8571fa6162204",
+    "semantic_hash": ""
   },
   "scripts/tools/generate_rep1_cues.py": {
     "mtime": 1781028347.550082,
@@ -1435,8 +1425,8 @@
     "semantic_hash": ""
   },
   "src/agent/services/coaching_orchestrator.py": {
-    "mtime": 1789671337.8991697,
-    "ast_hash": "a84ad737cda60b6b816916b8bd050338",
+    "mtime": 1789676691.8229759,
+    "ast_hash": "e5f98be0fcc7f6dc81e9510505c58023",
     "semantic_hash": ""
   },
   "src/agent/services/coaching_service.py": {
@@ -1565,8 +1555,8 @@
     "semantic_hash": "4213e01fb450cb1620b6ce185d15e715"
   },
   "src/biomechanics/pipeline_process.py": {
-    "mtime": 1789673478.9608233,
-    "ast_hash": "08aebe2f4a81fb4c72f26686b6fdd068",
+    "mtime": 1789676533.8565915,
+    "ast_hash": "a5cb640917a01f3f4924134781011768",
     "semantic_hash": ""
   },
   "src/biomechanics/setup.sh": {
@@ -1575,18 +1565,18 @@
     "semantic_hash": "f15db79ee7cd965228b7bd3f027f047e"
   },
   "src/biomechanics/triangulation/calibration.py": {
-    "mtime": 1789583837.1065965,
-    "ast_hash": "24a0fb453c2834384124e8e6ed007fd6",
+    "mtime": 1789682363.7287734,
+    "ast_hash": "ea261411925ad865e12eb2c4827bec64",
     "semantic_hash": ""
   },
   "src/biomechanics/triangulation/multi_capture.py": {
-    "mtime": 1789583473.7837186,
-    "ast_hash": "edb10c737fb5468443bcd94a70b85710",
+    "mtime": 1789682370.6567562,
+    "ast_hash": "4f3eaceb6a1da9ae213f33440eb32d26",
     "semantic_hash": ""
   },
   "src/biomechanics/triangulation/triangulator.py": {
-    "mtime": 1789670305.2074442,
-    "ast_hash": "a6eb21707b64b5214b28bd0e529529e3",
+    "mtime": 1789679058.3771954,
+    "ast_hash": "0ed7e7325af3759569c1b719ec107c0d",
     "semantic_hash": ""
   },
   "src/biomechanics/viz/window_anim.py": {
@@ -1765,8 +1755,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_body_proportions.py": {
-    "mtime": 1789673149.0633898,
-    "ast_hash": "6c7514bc84eec6255560f4691d6931c6",
+    "mtime": 1789676960.8755507,
+    "ast_hash": "5d4a825749161f9ae74931dcfc9f1ca8",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_bottom_frame_buffer.py": {
@@ -1800,8 +1790,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_faults.py": {
-    "mtime": 1789671291.4229903,
-    "ast_hash": "2e6956795ba4a7dd590fa81c8dcd7fab",
+    "mtime": 1789676960.8750706,
+    "ast_hash": "638fc3f6befbba5a9ac536d3244029a1",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_kalman.py": {
@@ -1815,8 +1805,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_pipeline.py": {
-    "mtime": 1789673714.954843,
-    "ast_hash": "6c70c1a4eb45c8f4bcd2494eb2427636",
+    "mtime": 1789676993.7325888,
+    "ast_hash": "41460fa4b38ed622630dfa7fc1bd7a62",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_pose.py": {
@@ -1985,9 +1975,9 @@
     "semantic_hash": ""
   },
   "calibrated_test_visualizer/README.md": {
-    "mtime": 1781028347.5332706,
-    "ast_hash": "414e506bf05a85bdcb1849ae468226c8",
-    "semantic_hash": "414e506bf05a85bdcb1849ae468226c8"
+    "mtime": 1789674973.426931,
+    "ast_hash": "0ed6b6d61028b4a44aa746116cd7dd7d",
+    "semantic_hash": ""
   },
   "config/README.md": {
     "mtime": 1785149748.809119,
@@ -1995,8 +1985,8 @@
     "semantic_hash": ""
   },
   "config/biomechanics.yaml": {
-    "mtime": 1789672870.4182234,
-    "ast_hash": "e870d6fa6e7453ab2aed3d957f744ab7",
+    "mtime": 1789682356.0386422,
+    "ast_hash": "5df44bbdc558153e5f6479d4a96e52ba",
     "semantic_hash": ""
   },
   "docs/README.md": {
@@ -2085,8 +2075,8 @@
     "semantic_hash": ""
   },
   "scripts/README.md": {
-    "mtime": 1785149748.8980794,
-    "ast_hash": "a2d95e13612efe4fa3461a681e2e8a5d",
+    "mtime": 1789674575.5061865,
+    "ast_hash": "4345e7bd5b4e9d0f39a4ebd85d6b73b5",
     "semantic_hash": ""
   },
   "scripts/tools/discord_setup/README.md": {
@@ -2195,8 +2185,8 @@
     "semantic_hash": ""
   },
   "scripts/demos/test_choreographer.py": {
-    "mtime": 1785184218.103908,
-    "ast_hash": "2a6fb1ebbd514c9bc71adf363b4274fc",
+    "mtime": 1789674897.2111049,
+    "ast_hash": "f0c8c5b6e46f0a99bad2713f49bbaf68",
     "semantic_hash": ""
   },
   "scripts/preview_cameras.py": {
@@ -2205,8 +2195,8 @@
     "semantic_hash": ""
   },
   "scripts/tests/test_demo_renderer_live.py": {
-    "mtime": 1785149748.9194283,
-    "ast_hash": "b084ce619472db2ba0b4791c6224e516",
+    "mtime": 1789674550.9911234,
+    "ast_hash": "90b30f27f3d711860c03b0014dfd15d4",
     "semantic_hash": ""
   },
   "scripts/tools/generate_v6_pdfs.py": {
@@ -2230,8 +2220,8 @@
     "semantic_hash": ""
   },
   "src/agent/agents/prompts/base_prompt.py": {
-    "mtime": 1789671293.551222,
-    "ast_hash": "aec04f7ad7713df80aebe2b6a20a44b1",
+    "mtime": 1789674477.2512395,
+    "ast_hash": "ccdb3ee5102bd0084a1f4ef32f39637e",
     "semantic_hash": ""
   },
   "src/agent/agents/quickExerciseAgent.py": {
@@ -2245,8 +2235,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/pose/multi_camera.py": {
-    "mtime": 1789670048.7270002,
-    "ast_hash": "ec1342ad2e4a4943d6027eabe4670dff",
+    "mtime": 1789682441.133713,
+    "ast_hash": "f12fa145e44f351340887fd4d1f3ce5f",
     "semantic_hash": ""
   },
   "src/biomechanics/viz/demo_ws_bridge.py": {
@@ -5130,8 +5120,8 @@
     "semantic_hash": ""
   },
   "scripts/tools/capture_audit.py": {
-    "mtime": 1785239389.259895,
-    "ast_hash": "9fff20edd16cb51274c79b9d780bfc4c",
+    "mtime": 1789675283.1947474,
+    "ast_hash": "f80a98bfef82cdfb91f6a1b6d644fdae",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_set_finalizer.py": {
@@ -5140,8 +5130,8 @@
     "semantic_hash": ""
   },
   "scripts/tools/capture_audit_template.html": {
-    "mtime": 1785238964.3157074,
-    "ast_hash": "3f093360fd0ba645d302bd01898ecfb5",
+    "mtime": 1789675087.563734,
+    "ast_hash": "efc9fc8bce65f7a2b745e7affc4a91b3",
     "semantic_hash": ""
   },
   "tests/test_quick_exercise_task.py": {
@@ -5525,13 +5515,13 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/preik_harness/__init__.py": {
-    "mtime": 1789672221.5654128,
-    "ast_hash": "9940f7ac81437d9d090ba8669b827e33",
+    "mtime": 1789681421.07903,
+    "ast_hash": "3f37095c4c5f028c96598b8d8e2a34d8",
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/preik_harness/api.py": {
-    "mtime": 1789580051.0566335,
-    "ast_hash": "b9c3525433e60ad47d52961e453a8213",
+    "mtime": 1789681421.0785787,
+    "ast_hash": "911f60388440e5db018d73a31e2bd69e",
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/preik_harness/body.py": {
@@ -5540,8 +5530,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/preik_harness/cameras.py": {
-    "mtime": 1789579504.7958403,
-    "ast_hash": "a51b3ff82298e4069a20deaca15d073e",
+    "mtime": 1789681042.4820566,
+    "ast_hash": "bf34482aec48935471357fbe9d1847e9",
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/preik_harness/chains.py": {
@@ -5605,8 +5595,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/preik_harness/runner.py": {
-    "mtime": 1789672556.4727664,
-    "ast_hash": "794e5c8ffe307ed978efebb8d0dcee29",
+    "mtime": 1789681421.0769544,
+    "ast_hash": "71d242c8099c31e4b9baf4601a3c3b15",
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/proposed_results.json": {
@@ -5850,8 +5840,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/smoothing/ws4_kalman_eval.py": {
-    "mtime": 1789583949.832393,
-    "ast_hash": "426e08b6ba6cb268e629ef1eb1a778a0",
+    "mtime": 1789674009.3452244,
+    "ast_hash": "4f8246f16e727c23d8b04045d026cbc0",
     "semantic_hash": ""
   },
   ".claude/preik-audit/triangulation_frontend/exp1_analyze.py": {
@@ -6225,8 +6215,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/wiring/harness.py": {
-    "mtime": 1789578657.8308952,
-    "ast_hash": "b3c5e2552948229b160fde0571c7a4ba",
+    "mtime": 1789674571.3306024,
+    "ast_hash": "b9bf602eddb1eb6f32598163794f9583",
     "semantic_hash": ""
   },
   "benchmarks/components/bench_affect.py": {
@@ -6330,13 +6320,13 @@
     "semantic_hash": ""
   },
   "src/affect/baseline.py": {
-    "mtime": 1789670649.7962208,
-    "ast_hash": "c3a71d807b769aedd0a823cb68b34043",
+    "mtime": 1789674179.9962685,
+    "ast_hash": "e9b7e93bb2e09642abee4d297cae7d92",
     "semantic_hash": ""
   },
   "src/affect/config.py": {
-    "mtime": 1789672969.250825,
-    "ast_hash": "8e24e4d7e11ea5d1bbeb158ee8855335",
+    "mtime": 1789674172.8182995,
+    "ast_hash": "b67810ea7917f9d7d11bb4768a9dcaf1",
     "semantic_hash": ""
   },
   "src/affect/engine.py": {
@@ -6375,13 +6365,13 @@
     "semantic_hash": ""
   },
   "src/agent/agents/shared/affect_mixin.py": {
-    "mtime": 1789671082.651818,
-    "ast_hash": "bd3d83efbfb965182ce7f89891b3e07d",
+    "mtime": 1789674474.059691,
+    "ast_hash": "801c5df5496f90be0c4309f223eb8a5d",
     "semantic_hash": ""
   },
   "src/agent/services/affect_service.py": {
-    "mtime": 1789671244.8680055,
-    "ast_hash": "54ff59edf3d776651a2a39195de5697b",
+    "mtime": 1789674467.6901727,
+    "ast_hash": "60a877699cd695904f238807165b62bb",
     "semantic_hash": ""
   },
   "src/agent/services/affect_vad_tap.py": {
@@ -6405,23 +6395,23 @@
     "semantic_hash": ""
   },
   "src/biomechanics/utils/foot_contact.py": {
-    "mtime": 1789671340.395546,
-    "ast_hash": "c68a4a120aea3b6e5e694aeaac0528df",
+    "mtime": 1789676919.3007522,
+    "ast_hash": "17cee233bcb1b8620a0ab6d4a34a4768",
     "semantic_hash": ""
   },
   "src/biomechanics/utils/json_safe.py": {
-    "mtime": 1789671049.421519,
-    "ast_hash": "4300703df204897493c724c3cd27bee6",
+    "mtime": 1789676919.301441,
+    "ast_hash": "7470d4deb971686b2f2c5381ef8faf03",
     "semantic_hash": ""
   },
   "src/biomechanics/utils/keypoint_kalman.py": {
-    "mtime": 1789673833.3089287,
-    "ast_hash": "31ad29f8fe2e0d0e08fa89a3b3e030f9",
+    "mtime": 1789673966.6951883,
+    "ast_hash": "8c9f9a05f9fde3b4b62aca1f643bc2d1",
     "semantic_hash": ""
   },
   "src/biomechanics/utils/segment_lengths.py": {
-    "mtime": 1789673513.175827,
-    "ast_hash": "876dc15753a922ecaa349935d412d4f2",
+    "mtime": 1789676919.3003118,
+    "ast_hash": "039035be7173e9acf028b4e472116fba",
     "semantic_hash": ""
   },
   "src/biomechanics/viz/live_stream.py": {
@@ -6475,8 +6465,8 @@
     "semantic_hash": ""
   },
   "tests/test_affect/test_baseline.py": {
-    "mtime": 1789670808.160787,
-    "ast_hash": "f43e4602ec221baa8f1e53455af54d0d",
+    "mtime": 1789674189.8635533,
+    "ast_hash": "9f9c0a030aeb8c7aa714bfa33ab75e28",
     "semantic_hash": ""
   },
   "tests/test_affect/test_config.py": {
@@ -6520,13 +6510,13 @@
     "semantic_hash": ""
   },
   "tests/test_affect_mixin.py": {
-    "mtime": 1789671170.9425027,
-    "ast_hash": "ed08752f822b283c41a5e7e2e4e3ba05",
+    "mtime": 1789674485.6696012,
+    "ast_hash": "220a3c7dac0e9357323f77e5586c2299",
     "semantic_hash": ""
   },
   "tests/test_affect_service.py": {
-    "mtime": 1789671145.3036072,
-    "ast_hash": "2fbf5f8b57dbed5074e5d678917236ec",
+    "mtime": 1789674485.6718922,
+    "ast_hash": "ae6c3baf5ea9d36eccef72f6205ff788",
     "semantic_hash": ""
   },
   "tests/test_affect_vad_tap.py": {
@@ -6535,8 +6525,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_foot_contact.py": {
-    "mtime": 1789673778.311917,
-    "ast_hash": "50207b3f867c0639fa37bb6815efdbc2",
+    "mtime": 1789674839.1945615,
+    "ast_hash": "035199e2d45edefe788ff522668d8917",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_heel_rise_rule.py": {
@@ -6545,8 +6535,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_hip_position_counter.py": {
-    "mtime": 1789670563.216442,
-    "ast_hash": "ace8db1c336e52a7d4f8c6f9aec40088",
+    "mtime": 1789676960.876371,
+    "ast_hash": "807be309736682109780ed5d621e13ce",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_ipc_bridge_stance.py": {
@@ -6560,8 +6550,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_keypoint_kalman.py": {
-    "mtime": 1789673797.916329,
-    "ast_hash": "6328709e25b7d385ac9cc3d0e3cc9939",
+    "mtime": 1789673973.0226772,
+    "ast_hash": "7eadc98ef947a496fad3d320478728f9",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_multi_camera_provider.py": {
@@ -6595,13 +6585,13 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_tpose_calibration.py": {
-    "mtime": 1789583997.684464,
-    "ast_hash": "2668f6f44d9b3b2d270dcf3e0fbb4950",
+    "mtime": 1789679937.835193,
+    "ast_hash": "d5deb3cdf2c675f663f5374cb15ecd83",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_triangulator.py": {
-    "mtime": 1789584105.031929,
-    "ast_hash": "086e03d2d57356538fe171aa2eea9f82",
+    "mtime": 1789679937.837764,
+    "ast_hash": "112477d048c6192392e4553ef529316a",
     "semantic_hash": ""
   },
   "tests/test_calibration_utils.py": {
@@ -9845,8 +9835,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/PROGRESS.md": {
-    "mtime": 1789673394.0162525,
-    "ast_hash": "b7f0c3cf31a1399056be4175807edfec",
+    "mtime": 1789681672.31668,
+    "ast_hash": "b2feb1f591ec7d40d4161b4cfb4c4ba4",
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/REPORT.md": {
@@ -9975,8 +9965,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/smoothing/ws4_bench_output.txt": {
-    "mtime": 1789673846.219681,
-    "ast_hash": "d38584edd1e08f1aa3f41f9f30589b71",
+    "mtime": 1789674005.5822399,
+    "ast_hash": "860e9fc4334f5bb950ec519360b2e848",
     "semantic_hash": ""
   },
   ".claude/preik-audit/smoothing/ws4_conf_diag_output.txt": {
@@ -10110,8 +10100,8 @@
     "semantic_hash": ""
   },
   "config/affect.yaml": {
-    "mtime": 1789672971.4137435,
-    "ast_hash": "a7b18d66d90991ca4e952b257ffbad52",
+    "mtime": 1789674175.7951696,
+    "ast_hash": "537b40fae419ff2418774f0ef49e0beb",
     "semantic_hash": ""
   },
   "config/hey_nova.yaml": {
@@ -10125,8 +10115,8 @@
     "semantic_hash": ""
   },
   "docs/affect/HANDOFF.md": {
-    "mtime": 1789673040.5133712,
-    "ast_hash": "2f2cba81d5edc47c66151b236571ac76",
+    "mtime": 1789674219.3420556,
+    "ast_hash": "58d7a623d3782b2b23dea27067e0a652",
     "semantic_hash": ""
   },
   "docs/affect/RESULTS.md": {
@@ -11077,6 +11067,86 @@
   ".claude/preik-audit/harness/proposed_findings.md": {
     "mtime": 1789673339.1785266,
     "ast_hash": "597cc8108a23b41c91c42c3ab1349d17",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/harness/person_ba_results.json": {
+    "mtime": 1789681738.4827926,
+    "ast_hash": "68376860aa3547f97ea47a097152f0e9",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/harness/preik_harness/barbell.py": {
+    "mtime": 1789679353.753089,
+    "ast_hash": "063562bb536c6279cc07a25bb1fef0ab",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/harness/run_person_ba.py": {
+    "mtime": 1789681532.8711455,
+    "ast_hash": "a394bc9a389148c3e1d9b95c2c3b7d78",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/smoothing/ws4_burst_sweep.py": {
+    "mtime": 1789673853.778101,
+    "ast_hash": "eea1756482a91692db24987a90d483fc",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/smoothing/ws4_harness_shim.py": {
+    "mtime": 1789674009.3243146,
+    "ast_hash": "f3ebc0b996c35cdb06f249b1870633dc",
+    "semantic_hash": ""
+  },
+  "scripts/tools/calibrate_cameras.py": {
+    "mtime": 1789680230.7442722,
+    "ast_hash": "94fd9f37172b46bbc1ac17302a6337de",
+    "semantic_hash": ""
+  },
+  "src/biomechanics/triangulation/charuco.py": {
+    "mtime": 1789680230.743699,
+    "ast_hash": "e427799d98bee7fefec712e024c8bd4d",
+    "semantic_hash": ""
+  },
+  "src/biomechanics/triangulation/person_calibration.py": {
+    "mtime": 1789682181.2571912,
+    "ast_hash": "67a143346b097933232b15b6fc3f143f",
+    "semantic_hash": ""
+  },
+  "tests/test_biomechanics/test_charuco_calibration.py": {
+    "mtime": 1789680126.2167282,
+    "ast_hash": "504a97a9a6da73e08b07c877da52c935",
+    "semantic_hash": ""
+  },
+  "tests/test_biomechanics/test_person_calibration.py": {
+    "mtime": 1789682328.5471976,
+    "ast_hash": "a52755e69a293d020e8539fc8623f932",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/CALIBRATION_CONTRACTS.md": {
+    "mtime": 1789678363.8254442,
+    "ast_hash": "c36c6b883546da19fa92d831612c04da",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/CALIBRATION_NOTES.md": {
+    "mtime": 1789681982.0752409,
+    "ast_hash": "3e654258ece2f5dc9a12a4932a8d2d3c",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/harness/person_ba_summary.md": {
+    "mtime": 1789681738.4853623,
+    "ast_hash": "10c57a1532b0914ff4e18c341045347b",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/smoothing/ws4_burst_sweep_output.txt": {
+    "mtime": 1789674003.5277019,
+    "ast_hash": "7d71b045f02984adf1ca40fe0dc0b1f6",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/smoothing/ws4_kalman_eval_output_after_b1.txt": {
+    "mtime": 1789674014.7914338,
+    "ast_hash": "2ceccc04e1fa31f6fd6a4ef2174cdad9",
+    "semantic_hash": ""
+  },
+  ".claude/preik-audit/CALIBRATION_INTEGRATION_BRIEF.md": {
+    "mtime": 1789681982.0773354,
+    "ast_hash": "9a0a9708bee5d16a8a702fc46248b1db",
     "semantic_hash": ""
   }
 }

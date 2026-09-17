@@ -35,7 +35,9 @@ from biomechanics.utils.standing_gate import StandingPoseGate
 from biomechanics.utils.types import JointAngles, Keypoint2D, MultiViewPose, Skeleton2D, Skeleton3D
 
 from . import body
-from .cameras import Camera, RigConfig, build_rig, perfect_calibration, tpose_calibration
+from .barbell import bar_end_points, detect_bar
+from .cameras import (PERSON_BA_MODES, Camera, PersonBAConfig, RigConfig, build_rig, perfect_calibration,
+                      person_ba_calibration, tpose_calibration, triangulate_noise_free)
 from .delivery import DeliveryConfig, Tick, simulate_cameras, simulate_loop
 from .detector import NoiseProfile, detect, get_profile as get_noise_profile, occlusion_levels
 from .legacy.filters import JointAngleFilter
@@ -155,10 +157,92 @@ def _reprojection_stats(detections: dict[str, np.ndarray], frame_sets: list[dict
     return float(np.mean(errors)) if errors else float("nan")
 
 
+_PERSON_BA_CACHE: dict[tuple, tuple[CalibrationResult, dict]] = {}
+
+
+def person_ba_capture(cameras: list[Camera], profile: NoiseProfile, seed: int, delivery_config: DeliveryConfig,
+                      cfg: PersonBAConfig) -> tuple[list[dict[str, Skeleton2D]], list[dict], np.ndarray]:
+    """Simulate the calibration capture (walk-in + reps with the bar on the back) through the same detector and
+    camera-delivery models as a normal run. Returns per-synced-frame views, bar detections, and the TRUE joints of
+    the capture at 30 Hz (for the harness gauge alignment and diagnostics only)."""
+    capture_seed = seed + cfg.capture_seed_offset
+    scenario = body.build_scenario(cfg.capture_scenario, capture_seed)
+    duration_s = scenario.reps[cfg.capture_reps - 1].end_s + cfg.capture_tail_s
+    cam_ids = [c.cam_id for c in cameras]
+    streams = simulate_cameras(cam_ids, duration_s, capture_seed, delivery_config)
+    ticks = simulate_loop(streams, cam_ids, duration_s, capture_seed, delivery_config)
+    noiseless = all(v == 0.0 for v in profile.white_px.values())
+    detections: dict[str, np.ndarray] = {}
+    bars: dict[str, list] = {}
+    for cam_index, camera in enumerate(cameras):
+        rng = np.random.default_rng([seed, 606, cam_index])
+        times = np.clip(streams[camera.cam_id].exposure_s, 0.0, None)
+        pts = scenario.pose(times)
+        params = scenario.sample(times)
+        pelvis = 0.5 * (pts[:, body.L_HIP] + pts[:, body.R_HIP])
+        occ = occlusion_levels(camera.position, pelvis, params["body_yaw"], params["s"])
+        uv, _ = camera.project(pts[:, :NUM_METRIC_KPTS])
+        detections[camera.cam_id] = detect(uv, occ, streams[camera.cam_id].exposure_s,
+                                           _swap_windows(scenario, camera, profile, rng), profile, rng,
+                                           camera.resolution)
+        bars[camera.cam_id] = detect_bar(camera, bar_end_points(pts, cfg.bar_length_m),
+                                         streams[camera.cam_id].exposure_s, rng, noiseless=noiseless)
+    views, bar_ends, seen = [], [], set()
+    for tick in ticks:
+        if tick.frames is None:
+            continue
+        key = tuple(tick.frames[c] for c in cam_ids)
+        if key in seen:
+            continue
+        seen.add(key)
+        views.append({cid: _numpy_to_skeleton2d(detections[cid][tick.frames[cid]], tick.t_call_s) for cid in cam_ids})
+        bar_ends.append({cid: bars[cid][tick.frames[cid]] for cid in cam_ids
+                         if bars[cid][tick.frames[cid]] is not None})
+    return views, bar_ends, scenario.pose(np.arange(0.0, duration_s, 1.0 / 30.0))
+
+
+def _make_detect_fn(profile: NoiseProfile):
+    def detect_fn(camera: Camera, points_world: np.ndarray, times: np.ndarray, rng: np.random.Generator,
+                  occlusion: np.ndarray | None = None, swaps: list[tuple[float, float]] | None = None) -> np.ndarray:
+        # detector simulates the 19 COCO+toe keypoints only (heels 19/20 never detected -> triangulator conf 0)
+        uv, _ = camera.project(points_world[:, :NUM_METRIC_KPTS])
+        occ = np.zeros(uv.shape[:2]) if occlusion is None else occlusion
+        return detect(uv, occ, times, swaps or [], profile, rng, camera.resolution)
+    return detect_fn
+
+
+def person_ba_for_seed(seed: int, mode: str, noise: str | NoiseProfile = "realistic",
+                       rig_config: RigConfig | None = None, delivery_config: DeliveryConfig | None = None
+                       ) -> tuple[CalibrationResult, dict]:
+    """One calibration per (seed, mode, noise, rig, delivery): every scenario of that seed reuses it, like a real
+    session. Cached in-process; api.evaluate_chains fills the cache in the parent before forking workers (the
+    calibrator's dense solve can deadlock inside fork()ed children on macOS/Accelerate)."""
+    rig_config = rig_config or RigConfig()
+    delivery_config = delivery_config or DeliveryConfig()
+    key = (seed, mode, repr(noise), repr(rig_config), repr(delivery_config))
+    if key not in _PERSON_BA_CACHE:
+        cfg = PERSON_BA_MODES[mode]
+        profile = get_noise_profile(noise)
+        cameras = build_rig(seed, rig_config)
+        views, bar_ends, capture_truth = person_ba_capture(cameras, profile, seed, delivery_config, cfg)
+        initial = None
+        if cfg.start_from_tpose:
+            initial, _ = tpose_calibration(cameras, _make_detect_fn(profile), seed, rig_config)
+        _PERSON_BA_CACHE[key] = person_ba_calibration(cameras, views, bar_ends, capture_truth, cfg, initial)
+    return _PERSON_BA_CACHE[key]
+
+
+def _calibration_floor_mm(scenario: body.Scenario, cameras: list[Camera], calibration: CalibrationResult) -> float:
+    # calibration-only error of the hip-centred skeleton: no detection noise, plain DLT
+    points = scenario.pose(np.arange(0.0, scenario.duration_s, 0.1))[:, :NUM_METRIC_KPTS]
+    solved = triangulate_noise_free(cameras, calibration, points)
+    return float(np.mean(np.linalg.norm(hip_centre(solved) - hip_centre(points), axis=-1)) * 1000.0)
+
+
 def prepare_run(scenario_name: str, seed: int, calibration: str = "perfect", noise: str | NoiseProfile = "realistic",
                 rig_config: RigConfig | None = None, delivery_config: DeliveryConfig | None = None) -> PreparedRun:
-    if calibration not in ("perfect", "tpose"):
-        raise ValueError("calibration must be 'perfect' or 'tpose'")
+    if calibration not in ("perfect", "tpose") and calibration not in PERSON_BA_MODES:
+        raise ValueError(f"calibration must be 'perfect', 'tpose' or one of {list(PERSON_BA_MODES)}")
     rig_config = rig_config or RigConfig()
     delivery_config = delivery_config or DeliveryConfig()
     profile = get_noise_profile(noise)
@@ -167,18 +251,15 @@ def prepare_run(scenario_name: str, seed: int, calibration: str = "perfect", noi
     cameras = build_rig(seed, rig_config)
     cam_ids = [c.cam_id for c in cameras]
 
-    def detect_fn(camera: Camera, points_world: np.ndarray, times: np.ndarray, rng: np.random.Generator,
-                  occlusion: np.ndarray | None = None, swaps: list[tuple[float, float]] | None = None) -> np.ndarray:
-        # detector simulates the 19 COCO+toe keypoints only (heels 19/20 never detected -> triangulator conf 0)
-        uv, _ = camera.project(points_world[:, :NUM_METRIC_KPTS])
-        occ = np.zeros(uv.shape[:2]) if occlusion is None else occlusion
-        return detect(uv, occ, times, swaps or [], profile, rng, camera.resolution)
+    detect_fn = _make_detect_fn(profile)
 
     if calibration == "perfect":
         calib = perfect_calibration(cameras)
         calib_info = {}
-    else:
+    elif calibration == "tpose":
         calib, calib_info = tpose_calibration(cameras, detect_fn, seed, rig_config)
+    else:
+        calib, calib_info = person_ba_for_seed(seed, calibration, noise, rig_config, delivery_config)
 
     streams = simulate_cameras(cam_ids, scenario.duration_s, seed, delivery_config)
     ticks = simulate_loop(streams, cam_ids, scenario.duration_s, seed, delivery_config)
@@ -252,6 +333,7 @@ def prepare_run(scenario_name: str, seed: int, calibration: str = "perfect", noi
         "tri_lower_conf_zero_frac": round(float(np.mean(lower_conf == 0.0)), 4) if lower_conf.size else None,
         "tri_lower_conf_p50": round(float(np.median(lower_conf)), 4) if lower_conf.size else None,
         "tri_swap_count": int(triangulator.swap_count),
+        "calibration_floor_mm": round(_calibration_floor_mm(scenario, cameras, calib), 2),
     }
     return PreparedRun(scenario=scenario, seed=seed, calibration_mode=calibration, noise=noise_name, cameras=cameras,
                        calibration=calib, calibration_info=calib_info, ticks=ticks, raw_skeletons=raw_skeletons,

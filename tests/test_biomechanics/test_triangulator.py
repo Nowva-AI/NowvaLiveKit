@@ -13,6 +13,7 @@ import math
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -47,6 +48,9 @@ CLEAN_MEAN_ERROR_LIMIT_M = 0.01
 OUTLIER_ERROR_LIMIT_M = 0.03
 SWAP_ERROR_LIMIT_M = 0.02
 HIDDEN_HIP_OFFSET_M = np.array([0.15, 0.0, 0.2])
+LENS_DISTORTION = np.array([-0.25, 0.08, 0.001, -0.001, 0.0])
+UNDISTORTED_ERROR_LIMIT_M = 1e-4
+IGNORED_DISTORTION_MIN_ERROR_M = 0.005
 
 LEFT_RIGHT_PAIRS = ((1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16), (17, 18), (19, 20))
 LEG_PAIRS = ((11, 12), (13, 14), (15, 16), (17, 18), (19, 20))
@@ -139,6 +143,18 @@ def _project(calibration: CalibrationResult, points: np.ndarray) -> np.ndarray:
     for cam_id in sorted(calibration.cameras):
         projected = np.hstack([points, np.ones((len(points), 1))]) @ calibration.cameras[cam_id].projection_matrix.T
         pixels.append(projected[:, :2] / projected[:, 2:3])
+    return np.stack(pixels)
+
+
+def _project_through_lens(calibration: CalibrationResult, points: np.ndarray) -> np.ndarray:
+    pixels = []
+    for cam_id in sorted(calibration.cameras):
+        camera = calibration.cameras[cam_id]
+        projected, _ = cv2.projectPoints(
+            points, cv2.Rodrigues(camera.rotation_matrix)[0], camera.translation_vector,
+            camera.intrinsic_matrix, LENS_DISTORTION,
+        )
+        pixels.append(projected.reshape(-1, 2))
     return np.stack(pixels)
 
 
@@ -487,6 +503,41 @@ class TestMetricConfidence:
         three_view = _skeleton_arrays(DLTTriangulator(rig_calibration).triangulate(_multi_view(pixels)))[1]
         assert (three_view > TWO_VIEW_CONFIDENCE_CAP).all()
         assert (three_view < 1.0).all()
+
+
+class TestLensDistortion:
+    def test_distorted_views_reconstruct_exactly_when_calibration_has_the_coefficients(
+        self, rig_calibration: CalibrationResult
+    ) -> None:
+        truth = _squat_skeleton(0.6)
+        pixels = _project_through_lens(rig_calibration, truth)
+        ignored = DLTTriangulator(rig_calibration).triangulate(_multi_view(pixels))
+        for camera in rig_calibration.cameras.values():
+            camera.distortion_coeffs = LENS_DISTORTION
+
+        undistorted = DLTTriangulator(rig_calibration).triangulate(_multi_view(pixels))
+
+        positions, confidences = _skeleton_arrays(undistorted)
+        ignored_positions, _ = _skeleton_arrays(ignored)
+        assert np.all(confidences > 0.0)
+        assert np.linalg.norm(positions - truth, axis=1).max() < UNDISTORTED_ERROR_LIMIT_M
+        assert np.linalg.norm(ignored_positions - truth, axis=1).max() > IGNORED_DISTORTION_MIN_ERROR_M
+
+    def test_invalid_keypoints_in_a_distorted_view_never_produce_nan(self, rig_calibration: CalibrationResult) -> None:
+        for camera in rig_calibration.cameras.values():
+            camera.distortion_coeffs = LENS_DISTORTION
+        truth = _squat_skeleton(0.3)
+        pixels = _project_through_lens(rig_calibration, truth)
+        pixels[0, CK.LEFT_KNEE] = [np.nan, np.inf]
+        confidences = np.ones(pixels.shape[:2])
+        confidences[1, CK.RIGHT_ANKLE] = 0.0
+        confidences[2] = 0.0
+
+        skeleton = DLTTriangulator(rig_calibration).triangulate(_multi_view(pixels, confidences))
+
+        positions, _ = _skeleton_arrays(skeleton)
+        assert np.isfinite(positions).all()
+        assert np.linalg.norm(positions[CK.LEFT_HIP] - truth[CK.LEFT_HIP]) < UNDISTORTED_ERROR_LIMIT_M
 
 
 class TestRecentreAtHips:

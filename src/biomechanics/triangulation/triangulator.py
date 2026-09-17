@@ -4,6 +4,9 @@ Robust multi-view DLT triangulation into world coordinates (Y-down, meters).
 Per keypoint: all-view DLT with a fallback to the best consistent camera pair,
 a per-view left/right swap test, and a metric confidence derived from the
 estimated 3D position uncertainty. Output is NOT hip-centred.
+
+Views whose calibration has lens distortion are undistorted first, so every
+residual, threshold and confidence is in undistorted pixel space.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import logging
 
 import numpy as np
 
-from biomechanics.triangulation.calibration import CalibrationResult
+from biomechanics.triangulation.calibration import CalibrationResult, undistort_keypoints
 from biomechanics.utils.types import CocoKeypoints as CK
 from biomechanics.utils.types import MultiViewPose, Point3D, Skeleton3D
 
@@ -193,6 +196,11 @@ class DLTTriangulator:
             ]
         )
         num_views = len(self._cam_ids)
+        self._distorted_views = [
+            (view_idx, calibration.cameras[cam_id])
+            for view_idx, cam_id in enumerate(self._cam_ids)
+            if np.any(calibration.cameras[cam_id].distortion_coeffs)
+        ]
 
         pairs = list(itertools.combinations(range(num_views), 2))
         self._pair_masks = np.zeros((len(pairs), num_views), dtype=bool)
@@ -283,7 +291,10 @@ class DLTTriangulator:
             & np.isfinite(view_confidences)
             & (view_confidences >= self._min_confidence)
         )
-        return np.where(valid[..., None], xy, 0.0), valid
+        xy = np.where(valid[..., None], xy, 0.0)
+        for view_idx, camera in self._distorted_views:
+            xy[view_idx, valid[view_idx]] = undistort_keypoints(xy[view_idx, valid[view_idx]], camera)
+        return xy, valid
 
     def _solve_all_views(
         self, normals: np.ndarray, xy: np.ndarray, valid: np.ndarray

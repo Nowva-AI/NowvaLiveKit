@@ -85,6 +85,7 @@ class MultiCameraCapture:
         camera_ids = [str(dev_id) for dev_id in device_ids]
 
         self._caps: dict[str, cv2.VideoCapture] = {}
+        self._actual_resolutions: dict[str, tuple[int, int]] = {}
         self._buffers: dict[str, deque[tuple[int, float, np.ndarray]]] = {
             cam_id: deque(maxlen=buffer_size) for cam_id in camera_ids
         }
@@ -123,6 +124,7 @@ class MultiCameraCapture:
             logger.info(
                 "Camera %s: %dx%d @ %.1f fps", cam_id, actual_width, actual_height, actual_fps
             )
+            self._actual_resolutions[cam_id] = (actual_width, actual_height)
 
             self._caps[cam_id] = cap
             thread = threading.Thread(
@@ -130,6 +132,11 @@ class MultiCameraCapture:
             )
             self._threads[cam_id] = thread
             thread.start()
+
+    @property
+    def actual_resolutions(self) -> dict[str, tuple[int, int]]:
+        """camera_id -> (width, height) each camera really opened at, which may differ from the request."""
+        return dict(self._actual_resolutions)
 
     def _reader_loop(self, cam_id: str) -> None:
         cap = self._caps[cam_id]

@@ -1,8 +1,10 @@
-"""Three-camera pinhole rig and the two calibration modes fed to the real DLTTriangulator.
+"""Three-camera pinhole rig and the calibration modes fed to the real DLTTriangulator.
 
 perfect: true projection matrices. tpose: the real TPoseCalibrator (solvePnP against the canonical
 anthropometric T-pose, guessed f = 0.8 w) run on simulated detections of the TRUE body's T-pose seen by the
 true cameras (true f ~= 0.72 w, off-centre principal point), so the systematic calibration error is realistic.
+person_ba*: the real PersonCalibrator (bundle adjustment, no T-pose) on the harness's own noisy detections of a
+walk-in + 2 reps, with the true intrinsics or a +-10 % focal error, metric scale from the bar or the height prior.
 """
 
 from __future__ import annotations
@@ -13,7 +15,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from biomechanics.triangulation.calibration import CalibrationResult, CameraCalibration, TPoseCalibrator
-from biomechanics.utils.types import Keypoint2D, Skeleton2D
+from biomechanics.triangulation.person_calibration import PersonCalibrator
+from biomechanics.utils.types import BarbellDetection, Keypoint2D, Skeleton2D
 
 from .body import FLOOR_Y_M, HEIGHT_M, tpose_skeleton
 
@@ -145,4 +148,116 @@ def tpose_calibration(cameras: list[Camera], detect_fn, seed: int, cfg: RigConfi
         rel = cal.rotation_matrix @ cam.rotation.T
         info[cam.cam_id]["rotation_error_deg"] = round(float(np.degrees(np.arccos(np.clip(
             (np.trace(rel) - 1) / 2, -1, 1)))), 2)
+    return result, info
+
+
+@dataclass
+class PersonBAConfig:
+    focal_scale: float = 1.0  # intrinsics handed to the calibrator = true K with both focal lengths x this
+    scale_source: str = "bar"  # "bar": bar_length_m given; "height": height only
+    bar_length_m: float = 2.2
+    capture_scenario: str = "walkout"  # walk-in (0.5 m + 20 deg turn) then reps
+    capture_reps: int = 2
+    capture_tail_s: float = 0.5
+    capture_seed_offset: int = 1000
+    start_from_tpose: bool = False  # refine() the production T-pose calibration instead of the essential-matrix start
+
+
+PERSON_BA_MODES: dict[str, PersonBAConfig] = {
+    "person_ba": PersonBAConfig(),
+    "person_ba_from_tpose": PersonBAConfig(start_from_tpose=True),
+    "person_ba_height": PersonBAConfig(scale_source="height"),
+    "person_ba_k+10": PersonBAConfig(focal_scale=1.1),
+    "person_ba_k-10": PersonBAConfig(focal_scale=0.9),
+    "person_ba_k+10_height": PersonBAConfig(focal_scale=1.1, scale_source="height"),
+    "person_ba_k-10_height": PersonBAConfig(focal_scale=0.9, scale_source="height"),
+}
+
+
+def _rotation_angle_deg(rotation: np.ndarray) -> float:
+    return float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1) / 2, -1, 1))))
+
+
+def triangulate_noise_free(cameras: list[Camera], calibration: CalibrationResult, points_world: np.ndarray
+                           ) -> np.ndarray:
+    """TRUE noise-free projections of points (..., 3) triangulated (plain DLT) with the calibration under test."""
+    rows = []
+    for cam in cameras:
+        uv, _ = cam.project(points_world)
+        mat = calibration.cameras[cam.cam_id].projection_matrix
+        rows.append(uv[..., 0:1] * mat[2] - mat[0])
+        rows.append(uv[..., 1:2] * mat[2] - mat[1])
+    _, _, vt = np.linalg.svd(np.stack(rows, axis=-2))
+    return vt[..., -1, :3] / vt[..., -1, 3:4]
+
+
+def _yaw_gauge(points_calibrated: np.ndarray, points_truth: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # best yaw-about-vertical + translation with truth ~= rotation @ calibrated + shift (no tilt, no scale)
+    a = points_calibrated.reshape(-1, 3)
+    b = points_truth.reshape(-1, 3)
+    a_c, b_c = a - a.mean(0), b - b.mean(0)
+    angle = math.atan2(np.sum(a_c[:, 0] * b_c[:, 2] - a_c[:, 2] * b_c[:, 0]),
+                       np.sum(a_c[:, 0] * b_c[:, 0] + a_c[:, 2] * b_c[:, 2]))
+    c, s = math.cos(angle), math.sin(angle)
+    rotation = np.array([[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]])
+    return rotation, b.mean(0) - rotation @ a.mean(0)
+
+
+def person_ba_calibration(cameras: list[Camera], views: list[dict[str, Skeleton2D]],
+                          bar_ends: list[dict[str, BarbellDetection]], capture_truth_world: np.ndarray,
+                          cfg: PersonBAConfig, initial: CalibrationResult | None = None
+                          ) -> tuple[CalibrationResult, dict]:
+    """Run the production PersonCalibrator on a simulated capture and express the result in the harness frame.
+
+    The calibrator anchors its world frame on the lifter (X = the standing subject's left, origin = standing hip
+    midpoint, averaged over whichever standing frames it used); the harness truth frame is anchored on the T-pose
+    spot. Heading and origin are a gauge choice, not an error, so they are removed: the capture's TRUE joints
+    (F, 21, 3) are projected noise-free, triangulated with the solved cameras, and the best yaw-about-vertical +
+    translation onto the truth is applied. Tilt of the solved vertical, relative camera poses and scale are NOT
+    corrected and stay in every metric.
+    """
+    intrinsics = {}
+    for cam in cameras:
+        intrinsic = cam.intrinsic.copy()
+        intrinsic[0, 0] *= cfg.focal_scale
+        intrinsic[1, 1] *= cfg.focal_scale
+        intrinsics[cam.cam_id] = (intrinsic, np.zeros(5))
+    use_bar = cfg.scale_source == "bar"
+    calibrator = PersonCalibrator(intrinsics, cameras[0].resolution,
+                                  bar_length_m=cfg.bar_length_m if use_bar else None, height_m=HEIGHT_M)
+    solved = calibrator.calibrate(views, bar_ends=bar_ends if use_bar else None, initial=initial)
+
+    body_points = capture_truth_world[:, 5:NUM_DETECTED_KPTS]
+    in_calibrated = triangulate_noise_free(cameras, solved.calibration, body_points)
+    gauge_rotation, gauge_shift = _yaw_gauge(in_calibrated, body_points)  # harness = rotation @ calibrated + shift
+    # working-volume scale: solved / true distance from each joint to the frame's joint centroid
+    spread_solved = np.linalg.norm(in_calibrated - in_calibrated.mean(axis=1, keepdims=True), axis=-1).sum()
+    spread_truth = np.linalg.norm(body_points - body_points.mean(axis=1, keepdims=True), axis=-1).sum()
+
+    result = CalibrationResult(athlete_height_m=solved.calibration.athlete_height_m, timestamp="harness-person-ba")
+    info: dict = {"rms_reprojection_px": round(solved.rms_reprojection_px, 3),
+                  "initial_rms_reprojection_px": round(solved.initial_rms_reprojection_px, 3),
+                  "scale_source": solved.scale_source, "frames_used": solved.frames_used,
+                  "capture_frames": len(views), "standing_frames": solved.standing_frames,
+                  "solve_time_s": round(solved.solve_time_s, 3),
+                  "gauge_yaw_deg": round(math.degrees(math.atan2(gauge_rotation[2, 0], gauge_rotation[0, 0])), 2),
+                  "scale_error_pct": round(100.0 * (spread_solved / spread_truth - 1.0), 3),
+                  "bone_lengths_m": {k: round(v, 4) for k, v in solved.bone_lengths_m.items()}}
+    for cam in cameras:
+        cal = solved.calibration.cameras[cam.cam_id]
+        rotation = cal.rotation_matrix @ gauge_rotation.T
+        translation = cal.translation_vector.ravel() - rotation @ gauge_shift
+        result.cameras[cam.cam_id] = CameraCalibration(
+            camera_id=cam.cam_id, projection_matrix=cal.intrinsic_matrix @ np.hstack([rotation, translation[:, None]]),
+            intrinsic_matrix=cal.intrinsic_matrix, rotation_matrix=rotation, translation_vector=translation[:, None],
+            reprojection_error=cal.reprojection_error, resolution=cam.resolution)
+        centre = -rotation.T @ translation
+        info[cam.cam_id] = {"reprojection_rms_px": round(cal.reprojection_error, 2),
+                            "centre_error_m": round(float(np.linalg.norm(centre - cam.position)), 4),
+                            "rotation_error_deg": round(_rotation_angle_deg(rotation @ cam.rotation.T), 3)}
+    # where the TRUE vertical lands in the calibrated frame, seen through each camera (tilt of the solved Y axis)
+    down = np.array([0.0, 1.0, 0.0])
+    tilts = [np.degrees(np.arccos(np.clip((result.cameras[cam.cam_id].rotation_matrix.T @ cam.rotation @ down)[1],
+                                          -1, 1))) for cam in cameras]
+    info["vertical_tilt_deg"] = round(float(np.mean(tilts)), 3)
     return result, info

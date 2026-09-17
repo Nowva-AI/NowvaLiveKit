@@ -709,3 +709,119 @@ class TestTwoCameraRigs:
         pipe = pipeline_module.BiomechanicsPipeline(config, defer_capture=True)
         assert pipe.body_calibration._min_endpoint_confidence == pytest.approx(TWO_CAMERA_MEASUREMENT_CONFIDENCE)
         assert TWO_CAMERA_MEASUREMENT_CONFIDENCE < TWO_VIEW_CONFIDENCE_CAP
+
+
+# ---------------------------------------------------------------------------
+# Camera calibration: world-state reset on install, provider wiring
+# ---------------------------------------------------------------------------
+
+CALIBRATION_BUFFER_FRAMES = 123
+BAR_DETECTION_STRIDE = 4
+CAMERA_KEYS = {1: "usb_left"}
+
+
+class _FakeBarbellDetector:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+
+
+def _build_recording_provider_pipeline(monkeypatch, config: BiomechanicsConfig) -> tuple:
+    """Real pipeline whose MultiCameraPoseProvider only records its constructor arguments."""
+    monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
+    import biomechanics.barbell_tracking as barbell_tracking_module
+    import biomechanics.pose.multi_camera as multi_camera_module
+    from biomechanics import pipeline as pipeline_module
+
+    received: dict[str, object] = {}
+
+    class _RecordingProvider:
+        def __init__(self, **kwargs: object) -> None:
+            received.update(kwargs)
+
+    monkeypatch.setattr(multi_camera_module, "MultiCameraPoseProvider", _RecordingProvider)
+    monkeypatch.setattr(barbell_tracking_module, "BarbellDetector", _FakeBarbellDetector)
+    pipe = pipeline_module.BiomechanicsPipeline(config, defer_capture=True)
+    return pipe, received
+
+
+class TestCameraCalibrationChange:
+    def test_same_world_frame_keeps_foot_contact_and_body_measurements(self, monkeypatch):
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        _run_frames(pipe, provider, clock, _reps(3))
+        params = pipe.body_calibration.to_athlete_params()
+        resets_before = provider.temporal_resets
+
+        pipe.on_calibration_changed(world_frame_changed=False)
+        result = _step(pipe, provider, clock, world_squat_points(MIN_DEPTH_RATIO))
+
+        assert provider.temporal_resets == resets_before + 1
+        # Kalman history is gone: the lagged analysis frame is the current one.
+        assert result.skeleton_3d.frame_index == result.frame_index
+        assert result.foot_state.valid
+        assert pipe.body_calibration.to_athlete_params() == params
+
+    def test_world_frame_change_also_resets_foot_contact(self, monkeypatch):
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        _run_frames(pipe, provider, clock, _reps(3))
+        params = pipe.body_calibration.to_athlete_params()
+        resets_before = provider.temporal_resets
+
+        pipe.on_calibration_changed(world_frame_changed=True)
+        result = _step(pipe, provider, clock, world_squat_points(MIN_DEPTH_RATIO))
+
+        assert provider.temporal_resets == resets_before + 1
+        assert result.skeleton_3d.frame_index == result.frame_index
+        # Anchors and floor lived in the old world frame: the model warms up again.
+        assert not result.foot_state.valid
+        assert params is not None
+        assert pipe.body_calibration.to_athlete_params() == params
+
+
+class TestCameraCalibrationWiring:
+    def test_provider_receives_camera_calibration_config(self, monkeypatch):
+        config = BiomechanicsConfig()
+        config.camera_calibration.camera_keys = CAMERA_KEYS
+        config.camera_calibration.calibration_buffer_frames = CALIBRATION_BUFFER_FRAMES
+        config.camera_calibration.bar_detection_stride = BAR_DETECTION_STRIDE
+
+        _, received = _build_recording_provider_pipeline(monkeypatch, config)
+
+        assert received["camera_keys"] == CAMERA_KEYS
+        assert received["calibration_buffer_frames"] == CALIBRATION_BUFFER_FRAMES
+        assert received["bar_detection_stride"] == BAR_DETECTION_STRIDE
+        assert received["bar_detector"] is None
+
+    def test_bar_scale_gives_the_provider_a_detector_without_per_frame_tracking(self, monkeypatch, tmp_path):
+        model_path = tmp_path / "barbell_keypoints.pt"
+        model_path.write_bytes(b"")
+        config = BiomechanicsConfig()
+        config.camera_calibration.use_bar_scale = True
+        config.barbell_tracking.model_path = str(model_path)
+
+        pipe, received = _build_recording_provider_pipeline(monkeypatch, config)
+
+        assert isinstance(received["bar_detector"], _FakeBarbellDetector)
+        assert received["bar_detector"].kwargs["model_path"] == str(model_path)
+        # Tracking is off, so sets never pay for bar detection.
+        assert pipe._barbell_detector is None
+
+    def test_bar_scale_without_the_model_falls_back_to_height(self, monkeypatch, tmp_path, caplog):
+        config = BiomechanicsConfig()
+        config.camera_calibration.use_bar_scale = True
+        config.barbell_tracking.model_path = str(tmp_path / "missing.pt")
+
+        with caplog.at_level("WARNING", logger="biomechanics.pipeline"):
+            pipe, received = _build_recording_provider_pipeline(monkeypatch, config)
+
+        assert received["bar_detector"] is None
+        assert pipe._barbell_detector is None
+        assert any("use_bar_scale" in record.getMessage() for record in caplog.records)
+
+    def test_barbell_tracking_shares_its_detector_with_the_provider(self, monkeypatch):
+        config = BiomechanicsConfig()
+        config.barbell_tracking.enabled = True
+
+        pipe, received = _build_recording_provider_pipeline(monkeypatch, config)
+
+        assert isinstance(pipe._barbell_detector, _FakeBarbellDetector)
+        assert received["bar_detector"] is pipe._barbell_detector
