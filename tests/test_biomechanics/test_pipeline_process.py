@@ -6,7 +6,6 @@ payload, and camera calibration inputs (user height, refined-file load order).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -20,13 +19,13 @@ from biomechanics.pipeline_process import (
     refined_calibration_path,
     select_calibration_file,
 )
-from biomechanics.triangulation.calibration import rig_calibration_path
+from biomechanics.triangulation.calibration import CalibrationResult, TPoseCalibrator, rig_calibration_path
 from biomechanics.utils.segment_lengths import SegmentLengthEstimator
 
 HEIGHT_TOLERANCE_M = 1e-9
-FACTORY_MTIME_S = 1_000_000.0
-NEWER_MTIME_S = FACTORY_MTIME_S + 60.0
-OLDER_MTIME_S = FACTORY_MTIME_S - 60.0
+FACTORY_TIMESTAMP = "2026-09-18T10:00:00"
+REFINED_TIMESTAMP = "2026-09-18T11:00:00"
+OTHER_TIMESTAMP = "2026-09-01T09:00:00"
 
 ATHLETE_PARAMS = {
     "shoulder_width_m": 0.39,
@@ -135,9 +134,10 @@ class TestResolveUserHeight:
         assert _resolve_user_height_m(0.0) == pytest.approx(FALLBACK_USER_HEIGHT_M, abs=HEIGHT_TOLERANCE_M)
 
 
-def _touch(path: Path, mtime_s: float) -> Path:
-    path.write_text("{}")
-    os.utime(path, (mtime_s, mtime_s))
+def _write_rig_file(path: Path, timestamp: str, source_timestamp: str = "") -> Path:
+    TPoseCalibrator.save_calibration(
+        CalibrationResult(timestamp=timestamp, source_timestamp=source_timestamp), str(path),
+    )
     return path
 
 
@@ -151,18 +151,30 @@ class TestCalibrationFileSelection:
         assert select_calibration_file(rig_calibration_path([0, 1, 2], tmp_path)) is None
 
     def test_factory_file_alone_is_selected(self, tmp_path: Path) -> None:
-        factory_path = _touch(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_MTIME_S)
+        factory_path = _write_rig_file(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_TIMESTAMP)
 
         assert select_calibration_file(factory_path) == factory_path
 
-    def test_newer_refined_file_wins(self, tmp_path: Path) -> None:
-        factory_path = _touch(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_MTIME_S)
-        refined_path = _touch(refined_calibration_path(factory_path), NEWER_MTIME_S)
+    def test_refined_file_derived_from_the_factory_file_wins(self, tmp_path: Path) -> None:
+        factory_path = _write_rig_file(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_TIMESTAMP)
+        refined_path = _write_rig_file(refined_calibration_path(factory_path), REFINED_TIMESTAMP, FACTORY_TIMESTAMP)
 
         assert select_calibration_file(factory_path) == refined_path
 
-    def test_refined_file_older_than_a_new_factory_file_is_ignored(self, tmp_path: Path) -> None:
-        factory_path = _touch(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_MTIME_S)
-        _touch(refined_calibration_path(factory_path), OLDER_MTIME_S)
+    def test_refined_file_from_another_factory_calibration_is_ignored(self, tmp_path: Path) -> None:
+        factory_path = _write_rig_file(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_TIMESTAMP)
+        _write_rig_file(refined_calibration_path(factory_path), REFINED_TIMESTAMP, OTHER_TIMESTAMP)
 
         assert select_calibration_file(factory_path) == factory_path
+
+    def test_refined_file_without_lineage_is_ignored(self, tmp_path: Path) -> None:
+        factory_path = _write_rig_file(rig_calibration_path([0, 1, 2], tmp_path), FACTORY_TIMESTAMP)
+        _write_rig_file(refined_calibration_path(factory_path), REFINED_TIMESTAMP)
+
+        assert select_calibration_file(factory_path) == factory_path
+
+    def test_refined_file_without_a_factory_file_is_ignored(self, tmp_path: Path) -> None:
+        factory_path = rig_calibration_path([0, 1, 2], tmp_path)
+        _write_rig_file(refined_calibration_path(factory_path), REFINED_TIMESTAMP, FACTORY_TIMESTAMP)
+
+        assert select_calibration_file(factory_path) is None

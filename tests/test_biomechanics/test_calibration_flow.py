@@ -10,7 +10,6 @@ end-to-end test.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import threading
 import time
@@ -28,11 +27,13 @@ from biomechanics.pipeline_process import (  # noqa: E402
     CALIBRATION_CAPTURE_HEADLINE,
     CALIBRATION_SOLVING_HEADLINE,
     TPOSE_FALLBACK_HEADLINE,
+    TPOSE_MAX_ATTEMPTS,
     WORLD_ANCHOR_HEADLINE,
     CalibrationSolve,
     CameraCalibrationSession,
     SquatExcursionCounter,
     knee_flexion_2d_deg,
+    leg_length_ratio,
     refined_calibration_path,
 )
 from biomechanics.pose.multi_camera import MultiCameraPoseProvider  # noqa: E402
@@ -40,11 +41,13 @@ from biomechanics.triangulation.calibration import (  # noqa: E402
     WORLD_ANCHOR_BOARD,
     WORLD_ANCHOR_PERSON,
     CalibrationResult,
+    CameraCalibration,
     TPoseCalibrator,
     rig_calibration_path,
 )
 from biomechanics.triangulation.multi_capture import MultiCameraCapture  # noqa: E402
-from biomechanics.triangulation.person_calibration import PersonCalibrationResult  # noqa: E402
+from biomechanics.triangulation.person_calibration import PersonCalibrationResult, reprojection_health_px  # noqa: E402
+from biomechanics.utils.segment_lengths import SegmentLengthEstimator  # noqa: E402
 from biomechanics.utils.types import BarbellDetection, PipelineFrame, Skeleton2D  # noqa: E402
 from biomechanics.utils.types import CocoKeypoints as CK  # noqa: E402
 from test_person_calibration import (  # noqa: E402
@@ -75,8 +78,28 @@ BAR_DETECTION_STRIDE = 3
 STANDING_FRAMES = 40
 THREAD_WAIT_S = 10.0
 THREAD_POLL_S = 0.001
-FACTORY_MTIME_S = 1_000_000.0
 LATER_S = 100.0
+DRIFT_CHECK_FRAMES = 20
+SQUAT_SEQUENCE_FRAMES = 80  # _lifter_sequence: 30 walk-in + 50 squat frames
+LONG_SET_FRAMES = 450
+LONG_SET_CHECK_FRAMES = 150
+DRIFT_RATIO = 1.5
+SCALE_BUG_RATIO = 0.97
+LEGIT_SCALE_RATIO = 0.995
+# Held-out health of these partial rigs on the drifted-rig check frames (1 px noise): 12.6 px
+# (above before / ratio = 11.2) and, at a quarter, ~2.4 px (below it, above the 1.5 px limit).
+PARTIAL_DRIFT_ROTATION_DEG = 1.5
+PARTIAL_DRIFT_SHIFT_M = 0.0375
+SPURIOUS_SET_NOISE_PX = 3.5
+TPOSE_TIMEOUT_S = 0.05
+KNOWN_ATHLETE_PARAMS = {
+    "shoulder_width_m": 2.0 * LIFTER_RATIOS["shoulder_width_half"] * HEIGHT_M,
+    "femur_avg_m": LIFTER_RATIOS["femur"] * HEIGHT_M,
+    "torso_avg_m": LIFTER_RATIOS["torso"] * HEIGHT_M,
+    "hip_width_m": 2.0 * LIFTER_RATIOS["hip_width_half"] * HEIGHT_M,
+    "tibia_avg_m": LIFTER_RATIOS["tibia"] * HEIGHT_M,
+    "foot_avg_m": 0.20,
+}
 
 STANDING_MAX_FLEXION_DEG = 10.0
 SQUAT_MIN_FLEXION_DEG = 80.0
@@ -137,6 +160,7 @@ class _FakePipeline:
         self.last_frame: np.ndarray | None = None
         self.presence_only_per_frame: list[bool] = []
         self.calibration_changes: list[bool] = []
+        self.body_calibration = SegmentLengthEstimator.from_athlete_params(KNOWN_ATHLETE_PARAMS)
 
     @property
     def frames_processed(self) -> int:
@@ -156,7 +180,8 @@ class _FakePipeline:
             # Real cameras block until the next frame; without this a waiting loop starves the solver thread.
             time.sleep(THREAD_POLL_S)
         frame, skeleton_2d, _ = self._multi_camera_provider.get_pose()
-        self.last_frame = frame
+        if frame is not None:
+            self.last_frame = frame  # as the real pipeline: the last frame delivered, never None afterwards
         return PipelineFrame(frame_index=self._next_frame_number, timestamp=self._clock.now_s, skeleton_2d=skeleton_2d)
 
     def on_calibration_changed(self, world_frame_changed: bool) -> None:
@@ -224,6 +249,8 @@ def _flow_config() -> BiomechanicsConfig:
     config.camera_calibration.min_calibration_frames = MIN_CALIBRATION_FRAMES
     config.camera_calibration.capture_timeout_s = CAPTURE_TIMEOUT_S
     config.camera_calibration.bar_detection_stride = BAR_DETECTION_STRIDE
+    config.camera_calibration.drift_check_frames = DRIFT_CHECK_FRAMES
+    config.camera_calibration.drift_ratio = DRIFT_RATIO
     config.barbell_tracking.bar_length_m = BAR_LENGTH_M
     return config
 
@@ -239,8 +266,33 @@ def _save(calibration: CalibrationResult, path: Path, world_anchor: str, rms_px:
     calibration.world_anchor = world_anchor
     calibration.rms_reprojection_px = rms_px
     TPoseCalibrator.save_calibration(calibration, str(path))
-    os.utime(path, (FACTORY_MTIME_S, FACTORY_MTIME_S))
     return path.read_bytes()
+
+
+def _scaled(calibration: CalibrationResult, ratio: float) -> CalibrationResult:
+    # Same cameras with every translation scaled: triangulated lengths scale by `ratio`.
+    result = CalibrationResult(
+        athlete_height_m=calibration.athlete_height_m, timestamp="scaled", world_anchor=calibration.world_anchor,
+    )
+    for cam_id, camera in calibration.cameras.items():
+        translation = camera.translation_vector * ratio
+        result.cameras[cam_id] = CameraCalibration(
+            camera_id=cam_id,
+            projection_matrix=camera.intrinsic_matrix @ np.hstack([camera.rotation_matrix, translation.reshape(3, 1)]),
+            intrinsic_matrix=camera.intrinsic_matrix,
+            rotation_matrix=camera.rotation_matrix,
+            translation_vector=translation.reshape(3, 1),
+            reprojection_error=camera.reprojection_error,
+            resolution=camera.resolution,
+            distortion_coeffs=camera.distortion_coeffs,
+        )
+    return result
+
+
+def _run_drift_refine(rig: "_Rig") -> None:
+    rig.session.on_rest_start()
+    _wait_for_refine(rig.session)
+    rig.session.poll(can_install=True)
 
 
 def _wait_for_refine(session: CameraCalibrationSession) -> None:
@@ -663,8 +715,10 @@ class TestDriftMonitor:
         assert call["initial"] is loaded
         assert call["keep_world_frame"] is True
         assert not call["on_main_thread"]
+        # The refine solves on the frames before the held-out tail the health check uses.
+        assert len(call["views"]) == len(squat_views) - DRIFT_CHECK_FRAMES
+        assert call["views"][-1]["0"].frame_index == len(squat_views) - DRIFT_CHECK_FRAMES - 1
         assert rig.provider.calibration is fake_calibrator.outcome.calibration
-        # The world frame was kept: temporal state resets, foot contact and floor survive.
         assert rig.pipeline.calibration_changes == [False]
         assert not rig.session.is_refining
         refined = json.loads(refined_calibration_path(factory_path).read_text())
@@ -690,7 +744,7 @@ class TestDriftMonitor:
         assert rig.provider.calibration is fake_calibrator.outcome.calibration
         assert len(fake_calibrator.instances) == 1
 
-    def test_refine_that_does_not_improve_health_is_discarded(
+    def test_refine_that_leaves_health_above_the_limit_is_discarded(
         self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
     ) -> None:
         drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
@@ -755,6 +809,401 @@ class TestDriftMonitor:
         rig = _Rig(monkeypatch, factory_path, squat_views)
         rig.session.establish()
 
+        rig.session.on_rest_start()
+
+        assert not rig.session.is_refining
+        assert fake_calibrator.instances == []
+
+
+class TestHeldOutAcceptance:
+    def _drifted_rig(self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, squat_views: list) -> tuple:
+        drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
+        _save(drifted, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        rig.run_frames(len(squat_views))
+        return rig, rig.provider.calibration, squat_views[-DRIFT_CHECK_FRAMES:]
+
+    def test_partial_fix_above_the_limit_and_within_the_ratio_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        rig, loaded, check_views = self._drifted_rig(monkeypatch, factory_path, squat_views)
+        partial = _perturbed(_true_calibration(), PARTIAL_DRIFT_ROTATION_DEG, PARTIAL_DRIFT_SHIFT_M)
+        fake_calibrator.outcome = _solved(partial)
+        health_before_px = reprojection_health_px(loaded, check_views)
+        health_after_px = reprojection_health_px(partial, check_views)
+        assert DRIFT_RATIO * STORED_RMS_PX < health_after_px
+        assert health_after_px > health_before_px / DRIFT_RATIO
+
+        _run_drift_refine(rig)
+
+        assert rig.provider.calibration is loaded
+        assert not refined_calibration_path(factory_path).exists()
+
+    def test_large_improvement_still_above_the_limit_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        rig, loaded, check_views = self._drifted_rig(monkeypatch, factory_path, squat_views)
+        # Nearly right: health drops far below health_before / ratio but stays above the stored limit.
+        nearly = _perturbed(_true_calibration(), PARTIAL_DRIFT_ROTATION_DEG / 4.0, PARTIAL_DRIFT_SHIFT_M / 4.0)
+        fake_calibrator.outcome = _solved(nearly)
+        health_before_px = reprojection_health_px(loaded, check_views)
+        health_after_px = reprojection_health_px(nearly, check_views)
+        assert DRIFT_RATIO * STORED_RMS_PX < health_after_px < health_before_px / DRIFT_RATIO
+
+        _run_drift_refine(rig)
+
+        assert rig.provider.calibration is fake_calibrator.outcome.calibration
+        assert refined_calibration_path(factory_path).exists()
+
+    def test_buffer_no_longer_than_the_check_window_is_not_refined(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
+        _save(drifted, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        rig.run_frames(DRIFT_CHECK_FRAMES)
+
+        rig.session.on_rest_start()
+
+        assert not rig.session.is_refining
+        assert fake_calibrator.instances == []
+
+    def test_noisier_set_on_an_unmoved_rig_is_not_persisted(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, observations: tuple
+    ) -> None:
+        # Real solver: the health check is out of sample, so a refine that only chases noise is rejected.
+        views, bar_ends = observations
+        bootstrap_rig = _Rig(monkeypatch, factory_path, views, bar_ends)
+        bootstrap_rig.session.establish()
+        installed = TPoseCalibrator.load_calibration(str(factory_path))
+        noisy_views, _ = _observe(_lifter_sequence(LIFTER_RATIOS), _true_calibration(), noise_px=SPURIOUS_SET_NOISE_PX, seed=7)
+        config = _flow_config()
+        config.camera_calibration.drift_check_frames = len(noisy_views) // 3
+        rig = _Rig(monkeypatch, factory_path, noisy_views, config=config)
+        rig.session.establish()
+        rig.run_frames(len(noisy_views))
+
+        rig.session.on_rest_start()
+        assert rig.session.is_refining, "the noisier set must trip the drift monitor for this test to mean anything"
+        _wait_for_refine(rig.session)
+        rig.session.poll(can_install=True)
+
+        assert not refined_calibration_path(factory_path).exists()
+        assert rig.pipeline.calibration_changes == []
+        centre_error_m, _ = _rig_errors(installed, _true_calibration())
+        assert centre_error_m < NOISY_CENTRE_TOL_M
+
+
+class TestScaleGuard:
+    def test_leg_length_ratio_reads_the_known_lengths_as_one(self, squat_views: list) -> None:
+        ratio = leg_length_ratio(_true_calibration(), squat_views[-DRIFT_CHECK_FRAMES:], KNOWN_ATHLETE_PARAMS)
+
+        assert ratio == pytest.approx(1.0, abs=0.005)
+        assert leg_length_ratio(_scaled(_true_calibration(), SCALE_BUG_RATIO), squat_views[-DRIFT_CHECK_FRAMES:], KNOWN_ATHLETE_PARAMS) == pytest.approx(SCALE_BUG_RATIO, abs=0.005)
+
+    def test_leg_length_ratio_is_nan_without_legs(self) -> None:
+        assert np.isnan(leg_length_ratio(_true_calibration(), [], KNOWN_ATHLETE_PARAMS))
+
+    def test_drift_refine_that_changes_scale_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list, capsys
+    ) -> None:
+        drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
+        factory_bytes = _save(drifted, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        fake_calibrator.outcome = _solved(_scaled(_true_calibration(), SCALE_BUG_RATIO))
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        loaded = rig.provider.calibration
+        rig.run_frames(len(squat_views))
+
+        _run_drift_refine(rig)
+
+        assert rig.provider.calibration is loaded
+        assert rig.pipeline.calibration_changes == []
+        assert not refined_calibration_path(factory_path).exists()
+        assert factory_path.read_bytes() == factory_bytes
+        assert "camera moved along the baseline" in capsys.readouterr().out
+
+    def test_drift_refine_within_one_percent_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
+        _save(drifted, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        fake_calibrator.outcome = _solved(_scaled(_true_calibration(), LEGIT_SCALE_RATIO))
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        rig.run_frames(len(squat_views))
+
+        _run_drift_refine(rig)
+
+        assert rig.provider.calibration is fake_calibrator.outcome.calibration
+        assert refined_calibration_path(factory_path).exists()
+
+    def test_board_anchor_that_changes_scale_is_rejected_and_stays_pending(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), factory_path, WORLD_ANCHOR_BOARD, STORED_RMS_PX)
+        fake_calibrator.outcome = _solved(_scaled(_true_calibration(), SCALE_BUG_RATIO))
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        loaded = rig.provider.calibration
+        rig.run_frames(len(squat_views))
+
+        rig.session.anchor_world_on_lifter()
+
+        assert rig.provider.calibration is loaded
+        assert rig.session.needs_world_anchor
+        assert not refined_calibration_path(factory_path).exists()
+
+    def test_unmeasured_body_skips_the_guard(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
+        _save(drifted, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        fake_calibrator.outcome = _solved(_scaled(_true_calibration(), SCALE_BUG_RATIO))
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.pipeline.body_calibration = SegmentLengthEstimator()
+        rig.session.establish()
+        rig.run_frames(len(squat_views))
+
+        _run_drift_refine(rig)
+
+        assert rig.provider.calibration is fake_calibrator.outcome.calibration
+
+    @pytest.mark.parametrize("frame_count, check_frames", [(80, DRIFT_CHECK_FRAMES), (LONG_SET_FRAMES, LONG_SET_CHECK_FRAMES)])
+    def test_real_refine_never_persists_a_scale_change(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, frame_count: int, check_frames: int, capsys
+    ) -> None:
+        # Finding A: cam 1 moved 5 cm along the cam0-cam1 baseline. Whatever the solver makes of
+        # that, a refined file may only exist if it reproduces the session's leg length within 1 %.
+        truth = _true_calibration()
+        camera_0, camera_1 = truth.cameras["0"], truth.cameras["1"]
+        centre_0 = -camera_0.rotation_matrix.T @ camera_0.translation_vector.ravel()
+        centre_1 = -camera_1.rotation_matrix.T @ camera_1.translation_vector.ravel()
+        along_baseline = (centre_1 - centre_0) / np.linalg.norm(centre_1 - centre_0)
+        moved = CalibrationResult(athlete_height_m=HEIGHT_M, timestamp="moved")
+        for cam_id, camera in truth.cameras.items():
+            if cam_id != "1":
+                moved.cameras[cam_id] = camera
+                continue
+            translation = -camera.rotation_matrix @ (centre_1 + DRIFT_SHIFT_M * along_baseline)
+            moved.cameras[cam_id] = CameraCalibration(
+                camera_id=cam_id,
+                projection_matrix=camera.intrinsic_matrix @ np.hstack([camera.rotation_matrix, translation[:, None]]),
+                intrinsic_matrix=camera.intrinsic_matrix,
+                rotation_matrix=camera.rotation_matrix,
+                translation_vector=translation.reshape(3, 1),
+                reprojection_error=0.0,
+                resolution=camera.resolution,
+            )
+        sequence = np.concatenate([_lifter_sequence(LIFTER_RATIOS)] * (frame_count // SQUAT_SEQUENCE_FRAMES + 1))[:frame_count]
+        moved_views, _ = _observe(sequence, moved, noise_px=DETECTION_NOISE_PX)
+        _save(truth, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        config = _flow_config()
+        config.camera_calibration.drift_check_frames = check_frames
+        rig = _Rig(monkeypatch, factory_path, moved_views, config=config)
+        rig.session.establish()
+        rig.run_frames(len(moved_views))
+
+        _run_drift_refine(rig)
+
+        refined_path = refined_calibration_path(factory_path)
+        if refined_path.exists():
+            ratio = leg_length_ratio(TPoseCalibrator.load_calibration(str(refined_path)), moved_views[-check_frames:], KNOWN_ATHLETE_PARAMS)
+            assert abs(ratio - 1.0) <= 0.01, f"persisted refine changed the leg length by {100 * (ratio - 1):+.2f} %"
+            assert rig.pipeline.calibration_changes == [False]
+        else:
+            assert "camera moved along the baseline" in capsys.readouterr().out
+            assert rig.pipeline.calibration_changes == []
+
+
+class TestTposeFallbackBounds:
+    def test_stalled_cameras_fail_init_instead_of_the_tpose(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type
+    ) -> None:
+        rig = _Rig(monkeypatch, factory_path, [])
+        tpose_calls: list[float] = []
+        monkeypatch.setattr(rig.provider, "calibrate", lambda height_m, save_path=None: tpose_calls.append(height_m))
+
+        with pytest.raises(RuntimeError, match="no frame"):
+            rig.session.establish()
+
+        assert tpose_calls == []
+        assert TPOSE_FALLBACK_HEADLINE not in rig.headlines
+
+    def test_not_holding_a_tpose_retries_then_fails_init(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, standing_views: list
+    ) -> None:
+        rig = _Rig(monkeypatch, factory_path, standing_views)
+        attempts: list[float] = []
+
+        def not_a_tpose(height_m: float, save_path: str | None = None) -> CalibrationResult:
+            attempts.append(height_m)
+            raise ValueError("Camera 0: subject is not holding a T-pose")
+
+        monkeypatch.setattr(rig.provider, "calibrate", not_a_tpose)
+
+        with pytest.raises(RuntimeError, match="T-pose"):
+            rig.session.establish()
+
+        assert len(attempts) == TPOSE_MAX_ATTEMPTS
+        assert rig.headlines.count(TPOSE_FALLBACK_HEADLINE) >= TPOSE_MAX_ATTEMPTS
+
+    def test_second_tpose_attempt_can_succeed(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, standing_views: list
+    ) -> None:
+        rig = _Rig(monkeypatch, factory_path, standing_views)
+        attempts: list[float] = []
+
+        def second_time_lucky(height_m: float, save_path: str | None = None) -> CalibrationResult:
+            attempts.append(height_m)
+            if len(attempts) == 1:
+                raise ValueError("Camera 0: subject is not holding a T-pose")
+            return CalibrationResult(timestamp="tpose")
+
+        monkeypatch.setattr(rig.provider, "calibrate", second_time_lucky)
+
+        rig.session.establish()
+
+        assert len(attempts) == 2
+        assert rig.pipeline.calibration_changes == [True]
+
+    def test_stalled_capture_during_the_tpose_fails_init(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, standing_views: list
+    ) -> None:
+        rig = _Rig(monkeypatch, factory_path, standing_views)
+
+        def stalled(height_m: float, save_path: str | None = None) -> CalibrationResult:
+            raise RuntimeError("T-pose capture: 0/30 synced frames in 10 s — cameras stalled?")
+
+        monkeypatch.setattr(rig.provider, "calibrate", stalled)
+
+        with pytest.raises(RuntimeError, match="stalled"):
+            rig.session.establish()
+
+
+class TestLoadedFileValidation:
+    def test_file_for_other_cameras_is_ignored_and_the_rig_recalibrates(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list, capsys
+    ) -> None:
+        two_camera = _true_calibration()
+        del two_camera.cameras["2"]
+        _save(two_camera, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+
+        rig.session.establish()
+
+        assert len(fake_calibrator.instances) == 1
+        assert rig.provider.calibration is fake_calibrator.outcome.calibration
+        assert "cameras" in capsys.readouterr().out
+
+    def test_file_at_another_resolution_is_ignored_and_the_rig_recalibrates(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list, capsys
+    ) -> None:
+        other_resolution = _true_calibration()
+        for camera in other_resolution.cameras.values():
+            camera.resolution = (RESOLUTION[0] // 2, RESOLUTION[1] // 2)
+        _save(other_resolution, factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+
+        rig.session.establish()
+
+        assert len(fake_calibrator.instances) == 1
+        assert "resolution" in capsys.readouterr().out
+
+    def test_matching_file_loads_without_capturing(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), factory_path, WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+
+        rig.session.establish()
+
+        assert fake_calibrator.instances == []
+        assert rig.pipeline.frames_processed == 0
+
+
+class TestRefinedFileLineage:
+    def test_refined_file_records_its_source_and_is_preferred(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), factory_path, WORLD_ANCHOR_BOARD, STORED_RMS_PX)
+        factory_timestamp = json.loads(factory_path.read_text())["timestamp"]
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        rig.run_frames(len(squat_views))
+        rig.session.anchor_world_on_lifter()
+
+        refined = json.loads(refined_calibration_path(factory_path).read_text())
+        assert refined["source_timestamp"] == factory_timestamp
+        second_run = _Rig(monkeypatch, factory_path, squat_views)
+        second_run.session.establish()
+        assert second_run.provider.calibration.world_anchor == WORLD_ANCHOR_PERSON
+
+    def test_refined_file_from_another_factory_calibration_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), factory_path, WORLD_ANCHOR_BOARD, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        rig.run_frames(len(squat_views))
+        rig.session.anchor_world_on_lifter()
+        assert refined_calibration_path(factory_path).exists()
+        # The rig was recalibrated at the factory: a new file with a new timestamp.
+        recalibrated = _true_calibration()
+        recalibrated.timestamp = "factory-again"
+        _save(recalibrated, factory_path, WORLD_ANCHOR_BOARD, STORED_RMS_PX)
+
+        second_run = _Rig(monkeypatch, factory_path, squat_views)
+        second_run.session.establish()
+
+        assert second_run.provider.calibration.world_anchor == WORLD_ANCHOR_BOARD
+        assert second_run.session.needs_world_anchor
+
+    def test_drift_refine_of_a_refined_file_keeps_the_original_source(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), factory_path, WORLD_ANCHOR_BOARD, STORED_RMS_PX)
+        factory_timestamp = json.loads(factory_path.read_text())["timestamp"]
+        first_run = _Rig(monkeypatch, factory_path, squat_views)
+        first_run.session.establish()
+        first_run.run_frames(len(squat_views))
+        first_run.session.anchor_world_on_lifter()
+        drifted = _perturbed(_true_calibration(), DRIFT_ROTATION_DEG, DRIFT_SHIFT_M)
+        drifted_views, _ = _observe(_lifter_sequence(LIFTER_RATIOS), drifted, noise_px=DETECTION_NOISE_PX)
+        # Cameras moved after the re-anchor: the next session drifts and refines the refined file.
+        fake_calibrator.outcome = _solved(drifted)
+        second_run = _Rig(monkeypatch, factory_path, drifted_views)
+        second_run.session.establish()
+        second_run.run_frames(len(drifted_views))
+
+        _run_drift_refine(second_run)
+
+        assert second_run.provider.calibration is fake_calibrator.outcome.calibration
+        assert json.loads(refined_calibration_path(factory_path).read_text())["source_timestamp"] == factory_timestamp
+
+    def test_refined_file_without_a_factory_file_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), refined_calibration_path(factory_path), WORLD_ANCHOR_PERSON, STORED_RMS_PX)
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+
+        rig.session.establish()
+
+        assert len(fake_calibrator.instances) == 1
+
+
+class TestNaNBaseline:
+    def test_nan_stored_rms_is_measured_at_the_first_rest_not_refined_forever(
+        self, monkeypatch: pytest.MonkeyPatch, factory_path: Path, fake_calibrator: type, squat_views: list
+    ) -> None:
+        _save(_true_calibration(), factory_path, WORLD_ANCHOR_PERSON, float("nan"))
+        rig = _Rig(monkeypatch, factory_path, squat_views)
+        rig.session.establish()
+        rig.run_frames(len(squat_views))
+
+        rig.session.on_rest_start()
         rig.session.on_rest_start()
 
         assert not rig.session.is_refining

@@ -56,8 +56,9 @@ from biomechanics.triangulation.person_calibration import (
     PersonCalibrator,
     reprojection_health_px,
 )
+from biomechanics.triangulation.triangulator import DLTTriangulator
 from biomechanics.utils.types import CocoKeypoints as CK
-from biomechanics.utils.types import PipelineFrame, Skeleton2D
+from biomechanics.utils.types import MultiViewPose, PipelineFrame, Skeleton2D
 from biomechanics.viz import draw_skeleton, draw_fps, FPSCounter
 from biomechanics.viz.live_stream import get_display_sink
 from biomechanics.viz.demo_ws_bridge import (
@@ -104,6 +105,17 @@ CALIBRATION_SOLVING_HEADLINE = "CALIBRATING CAMERAS - SOLVING, ONE MOMENT"
 WORLD_ANCHOR_HEADLINE = "ALIGNING CAMERAS TO YOU - ONE MOMENT"
 TPOSE_FALLBACK_HEADLINE = "HOLD A T-POSE FACING THE FRONT CAMERA"
 TPOSE_COUNTDOWN_S = 5.0
+TPOSE_MAX_ATTEMPTS = 3
+
+# A refine may not change the metric scale: the session's body measurements are lengths in
+# the installed calibration's scale. Reprojection health cannot see a scale change (finding:
+# a camera moved along the cam0-cam1 baseline reads as -2 % / +4 %), leg lengths can; a
+# noise-only refine reads within 0.6 %.
+MAX_REFINE_SCALE_CHANGE_RATIO = 0.01
+LEG_SEGMENTS = (
+    (CK.LEFT_HIP, CK.LEFT_KNEE), (CK.RIGHT_HIP, CK.RIGHT_KNEE),
+    (CK.LEFT_KNEE, CK.LEFT_ANKLE), (CK.RIGHT_KNEE, CK.RIGHT_ANKLE),
+)
 
 # Squat-like excursion from the 2D knee-flexion proxy: down for a few frames, then back up.
 SQUAT_DOWN_KNEE_FLEXION_2D_DEG = 60.0
@@ -346,14 +358,55 @@ def refined_calibration_path(factory_path: Path) -> Path:
     return factory_path.with_name(f"{factory_path.stem}{REFINED_CALIBRATION_SUFFIX}{factory_path.suffix}")
 
 
+def _file_timestamps(path: Path) -> tuple[str, str]:
+    with open(path) as file:
+        data = json.load(file)
+    return data.get("timestamp", ""), data.get("source_timestamp", "")
+
+
 def select_calibration_file(factory_path: Path) -> Path | None:
-    """Load order: the refined calibration when newer than the factory / previous file, then that file, else None."""
+    """
+    Load order: the refined calibration when it descends from the factory / previous file
+    (its source_timestamp is that file's timestamp), else that file, else None. A refined
+    file left over from an earlier factory calibration is ignored.
+    """
+    if not factory_path.exists():
+        return None
     refined_path = refined_calibration_path(factory_path)
-    if refined_path.exists() and (
-        not factory_path.exists() or refined_path.stat().st_mtime > factory_path.stat().st_mtime
-    ):
-        return refined_path
-    return factory_path if factory_path.exists() else None
+    if refined_path.exists():
+        factory_timestamp, _ = _file_timestamps(factory_path)
+        _, source_timestamp = _file_timestamps(refined_path)
+        if factory_timestamp and source_timestamp == factory_timestamp:
+            return refined_path
+    return factory_path
+
+
+def leg_length_ratio(
+    calibration: CalibrationResult, views: list[dict[str, Skeleton2D]], athlete_params: dict
+) -> float:
+    """
+    Median femur + tibia length triangulated with `calibration` over the frames, divided by
+    the session's known femur + tibia (athlete_params femur_avg_m + tibia_avg_m). 1.0 means
+    the calibration reproduces the scale the body was measured in. NaN without leg data.
+    """
+    triangulator = DLTTriangulator(calibration)
+    femur_lengths_m: list[float] = []
+    tibia_lengths_m: list[float] = []
+    for frame_idx, frame_views in enumerate(views):
+        skeleton = triangulator.triangulate(MultiViewPose(views=frame_views, timestamp=float(frame_idx)))
+        if skeleton is None:
+            continue
+        points = skeleton.to_numpy()
+        confidences = np.array([keypoint.confidence for keypoint in skeleton.keypoints])
+        for proximal, distal in LEG_SEGMENTS:
+            if confidences[proximal] <= 0.0 or confidences[distal] <= 0.0:
+                continue
+            length_m = float(np.linalg.norm(points[proximal] - points[distal]))
+            (femur_lengths_m if proximal in (CK.LEFT_HIP, CK.RIGHT_HIP) else tibia_lengths_m).append(length_m)
+    if not femur_lengths_m or not tibia_lengths_m:
+        return math.nan
+    measured_leg_m = float(np.median(femur_lengths_m) + np.median(tibia_lengths_m))
+    return measured_leg_m / (athlete_params["femur_avg_m"] + athlete_params["tibia_avg_m"])
 
 
 def knee_flexion_2d_deg(views: dict[str, Skeleton2D]) -> float:
@@ -457,7 +510,10 @@ class CameraCalibrationSession:
         # Drift baseline: the RMS stored with the calibration; 0 = measure it at the first set boundary.
         self._baseline_rms_px = 0.0
         self._world_anchor_pending = False
-        # Background refine between sets: the solve, the health that triggered it and its views.
+        # `timestamp` of the factory / first calibration every refined file is linked back to.
+        self._source_timestamp = ""
+        # Background refine between sets: the solve, the health that triggered it, and the
+        # held-out frames (never solved on) that judge it.
         self._refine: CalibrationSolve | None = None
         self._refine_keeps_world_frame = True
         self._refine_health_before_px = math.nan
@@ -474,13 +530,26 @@ class CameraCalibrationSession:
         return self._refine is not None
 
     def establish(self) -> None:
-        """Refined file (if newer) -> factory / previous file -> bootstrap from the lifter -> T-pose."""
+        """
+        Refined file (if derived from it) -> factory / previous file -> bootstrap from the
+        lifter -> T-pose. A file for other cameras or another capture resolution is ignored.
+        """
         selected_path = select_calibration_file(self._factory_path)
         if selected_path is None:
             self._bootstrap()
             return
-        self._provider.load_calibration(str(selected_path))
-        self._adopt(self._provider.calibration)
+        calibration = TPoseCalibrator.load_calibration(str(selected_path))
+        mismatches = self._provider.calibration_mismatches(calibration)
+        if mismatches:
+            print(
+                f"[MULTI-CAM] WARNING: rig calibration {selected_path} does not describe this rig "
+                f"({'; '.join(mismatches)}) — recalibrating"
+            )
+            self._bootstrap()
+            return
+        self._provider.install_calibration(calibration)
+        self._adopt(calibration)
+        self._source_timestamp = calibration.source_timestamp or calibration.timestamp
         print(
             f"[MULTI-CAM] Loaded rig calibration {selected_path} "
             f"(delete rig_calibration_cams_* in {selected_path.parent} to recalibrate after moving cameras)"
@@ -494,7 +563,7 @@ class CameraCalibrationSession:
         re-anchoring the world frame on the lifter. Frames keep flowing while it solves; the
         factory file is never overwritten. Call between sets only.
         """
-        refine = self._start_refine(keep_world_frame=False)
+        refine = self._start_refine(self._provider.calibration_views(), keep_world_frame=False)
         was_presence_only = self._pipeline.presence_only
         self._pipeline.presence_only = True
         self._show_until_done(refine, WORLD_ANCHOR_HEADLINE)
@@ -510,15 +579,17 @@ class CameraCalibrationSession:
             if self._refine.done:
                 self._finish_refine()
             return
+        views = self._provider.calibration_views()
         if self._world_anchor_pending:
-            self._start_refine(keep_world_frame=False)
+            self._start_refine(views, keep_world_frame=False)
             return
 
-        check_views = self._provider.recent_views(self._settings.drift_check_frames)
+        check_frames = self._settings.drift_check_frames
+        check_views = views[-check_frames:]
         health_px = reprojection_health_px(self._provider.calibration, check_views)
         if not math.isfinite(health_px):
             return
-        if self._baseline_rms_px <= 0.0:
+        if not self._baseline_rms_px > 0.0:
             self._baseline_rms_px = health_px
             print(f"[MULTI-CAM] Reprojection baseline measured: {health_px:.2f} px")
             return
@@ -526,13 +597,21 @@ class CameraCalibrationSession:
         if health_px <= limit_px:
             print(f"[MULTI-CAM] Reprojection health {health_px:.2f} px (limit {limit_px:.2f} px) — calibration holds")
             return
+        # The refine solves on the frames before the check window, so the health it is judged
+        # on is out of sample: a solve that only chases this set's noise cannot pass.
+        solve_views = views[:-check_frames]
+        if not solve_views:
+            print(
+                f"[MULTI-CAM] Reprojection health {health_px:.2f} px exceeds {limit_px:.2f} px but only "
+                f"{len(views)} frames are buffered — refine skipped until a longer set"
+            )
+            return
         print(
             f"[MULTI-CAM] Reprojection health {health_px:.2f} px exceeds {limit_px:.2f} px "
             f"({self._settings.drift_ratio:.1f} x {self._baseline_rms_px:.2f}) — refining cameras during rest"
         )
         self._refine_health_before_px = health_px
-        self._refine_check_views = check_views
-        self._start_refine(keep_world_frame=True)
+        self._start_refine(solve_views, keep_world_frame=True)
 
     def poll(self, can_install: bool) -> None:
         """Every frame. can_install is True only between sets (resting before the gate re-arms): never mid-set."""
@@ -540,7 +619,8 @@ class CameraCalibrationSession:
             self._finish_refine()
 
     def _adopt(self, calibration: CalibrationResult) -> None:
-        self._baseline_rms_px = calibration.rms_reprojection_px
+        stored_rms_px = calibration.rms_reprojection_px
+        self._baseline_rms_px = stored_rms_px if math.isfinite(stored_rms_px) else 0.0
         self._world_anchor_pending = calibration.world_anchor == WORLD_ANCHOR_BOARD
 
     def _install(self, calibration: CalibrationResult, world_frame_changed: bool) -> None:
@@ -603,29 +683,55 @@ class CameraCalibrationSession:
                 return
             failure = f"person-based calibration failed ({solve.error})"
 
+        if self._pipeline.last_frame is None:
+            raise RuntimeError(
+                f"[MULTI-CAM] {failure}, and the cameras delivered no frame — check the camera connections"
+            )
         self._tpose_fallback(failure, height_m)
         self._pipeline.presence_only = False
 
     def _tpose_fallback(self, reason: str, height_m: float) -> None:
+        """
+        The T-pose calibration, retried a bounded number of times when the subject is not
+        holding the pose (ValueError). Stalled cameras or no solvable camera (RuntimeError)
+        fail the session at once.
+        """
         print(
             f"[MULTI-CAM] {reason} — falling back to the T-pose calibration (height={height_m} m): "
             f"face the front camera with both arms straight out at shoulder height"
         )
-        countdown_end_s = self._clock_fn() + TPOSE_COUNTDOWN_S
-        while self._clock_fn() < countdown_end_s:
-            remaining_s = math.ceil(countdown_end_s - self._clock_fn())
-            self._show_status_fn(self._pipeline.process_frame(), TPOSE_FALLBACK_HEADLINE, f"T-POSE IN {remaining_s}")
         self._factory_path.parent.mkdir(parents=True, exist_ok=True)
-        calibration = self._provider.calibrate(height_m=height_m, save_path=str(self._factory_path))
-        self._pipeline.on_calibration_changed(world_frame_changed=True)
-        self._adopt(calibration)
-        print(f"[MULTI-CAM] T-pose calibration complete — saved to {self._factory_path}")
+        for attempt in range(1, TPOSE_MAX_ATTEMPTS + 1):
+            countdown_end_s = self._clock_fn() + TPOSE_COUNTDOWN_S
+            while self._clock_fn() < countdown_end_s:
+                remaining_s = math.ceil(countdown_end_s - self._clock_fn())
+                self._show_status_fn(
+                    self._pipeline.process_frame(), TPOSE_FALLBACK_HEADLINE, f"T-POSE IN {remaining_s}",
+                )
+            try:
+                calibration = self._provider.calibrate(height_m=height_m, save_path=str(self._factory_path))
+            except ValueError as error:
+                print(f"[MULTI-CAM] T-pose attempt {attempt}/{TPOSE_MAX_ATTEMPTS}: {error}")
+                continue
+            self._pipeline.on_calibration_changed(world_frame_changed=True)
+            self._adopt(calibration)
+            self._source_timestamp = calibration.timestamp
+            print(f"[MULTI-CAM] T-pose calibration complete — saved to {self._factory_path}")
+            return
+        raise RuntimeError(
+            f"[MULTI-CAM] T-pose calibration failed {TPOSE_MAX_ATTEMPTS} times — no camera calibration; "
+            f"restart with the lifter fully visible to every camera"
+        )
 
     def _save_and_install(
         self, result: PersonCalibrationResult, save_path: Path, world_frame_changed: bool
     ) -> None:
         calibration = result.calibration
         calibration.rms_reprojection_px = result.rms_reprojection_px
+        if save_path == self._factory_path:
+            self._source_timestamp = calibration.timestamp
+        else:
+            calibration.source_timestamp = self._source_timestamp
         save_path.parent.mkdir(parents=True, exist_ok=True)
         TPoseCalibrator.save_calibration(calibration, str(save_path))
         self._install(calibration, world_frame_changed)
@@ -635,9 +741,9 @@ class CameraCalibrationSession:
             f"in {result.solve_time_s:.1f} s — saved to {save_path}"
         )
 
-    def _start_refine(self, keep_world_frame: bool) -> CalibrationSolve:
+    def _start_refine(self, views: list[dict[str, Skeleton2D]], keep_world_frame: bool) -> CalibrationSolve:
         calibration = self._provider.calibration
-        views = self._provider.calibration_views()
+        self._refine_check_views = self._provider.recent_views(self._settings.drift_check_frames)
         # A refine keeps the intrinsics and the metric scale of the calibration it starts from
         # (no bar or height prior): segment lengths measured earlier in the session stay valid.
         calibrator = PersonCalibrator(
@@ -657,23 +763,48 @@ class CameraCalibrationSession:
         refine = self._refine
         keeps_world_frame = self._refine_keeps_world_frame
         self._refine = None
+        check_views = self._refine_check_views
+        self._refine_check_views = []
         if refine.result is None:
             print(f"[MULTI-CAM] Camera refine failed ({refine.error}) — keeping the current calibration")
             return
+        refined = refine.result.calibration
         if keeps_world_frame:
-            health_after_px = reprojection_health_px(refine.result.calibration, self._refine_check_views)
+            health_after_px = reprojection_health_px(refined, check_views)
             health_before_px = self._refine_health_before_px
-            self._refine_check_views = []
-            if not health_after_px < health_before_px:
-                # The rig did not move: this is simply how well these cameras fit these frames.
+            limit_px = self._settings.drift_ratio * self._baseline_rms_px
+            healthy = health_after_px <= limit_px or health_after_px < health_before_px / self._settings.drift_ratio
+            if not healthy:
+                # Judged on frames it never solved on, the refine explains nothing the current
+                # rig does not: this is how well these cameras fit these frames. New baseline.
                 self._baseline_rms_px = health_before_px
                 print(
-                    f"[MULTI-CAM] Drift refine did not help ({health_before_px:.2f} -> {health_after_px:.2f} px) "
-                    f"— keeping the current calibration"
+                    f"[MULTI-CAM] Drift refine did not help on held-out frames ({health_before_px:.2f} -> "
+                    f"{health_after_px:.2f} px, limit {limit_px:.2f}) — keeping the current calibration"
                 )
                 return
-            print(f"[MULTI-CAM] Drift refine: reprojection health {health_before_px:.2f} -> {health_after_px:.2f} px")
+            print(f"[MULTI-CAM] Drift refine: held-out reprojection health {health_before_px:.2f} -> {health_after_px:.2f} px")
+        if not self._scale_is_kept(refined, check_views):
+            return
         self._save_and_install(refine.result, self._refined_path, world_frame_changed=not keeps_world_frame)
+
+    def _scale_is_kept(self, refined: CalibrationResult, check_views: list[dict[str, Skeleton2D]]) -> bool:
+        athlete_params = self._pipeline.body_calibration.to_athlete_params()
+        if athlete_params is None:
+            print("[MULTI-CAM] Body not measured yet — refine scale unchecked")
+            return True
+        ratio = leg_length_ratio(refined, check_views, athlete_params)
+        if not math.isfinite(ratio):
+            print("[MULTI-CAM] No leg seen by two cameras in the check frames — refine scale unchecked")
+            return True
+        if abs(ratio - 1.0) <= MAX_REFINE_SCALE_CHANGE_RATIO:
+            return True
+        print(
+            f"[MULTI-CAM] Refine rejected: it changes the leg length by {100.0 * (ratio - 1.0):+.2f} % "
+            f"(limit {100.0 * MAX_REFINE_SCALE_CHANGE_RATIO:.0f} %) — a camera moved along the baseline; "
+            f"recalibrate by deleting {self._factory_path}"
+        )
+        return False
 
 
 def _serialize_diagnosis(diagnosis_result, score_summary) -> tuple[dict, dict]:

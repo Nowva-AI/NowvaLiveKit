@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+import biomechanics.triangulation.calibration as calibration_module  # noqa: E402
 from biomechanics.pose.base import PoseEstimator  # noqa: E402
 from biomechanics.triangulation.calibration import (  # noqa: E402
     MIN_MEAN_KEYPOINT_SCORE,
@@ -63,6 +64,7 @@ CAMERA_CENTER_TOL_M = 0.01
 ROTATION_TOL = 1e-3
 PIXEL_TOL = 1e-6
 REPROJECTION_TOL_PX = 0.1
+STORED_RMS_PX = 1.25
 
 
 def _look_at_camera(yaw_deg: float) -> tuple[np.ndarray, np.ndarray]:
@@ -419,6 +421,48 @@ class TestCalibrationFileSchema:
         result, _ = _calibrate(_scripted_views(tpose_model, {"0": 0.0}))
 
         assert result.world_anchor == WORLD_ANCHOR_PERSON
+
+    def test_rms_and_source_timestamp_survive_save_and_load(self, tmp_path: Path) -> None:
+        result = CalibrationResult(
+            cameras={"0": _lens_camera()}, timestamp="refined-at", rms_reprojection_px=STORED_RMS_PX,
+            source_timestamp="factory-at",
+        )
+        path = str(tmp_path / "rig_refined.json")
+
+        TPoseCalibrator.save_calibration(result, path)
+        loaded = TPoseCalibrator.load_calibration(path)
+
+        assert loaded.rms_reprojection_px == pytest.approx(STORED_RMS_PX)
+        assert loaded.source_timestamp == "factory-at"
+        assert loaded.timestamp == "refined-at"
+
+    def test_file_without_rms_or_source_loads_with_defaults(self, tmp_path: Path) -> None:
+        path = tmp_path / "old_rig.json"
+        TPoseCalibrator.save_calibration(CalibrationResult(cameras={"0": _lens_camera()}), str(path))
+        data = json.loads(path.read_text())
+        del data["rms_reprojection_px"]
+        del data["source_timestamp"]
+        path.write_text(json.dumps(data))
+
+        loaded = TPoseCalibrator.load_calibration(str(path))
+
+        assert loaded.rms_reprojection_px == 0.0
+        assert loaded.source_timestamp == ""
+
+    def test_save_replaces_the_file_atomically(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        path = tmp_path / "rig.json"
+        TPoseCalibrator.save_calibration(CalibrationResult(cameras={"0": _lens_camera()}, timestamp="first"), str(path))
+        original = path.read_bytes()
+
+        def fail_dump(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(calibration_module.json, "dump", fail_dump)
+        with pytest.raises(OSError):
+            TPoseCalibrator.save_calibration(CalibrationResult(cameras={"0": _lens_camera()}, timestamp="second"), str(path))
+
+        assert path.read_bytes() == original
+        assert sorted(child.name for child in tmp_path.iterdir()) == ["rig.json"]
 
 
 class TestIntrinsicsStorage:

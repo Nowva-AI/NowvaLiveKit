@@ -11,6 +11,7 @@ that person-based camera calibration and the drift monitor consume.
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from pathlib import Path
 from typing import Optional, Protocol
@@ -38,6 +39,8 @@ DEFAULT_BAR_DETECTION_STRIDE = 3
 # Calibration needs the same instant seen by two cameras, whatever triangulation's min_views is.
 MIN_CALIBRATION_VIEWS = 2
 INTRINSICS_COMMAND = "venv/bin/python scripts/tools/calibrate_cameras.py intrinsics"
+# A T-pose capture needs ~1 s of frames; far longer means the cameras stopped delivering.
+TPOSE_CAPTURE_TIMEOUT_S = 10.0
 
 
 class BarEndDetector(Protocol):
@@ -168,6 +171,26 @@ class MultiCameraPoseProvider:
         self.reset_temporal_state()
         logger.info("Installed calibration with %d cameras", len(calibration.cameras))
 
+    def calibration_mismatches(self, calibration: CalibrationResult) -> list[str]:
+        """
+        Why a saved calibration does not describe this rig: a different camera id set, or a
+        camera calibrated at a resolution other than the one it opened at. Empty when it fits.
+        """
+        mismatches: list[str] = []
+        rig_ids = {str(dev_id) for dev_id in self._device_ids}
+        file_ids = set(calibration.cameras)
+        if file_ids != rig_ids:
+            mismatches.append(f"cameras {sorted(file_ids)} in the file, {sorted(rig_ids)} on this rig")
+        for cam_id in sorted(file_ids & rig_ids):
+            actual = self._camera_resolution(cam_id)
+            stored = tuple(calibration.cameras[cam_id].resolution)
+            if stored != actual:
+                mismatches.append(
+                    f"camera {cam_id} resolution {stored[0]}x{stored[1]} in the file, "
+                    f"opened at {actual[0]}x{actual[1]}"
+                )
+        return mismatches
+
     def _build_triangulator(self, calibration: CalibrationResult) -> DLTTriangulator:
         return DLTTriangulator(
             calibration=calibration,
@@ -223,10 +246,13 @@ class MultiCameraPoseProvider:
         height_m: float,
         n_frames: int = 30,
         save_path: str | None = None,
+        timeout_s: float = TPOSE_CAPTURE_TIMEOUT_S,
     ) -> CalibrationResult:
         """
         Run T-pose calibration: capture frames from all cameras, detect
-        keypoints, solve for camera extrinsics.
+        keypoints, solve for camera extrinsics. Raises RuntimeError when the
+        cameras deliver no synced set for timeout_s (stalled), or ValueError when
+        the subject is not holding a T-pose.
         """
         if not self._initialized:
             self.initialize()
@@ -245,9 +271,15 @@ class MultiCameraPoseProvider:
         }
 
         collected = 0
+        deadline_s = time.monotonic() + timeout_s
         while collected < n_frames:
             synced = self._capture.get_synced_frames()
             if synced is None:
+                if time.monotonic() >= deadline_s:
+                    raise RuntimeError(
+                        f"T-pose capture: {collected}/{n_frames} synced frames in {timeout_s:.0f} s "
+                        f"— cameras stalled?"
+                    )
                 continue
             for cam_id, frame in synced.frames.items():
                 frames_per_camera[cam_id].append(frame)

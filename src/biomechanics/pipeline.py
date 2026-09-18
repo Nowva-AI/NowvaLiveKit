@@ -130,7 +130,9 @@ class BiomechanicsPipeline:
                 bar_detection_stride=camera_calibration.bar_detection_stride,
                 bar_detector=bar_detector,
             )
-            if tri.calibration_file:
+            # The session flow loads calibrations (and writes this path when it
+            # does not exist yet); loading here serves standalone tools only.
+            if tri.calibration_file and Path(tri.calibration_file).exists():
                 self._multi_camera_provider.load_calibration(tri.calibration_file)
         elif not defer_capture:
             self._open_capture()
@@ -419,17 +421,19 @@ class BiomechanicsPipeline:
 
     def on_calibration_changed(self, world_frame_changed: bool) -> None:
         """
-        A new camera calibration was installed in the provider. Temporal state always
-        restarts; when the world frame itself moved (first calibration, board -> person
-        re-anchor) the foot contact anchors and floor go too. Body measurements are
-        lengths, so they survive either way.
+        A new camera calibration was installed in the provider. Temporal state, foot
+        contact anchors and the floor restart: even a refine that keeps the world frame
+        shifts it by ~1 cm, which the planted-foot model would carry as a heel-rise bias.
+        Body measurements are lengths, so they survive. world_frame_changed says whether
+        the origin, heading or vertical moved (first calibration, board -> person re-anchor).
         """
-        if world_frame_changed:
-            self._preik.reset_world_state()
-        else:
-            self._preik.reset()
+        self._preik.reset_world_state()
         if self._multi_camera_provider is not None:
             self._multi_camera_provider.reset_temporal_state()
+        logger.info(
+            "[PIPELINE] Camera calibration installed (%s): temporal and foot contact state reset",
+            "world frame moved" if world_frame_changed else "world frame kept",
+        )
 
     def apply_athlete_params(self, params: dict) -> None:
         """Adopt a returning user's stored body measurements and scale thresholds once."""

@@ -745,33 +745,22 @@ def _build_recording_provider_pipeline(monkeypatch, config: BiomechanicsConfig) 
 
 
 class TestCameraCalibrationChange:
-    def test_same_world_frame_keeps_foot_contact_and_body_measurements(self, monkeypatch):
+    @pytest.mark.parametrize("world_frame_changed", [False, True])
+    def test_every_install_resets_temporal_and_foot_state_but_keeps_body_measurements(
+        self, monkeypatch, world_frame_changed
+    ):
         pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
         _run_frames(pipe, provider, clock, _reps(3))
         params = pipe.body_calibration.to_athlete_params()
         resets_before = provider.temporal_resets
 
-        pipe.on_calibration_changed(world_frame_changed=False)
+        pipe.on_calibration_changed(world_frame_changed=world_frame_changed)
         result = _step(pipe, provider, clock, world_squat_points(MIN_DEPTH_RATIO))
 
         assert provider.temporal_resets == resets_before + 1
         # Kalman history is gone: the lagged analysis frame is the current one.
         assert result.skeleton_3d.frame_index == result.frame_index
-        assert result.foot_state.valid
-        assert pipe.body_calibration.to_athlete_params() == params
-
-    def test_world_frame_change_also_resets_foot_contact(self, monkeypatch):
-        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
-        _run_frames(pipe, provider, clock, _reps(3))
-        params = pipe.body_calibration.to_athlete_params()
-        resets_before = provider.temporal_resets
-
-        pipe.on_calibration_changed(world_frame_changed=True)
-        result = _step(pipe, provider, clock, world_squat_points(MIN_DEPTH_RATIO))
-
-        assert provider.temporal_resets == resets_before + 1
-        assert result.skeleton_3d.frame_index == result.frame_index
-        # Anchors and floor lived in the old world frame: the model warms up again.
+        # Even a kept world frame shifts ~1 cm: anchors and floor restart rather than carry a bias.
         assert not result.foot_state.valid
         assert params is not None
         assert pipe.body_calibration.to_athlete_params() == params
@@ -816,6 +805,14 @@ class TestCameraCalibrationWiring:
         assert received["bar_detector"] is None
         assert pipe._barbell_detector is None
         assert any("use_bar_scale" in record.getMessage() for record in caplog.records)
+
+    def test_configured_calibration_file_that_does_not_exist_yet_is_left_to_the_session(self, monkeypatch, tmp_path):
+        config = BiomechanicsConfig()
+        config.triangulation.calibration_file = str(tmp_path / "not_written_yet.json")
+
+        _, received = _build_recording_provider_pipeline(monkeypatch, config)
+
+        assert received["device_ids"] == config.triangulation.device_ids
 
     def test_barbell_tracking_shares_its_detector_with_the_provider(self, monkeypatch):
         config = BiomechanicsConfig()

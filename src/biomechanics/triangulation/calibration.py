@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -96,6 +97,8 @@ class CalibrationResult:
     world_anchor: str = WORLD_ANCHOR_PERSON
     # Robust RMS reprojection residual at solve time, the drift monitor's baseline; 0 = not measured.
     rms_reprojection_px: float = 0.0
+    # Field refinements: `timestamp` of the factory / first calibration they descend from ("" otherwise).
+    source_timestamp: str = ""
 
 
 def undistort_keypoints(points_px: np.ndarray, calibration: CameraCalibration) -> np.ndarray:
@@ -482,6 +485,7 @@ class TPoseCalibrator:
             "timestamp": result.timestamp,
             "world_anchor": result.world_anchor,
             "rms_reprojection_px": result.rms_reprojection_px,
+            "source_timestamp": result.source_timestamp,
             "tpose_model_3d": result.tpose_model_3d.tolist() if result.tpose_model_3d is not None else None,
             "cameras": {},
         }
@@ -498,8 +502,16 @@ class TPoseCalibrator:
                 "distortion_coeffs": np.asarray(cam.distortion_coeffs).ravel().tolist(),
             }
 
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        # Written next to the target and renamed into place, so a crash mid-write never
+        # leaves a truncated calibration where the pipeline expects a valid one.
+        temporary_path = f"{path}.tmp"
+        try:
+            with open(temporary_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
         logger.info("Calibration saved to %s", path)
 
@@ -515,6 +527,7 @@ class TPoseCalibrator:
             tpose_model_3d=np.array(data["tpose_model_3d"]) if data.get("tpose_model_3d") else None,
             world_anchor=data.get("world_anchor", WORLD_ANCHOR_PERSON),
             rms_reprojection_px=data.get("rms_reprojection_px", 0.0),
+            source_timestamp=data.get("source_timestamp", ""),
         )
 
         for cam_id, cam_data in data["cameras"].items():

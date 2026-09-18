@@ -40,6 +40,7 @@ CALIBRATED_FOCAL_PX = 1111.0
 CALIBRATED_DISTORTION = np.array([-0.1, 0.02, 0.0, 0.0, 0.0])
 INTRINSICS_TOLERANCE = 1e-9
 FAKE_READ_PERIOD_S = 0.001
+TPOSE_TIMEOUT_S = 0.05
 
 
 class _ManualClock:
@@ -258,6 +259,18 @@ class TestCalibrationCapture:
         assert len(primary_tags) == CALIBRATION_FRAMES
         assert len(set(primary_tags)) == CALIBRATION_FRAMES
         assert provider.is_calibrated
+
+
+    def test_calibrate_gives_up_when_the_cameras_stall(self, uncalibrated_provider: MultiCameraPoseProvider) -> None:
+        _push_set(uncalibrated_provider._capture, 0, camera_indices=(0, 1))
+        uncalibrated_provider.get_pose()  # the only set is consumed; nothing new ever arrives
+
+        with pytest.raises(RuntimeError, match=r"T-pose capture: 0/4 synced frames .* cameras stalled"):
+            uncalibrated_provider.calibrate(
+                height_m=CALIBRATION_HEIGHT_M, n_frames=CALIBRATION_FRAMES, timeout_s=TPOSE_TIMEOUT_S,
+            )
+
+        assert not uncalibrated_provider.is_calibrated
 
 
 class TestTemporalStateReset:

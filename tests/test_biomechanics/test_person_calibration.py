@@ -26,9 +26,14 @@ from biomechanics.triangulation.person_calibration import (  # noqa: E402
     MAX_FRAMES,
     PersonCalibrationResult,
     PersonCalibrator,
+    BA_SEGMENT_NAMES,
+    BA_SEGMENTS,
+    SCALE_TARGET_SEGMENTS,
     _camera_landmarks,
     _consensus_rigid_fit,
     _label_bar_ends_by_shoulders,
+    _stack_skeletons,
+    _triangulated_segment_lengths,
     reprojection_health_px,
     world_frame_from_standing,
 )
@@ -72,6 +77,10 @@ KEPT_ROTATION_TOL_DEG = 0.05
 KEPT_JOINT_TOL_M = 0.003
 NOISY_KEPT_CENTRE_TOL_M = 0.01
 NOISY_KEPT_ROTATION_TOL_DEG = 0.3
+SCALE_KEPT_TOL_RATIO = 0.005
+BASELINE_SHIFT_CASES = {  # camera, shift along the cam0-cam1 baseline (m), per the reviewer's repro
+    "cam1_away": ("1", 0.05), "cam1_toward": ("1", -0.10), "cam0_reference": ("0", -0.05), "cam2_off_baseline": ("2", 0.05),
+}
 REANCHOR_MIN_MOVE_M = 0.5  # the other world is 1.7 m and ~29 deg away, so every camera pose changes by more
 TRIANGULATION_FRAME_STEP = 5
 MIN_TRIANGULATED_KEYPOINTS = 17
@@ -306,6 +315,47 @@ def _in_other_world(calibration: CalibrationResult, world_anchor: str) -> Calibr
     return result
 
 
+def _centre(camera: CameraCalibration) -> np.ndarray:
+    return -camera.rotation_matrix.T @ camera.translation_vector.ravel()
+
+
+def _moved_along_baseline(calibration: CalibrationResult, cam_id: str, shift_m: float) -> CalibrationResult:
+    # One camera turned 2 deg about the vertical and its centre moved along the cam0-cam1 baseline
+    # (camera "2", which is off that baseline, moves along world X instead)
+    baseline = _centre(calibration.cameras["1"]) - _centre(calibration.cameras["0"])
+    direction = baseline / np.linalg.norm(baseline) if cam_id in ("0", "1") else np.array([1.0, 0.0, 0.0])
+    result = CalibrationResult(
+        athlete_height_m=calibration.athlete_height_m, timestamp="moved", world_anchor=calibration.world_anchor
+    )
+    for other_id, camera in calibration.cameras.items():
+        if other_id != cam_id:
+            result.cameras[other_id] = camera
+            continue
+        delta, _ = cv2.Rodrigues(np.array([0.0, 1.0, 0.0]) * np.radians(DRIFT_ROTATION_DEG))
+        rotation = delta @ camera.rotation_matrix
+        translation = -rotation @ (_centre(camera) + shift_m * direction)
+        result.cameras[other_id] = CameraCalibration(
+            camera_id=other_id,
+            projection_matrix=camera.intrinsic_matrix @ np.hstack([rotation, translation[:, None]]),
+            intrinsic_matrix=camera.intrinsic_matrix,
+            rotation_matrix=rotation,
+            translation_vector=translation.reshape(3, 1),
+            reprojection_error=0.0,
+            resolution=camera.resolution,
+        )
+    return result
+
+
+def _triangulated_femur_m(calibration: CalibrationResult, views: list[dict[str, Skeleton2D]]) -> float:
+    triangulator = DLTTriangulator(calibration)
+    lengths_m = []
+    for frame_idx in range(0, len(views), TRIANGULATION_FRAME_STEP):
+        skeleton = triangulator.triangulate(MultiViewPose(views=views[frame_idx], timestamp=float(frame_idx)))
+        points = skeleton.to_numpy()
+        lengths_m.append(np.linalg.norm(points[CK.LEFT_HIP] - points[CK.LEFT_KNEE]))
+    return float(np.median(lengths_m))
+
+
 class _ReplayEstimator(PoseEstimator):
     """Returns the precomputed T-pose skeleton of whichever camera is asked for."""
 
@@ -464,6 +514,77 @@ class TestInitialisation:
             PersonCalibrator(_intrinsics(), RESOLUTION).calibrate(views, initial=partial)
 
 
+class TestInitialScale:
+    """The session's drift refine: no bar, no height, stale calibration on disk, one camera physically moved."""
+
+    @pytest.mark.parametrize("case", list(BASELINE_SHIFT_CASES), ids=list(BASELINE_SHIFT_CASES))
+    def test_moved_camera_does_not_rescale_the_body(self, case: str, lifter_sequence: np.ndarray, true_calibration: CalibrationResult):
+        cam_id, shift_m = BASELINE_SHIFT_CASES[case]
+        bumped_rig = _moved_along_baseline(true_calibration, cam_id, shift_m)
+        views, _ = _observe(lifter_sequence, bumped_rig)
+        stale = true_calibration
+        calibrator = PersonCalibrator(
+            {cam_id: (camera.intrinsic_matrix, camera.distortion_coeffs) for cam_id, camera in stale.cameras.items()},
+            RESOLUTION,
+        )
+        refined = calibrator.refine(stale, views, keep_world_frame=True)
+        true_femur_m = LIFTER_RATIOS["femur"] * HEIGHT_M
+        assert refined.scale_source == "initial"
+        assert _triangulated_femur_m(refined.calibration, views) == pytest.approx(true_femur_m, rel=SCALE_KEPT_TOL_RATIO)
+        assert refined.scale_change_ratio == pytest.approx(1.0, abs=1e-6)
+        assert refined.rms_reprojection_px < NOISELESS_RMS_TOL_PX
+
+    def test_stale_rig_measures_true_lengths_only_through_the_unmoved_cameras(self, lifter_sequence: np.ndarray, true_calibration: CalibrationResult):
+        # Triangulated with the stale rig, the segments are right only from the cameras that did not
+        # move; the all-view compromise is biased by the moved camera, so it must not set the scale.
+        bumped_rig = _moved_along_baseline(true_calibration, *BASELINE_SHIFT_CASES["cam1_away"])
+        views, _ = _observe(lifter_sequence, bumped_rig)
+        cam_ids = sorted(true_calibration.cameras)
+        projections = np.stack([true_calibration.cameras[cam_id].projection_matrix for cam_id in cam_ids])
+        positions, scores = _stack_skeletons(views, cam_ids)
+        segments = [BA_SEGMENTS[name] for name in SCALE_TARGET_SEGMENTS]
+        indices = [BA_SEGMENT_NAMES.index(name) for name in SCALE_TARGET_SEGMENTS]
+        true_sum_m = sum(np.linalg.norm(lifter_sequence[0, a] - lifter_sequence[0, b]) for a, b in segments)
+        unmoved = _triangulated_segment_lengths(projections, positions, scores > 0.0, np.array([True, False, True]))
+        all_views = _triangulated_segment_lengths(projections, positions, scores > 0.0, np.ones(3, dtype=bool))
+        assert unmoved[indices].sum() == pytest.approx(true_sum_m, rel=1e-6)
+        assert abs(all_views[indices].sum() / true_sum_m - 1.0) > SCALE_KEPT_TOL_RATIO
+
+    def test_ratio_reports_a_scale_change_in_bar_mode(self, noiseless_observations: tuple, true_calibration: CalibrationResult):
+        views, bar_ends = noiseless_observations
+        shrunk = CalibrationResult(athlete_height_m=HEIGHT_M, timestamp="shrunk")
+        for cam_id, camera in true_calibration.cameras.items():
+            translation = 0.98 * camera.translation_vector  # the same rig 2 % smaller
+            shrunk.cameras[cam_id] = CameraCalibration(
+                camera_id=cam_id, projection_matrix=camera.intrinsic_matrix @ np.hstack([camera.rotation_matrix, translation]),
+                intrinsic_matrix=camera.intrinsic_matrix, rotation_matrix=camera.rotation_matrix,
+                translation_vector=translation, reprojection_error=0.0, resolution=camera.resolution,
+            )
+        calibrator = PersonCalibrator(_intrinsics(), RESOLUTION, bar_length_m=BAR_LENGTH_M)
+        result = calibrator.refine(shrunk, views, bar_ends=bar_ends)
+        assert result.scale_source == "bar"
+        assert result.scale_change_ratio == pytest.approx(1.0 / 0.98, rel=1e-3)
+        assert np.isnan(calibrator.calibrate(views, bar_ends=bar_ends).scale_change_ratio)
+
+    def test_falls_back_to_the_baseline_without_leg_keypoints(self, lifter_sequence: np.ndarray, true_calibration: CalibrationResult):
+        views, _ = _observe(lifter_sequence, true_calibration)
+        legless = []
+        for frame_views in views:
+            frame = {}
+            for cam_id, skeleton in frame_views.items():
+                keypoints = skeleton.to_numpy()
+                keypoints[CK.LEFT_HIP:] = 0.0
+                frame[cam_id] = Skeleton2D.from_numpy(keypoints)
+            legless.append(frame)
+        drifted = _perturbed(true_calibration, rotation_deg=1.0, shift_m=0.0, cam_ids=("2",))
+        result = PersonCalibrator(_intrinsics(), RESOLUTION).refine(drifted, legless, keep_world_frame=True)
+        assert result.scale_source == "initial"
+        assert np.isnan(result.scale_change_ratio)
+        assert np.linalg.norm(_relative_poses(result.calibration)["1"][1]) == pytest.approx(
+            np.linalg.norm(_relative_poses(drifted)["1"][1]), rel=SCALE_TOL_RATIO
+        )
+
+
 class TestKeepWorldFrame:
     @pytest.mark.parametrize("moved_cam_id", ["1", "0"], ids=["side_camera_moved", "reference_camera_moved"])
     def test_one_moved_camera_is_recovered_in_the_original_world(
@@ -560,12 +681,20 @@ class TestKeepWorldFrame:
         frame_shift = np.array([0.5, 0.2, -1.0])
         solved_landmarks = (initial_landmarks - frame_shift) @ frame_rotation
         solved_landmarks[2] += [0.04, -0.02, 0.03]
-        rotation, shift, cameras_used = _consensus_rigid_fit(solved_landmarks, initial_landmarks)
+        rotation, shift, scale, cameras_used = _consensus_rigid_fit(solved_landmarks, initial_landmarks)
         assert cameras_used.tolist() == [True, True, False]
         assert rotation == pytest.approx(frame_rotation, abs=1e-9)
         assert shift == pytest.approx(frame_shift, abs=1e-9)
+        assert scale == 1.0
         solved_landmarks[2] -= [0.04, -0.02, 0.03]
-        assert _consensus_rigid_fit(solved_landmarks, initial_landmarks)[2].all()
+        assert _consensus_rigid_fit(solved_landmarks, initial_landmarks)[3].all()
+        # with scale: a rig solved 3 % too small (centres closer, axis tips as long as the lever arm
+        # the solve measured, as in use) is recognised as the same rig, and camera 2 still stands out
+        shrunk_landmarks = solved_landmarks - 0.03 * solved_landmarks[:, :1]
+        shrunk_landmarks[2] += [0.04, -0.02, 0.03]
+        _, _, scale, cameras_used = _consensus_rigid_fit(shrunk_landmarks, initial_landmarks, with_scale=True)
+        assert cameras_used.tolist() == [True, True, False]
+        assert scale == pytest.approx(1.0 / 0.97, rel=1e-9)
 
 
 class TestScaleSources:
@@ -591,13 +720,13 @@ class TestScaleSources:
         calibrator = PersonCalibrator(_intrinsics(), RESOLUTION, bar_length_m=BAR_LENGTH_M, height_m=HEIGHT_M)
         assert calibrator.calibrate(views, bar_ends=sparse_bar).scale_source == "height"
 
-    def test_without_bar_or_height_the_initial_scale_is_kept(self, noiseless_observations: tuple, true_calibration: CalibrationResult):
+    def test_without_bar_or_height_the_initial_metric_scale_is_kept(self, noiseless_observations: tuple, true_calibration: CalibrationResult):
         views, _ = noiseless_observations
-        drifted = _perturbed(true_calibration, rotation_deg=1.0, shift_m=0.0)
+        drifted = _perturbed(true_calibration, rotation_deg=1.0, shift_m=0.0, cam_ids=("2",))
         result = PersonCalibrator(_intrinsics(), RESOLUTION).refine(drifted, views)
         assert result.scale_source == "initial"
-        first_baseline = np.linalg.norm(_relative_poses(result.calibration)["1"][1])
-        assert first_baseline == pytest.approx(np.linalg.norm(_relative_poses(drifted)["1"][1]), rel=SCALE_TOL_RATIO)
+        assert result.scale_change_ratio == pytest.approx(1.0, abs=1e-6)
+        assert _baseline_ratio(result.calibration, true_calibration) == pytest.approx(1.0, abs=SCALE_TOL_RATIO)
         assert _rig_errors(result.calibration, true_calibration)[1] < ROTATION_TOL_DEG
 
     def test_bar_ends_are_relabelled_by_the_shoulder_line(self):

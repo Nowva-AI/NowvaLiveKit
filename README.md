@@ -323,7 +323,7 @@ Calibration has two halves. **Intrinsics** (focal length, principal point, lens 
 |---|---|---|
 | `intrinsics_<camera_key>.json` | `calibrate_cameras.py intrinsics` | Real K + distortion for one camera at one resolution |
 | `rig_calibration_cams_<ids>.json` | first session (person calibration or T-pose), or `calibrate_cameras.py extrinsics` at the factory | The rig calibration; never overwritten by refines |
-| `rig_calibration_cams_<ids>_refined.json` | board re-anchor and drift refines | Field refinement; loaded instead of the file above when newer |
+| `rig_calibration_cams_<ids>_refined.json` | board re-anchor and drift refines | Field refinement; loaded instead of the file above when its `source_timestamp` matches that file's `timestamp` |
 
 **1. Intrinsics, once per camera (recommended):**
 
@@ -336,13 +336,13 @@ The pipeline looks intrinsics up at the resolution each camera **actually opened
 
 **2. Session flow (`CameraCalibrationSession` in `pipeline_process.py`):**
 
-1. Load order: `_refined` file if newer → factory / previous file → none. `triangulation.calibration_file`, when set, replaces the `~/.nowva` rig file as the factory file.
+1. Load order: `_refined` file if it descends from the factory / previous file → that file → none. `triangulation.calibration_file`, when set, replaces the `~/.nowva` rig file as the factory file. A file for a different camera set, or calibrated at a resolution a camera did not open at, is ignored with a warning and the rig recalibrates.
 2. No file: the HUD shows **CALIBRATING CAMERAS - STEP IN AND DO TWO SLOW SQUATS** with a `FRAMES n/240  SQUATS n/2` counter. Pose estimation runs 2D-only, the provider buffers frames seen by ≥ 2 cameras, and once both targets are met `PersonCalibrator.calibrate` runs in a worker thread (HUD: *SOLVING, ONE MOMENT*; ~1–3 s on an M2). The result is saved to `rig_calibration_cams_<ids>.json` and installed, and the session continues into the normal assessment. Scale comes from the barbell when a detector is available (`barbell_tracking.enabled` or `camera_calibration.use_bar_scale`), else from the user's height.
-3. No two squats within `capture_timeout_s`, or the solve fails: fall back to the T-pose calibration below after a 5 s on-screen countdown.
+3. No two squats within `capture_timeout_s`, or the solve fails: fall back to the T-pose calibration below after a 5 s on-screen countdown (up to 3 attempts when the pose is not held; stalled cameras fail the session with a clear error instead of hanging).
 4. A factory calibration (`world_anchor: "board"`) is refined once on the assessment reps (or at the first rest for returning users) to move the world frame onto the lifter, and saved as `_refined`.
-5. **Drift monitor:** at every rest start the reprojection health of the set's last `drift_check_frames` frames is compared with the RMS stored in the calibration. Above `drift_ratio` × stored, a refine (`keep_world_frame=True`, scale kept) runs in a thread during the rest and installs before the readiness gate re-arms — never mid-set. A refine that does not improve health is discarded.
+5. **Drift monitor:** at every rest start the reprojection health of the set's last `drift_check_frames` frames is compared with the RMS stored in the calibration. Above `drift_ratio` × stored, a refine (`keep_world_frame=True`, scale kept) runs in a thread during the rest on the frames *before* the check window and installs before the readiness gate re-arms — never mid-set. It is accepted only if the held-out health drops to the stored limit or by more than `drift_ratio`; otherwise the observed level becomes the new baseline. Any refine (drift or board re-anchor) that changes the triangulated femur + tibia length by more than 1 % against the session's measured body is rejected with a "camera moved along the baseline — recalibrate" message, since reprojection health cannot see a scale change.
 
-Installing a calibration calls `pipeline.on_calibration_changed(world_frame_changed)`: the Kalman state and triangulator history always restart; the foot contact anchors and floor reset only when the world frame itself moved (first calibration, board → person). Body measurements are never reset. To recalibrate after moving cameras, delete `~/.nowva/rig_calibration_cams_*`.
+Installing a calibration calls `pipeline.on_calibration_changed(world_frame_changed)`: the Kalman state, triangulator history, foot contact anchors and floor restart (even a kept world frame shifts ~1 cm, which the planted-foot model would otherwise carry as a heel-rise bias). Body measurements are never reset. To recalibrate after moving cameras, delete `~/.nowva/rig_calibration_cams_*`.
 
 Config (`camera_calibration:` in `config/biomechanics.yaml`): `camera_keys`, `calibration_buffer_frames` (450), `use_bar_scale` (false), `bar_detection_stride` (3), `min_calibration_frames` (240), `min_squat_excursions` (2), `capture_timeout_s` (90), `drift_ratio` (1.5), `drift_check_frames` (150).
 

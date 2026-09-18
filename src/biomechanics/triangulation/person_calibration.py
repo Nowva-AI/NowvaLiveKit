@@ -81,6 +81,11 @@ SEGMENT_HEIGHT_RATIOS: dict[str, float] = {
     "forearm_r": SEGMENT_RATIOS["forearm"],
 }
 MIN_SEGMENT_FRAMES = 5
+# "initial" scale: the refined rig is rescaled so that these segments, triangulated by the
+# cameras that did not move, measure what the initial calibration measured with the same
+# cameras. Segments seen in fewer frames are skipped; none left -> the baseline hold stays.
+SCALE_TARGET_SEGMENTS: tuple[str, ...] = ("hip_width", "femur_l", "femur_r", "tibia_l", "tibia_r")
+MIN_SCALE_TARGET_FRAMES = 10
 
 # Residual weights. Reprojection residuals are in pixels (x score / median score); the metric
 # terms are converted to pixel-equivalents: 1 cm of bone deviation ~ 3 px, 1 cm of bar-length,
@@ -131,6 +136,10 @@ class PersonCalibrationResult:
     initial_rms_reprojection_px: float = float("nan")
     standing_frames: int = 0
     solve_time_s: float = 0.0
+    # Leg-segment lengths triangulated with the solved calibration / with the initial one, by the
+    # cameras that did not move (median over the solved frames, same estimator on both sides):
+    # 1.0 by construction when the scale comes from the initial calibration, NaN without one.
+    scale_change_ratio: float = float("nan")
 
 
 def _stack_skeletons(views: list[dict[str, Skeleton2D]], cam_ids: list[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -442,13 +451,15 @@ def _refine_cameras_by_triangulation(
     return _cameras_from_params(solution.x)
 
 
-def _median_segment_lengths(points: np.ndarray, active: np.ndarray) -> np.ndarray:
+def _median_segment_lengths(
+    points: np.ndarray, active: np.ndarray, min_frames: int = MIN_SEGMENT_FRAMES
+) -> np.ndarray:
     # points (F, P, 3), active (F, P) -> median length per BA segment, NaN when seen in too few frames
     lengths = np.full(len(BA_SEGMENT_NAMES), np.nan)
     for segment_idx, name in enumerate(BA_SEGMENT_NAMES):
         proximal, distal = BA_SEGMENTS[name]
         both = active[:, proximal] & active[:, distal]
-        if both.sum() >= MIN_SEGMENT_FRAMES:
+        if both.sum() >= min_frames:
             lengths[segment_idx] = np.median(np.linalg.norm(points[both, proximal] - points[both, distal], axis=1))
     return lengths
 
@@ -461,6 +472,23 @@ def _height_prior_sum(segment_lengths: np.ndarray, height_m: float) -> tuple[np.
     ], dtype=np.int64)
     expected_sum_m = height_m * sum(SEGMENT_HEIGHT_RATIOS[BA_SEGMENT_NAMES[idx]] for idx in indices)
     return indices, float(expected_sum_m)
+
+
+def _triangulated_segment_lengths(
+    projections: np.ndarray, positions: np.ndarray, valid: np.ndarray, cameras_used: np.ndarray
+) -> np.ndarray:
+    # Median length per BA segment (NaN below MIN_SCALE_TARGET_FRAMES frames) of the points
+    # triangulated with projections (V, 3, 4) from the cameras_used (V,) views only
+    num_frames, num_views, num_points = valid.shape
+    subset_valid = valid & cameras_used[None, :, None]
+    subset_valid &= (subset_valid.sum(axis=1) >= MIN_VIEWS_PER_POINT)[:, None, :]
+    points, _ = _triangulate(
+        projections, positions.transpose(1, 0, 2, 3).reshape(num_views, -1, 2),
+        subset_valid.transpose(1, 0, 2).reshape(num_views, -1),
+    )
+    return _median_segment_lengths(
+        points.reshape(num_frames, num_points, 3), subset_valid.any(axis=1), min_frames=MIN_SCALE_TARGET_FRAMES
+    )
 
 
 class _BundleProblem:
@@ -478,7 +506,7 @@ class _BundleProblem:
         segment_lengths: np.ndarray,
         scale_source: str,
         bar_length_m: float | None,
-        height_prior: tuple[np.ndarray, float] | None,
+        scale_prior: tuple[np.ndarray, float] | None,
         baseline_m: float,
     ) -> None:
         # positions (F, V, NUM_FRAME_POINTS, 2); weights (F, V, NUM_FRAME_POINTS), 0 = unobserved
@@ -516,7 +544,7 @@ class _BundleProblem:
 
         self.scale_source = scale_source
         self.bar_length_m = bar_length_m
-        self.height_prior = height_prior
+        self.scale_prior = scale_prior
         self.baseline_m = baseline_m
         bar_both = self.active[:, BAR_LEFT_POINT] & self.active[:, BAR_RIGHT_POINT]
         self.bar_left = self.point_index[bar_both, BAR_LEFT_POINT]
@@ -571,8 +599,8 @@ class _BundleProblem:
         if self.scale_source == SCALE_SOURCE_BAR:
             bar_lengths = np.linalg.norm(points[self.bar_left] - points[self.bar_right], axis=1)
             return SCALE_WEIGHT_PX_PER_M * (bar_lengths - self.bar_length_m)
-        if self.scale_source == SCALE_SOURCE_HEIGHT:
-            indices, expected_sum_m = self.height_prior
+        if self.scale_prior is not None:
+            indices, expected_sum_m = self.scale_prior
             return SCALE_WEIGHT_PX_PER_M * np.array([lengths[indices].sum() - expected_sum_m])
         return SCALE_WEIGHT_PX_PER_M * np.array([np.linalg.norm(translations[1]) - self.baseline_m])
 
@@ -601,8 +629,8 @@ class _BundleProblem:
                 rows.append(np.repeat(bar_rows, 3))
                 cols.append((self.num_camera_params + 3 * point_indices[:, None] + np.arange(3)).ravel())
             next_row += len(self.bar_left)
-        elif self.scale_source == SCALE_SOURCE_HEIGHT:
-            indices = self.height_prior[0]
+        elif self.scale_prior is not None:
+            indices = self.scale_prior[0]
             rows.append(np.full(len(indices), next_row))
             cols.append(self.points_end + indices)
             next_row += 1
@@ -635,41 +663,72 @@ def _rigid_fit(source: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.n
     return rotation, target_mean - rotation @ source_mean
 
 
+def _similarity_fit(
+    source_centres: np.ndarray, source_axes: np.ndarray, target_centres: np.ndarray, target_axes: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, float]:
+    # target ~= scale * rotation @ source + shift for camera centres (V, 3), with the rotation taken
+    # from the unit camera axes (V, 3, 3) alone: axes do not scale, so the fit stays exact whatever
+    # scale the source rig was solved at. One camera cannot fix a scale: it is then 1.
+    left, _, right = np.linalg.svd(target_axes.reshape(-1, 3).T @ source_axes.reshape(-1, 3))
+    rotation = left @ np.diag([1.0, 1.0, np.sign(np.linalg.det(left @ right))]) @ right
+    rotated = source_centres @ rotation.T
+    rotated_spread = rotated - rotated.mean(axis=0)
+    scale = 1.0
+    if len(source_centres) >= MIN_VIEWS_PER_POINT:
+        target_spread = target_centres - target_centres.mean(axis=0)
+        scale = float(np.sum(rotated_spread * target_spread) / np.sum(rotated_spread**2))
+    return rotation, target_centres.mean(axis=0) - scale * rotated.mean(axis=0), scale
+
+
 def _consensus_rigid_fit(
-    solved_landmarks: np.ndarray, initial_landmarks: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # Rigid map of the solved rig onto the initial one that tolerates ONE moved camera: the
+    solved_landmarks: np.ndarray, initial_landmarks: np.ndarray, with_scale: bool = False
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+    # Map of the solved rig onto the initial one that tolerates ONE moved camera: the
     # leave-one-out subset whose cameras agree best defines the fit, and the camera left out
     # rejoins only if it agrees about as well. With two cameras nothing can vote, so the
-    # reference camera's pose is kept. Landmarks (V, 4, 3) -> rotation, shift, cameras used (V,).
+    # reference camera's pose is kept. Landmarks (V, 4, 3): centre then three axis tips.
+    # -> rotation, shift, scale (1 unless with_scale), cameras used (V,).
     num_views = len(solved_landmarks)
+    solved_centres, initial_centres = solved_landmarks[:, 0], initial_landmarks[:, 0]
+    solved_offsets = solved_landmarks[:, 1:] - solved_centres[:, None]
+    initial_offsets = initial_landmarks[:, 1:] - initial_centres[:, None]
+    lever_arms_m = np.linalg.norm(solved_offsets, axis=-1)
 
-    def fit(cameras_used: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        rotation, shift = _rigid_fit(
-            solved_landmarks[cameras_used].reshape(-1, 3), initial_landmarks[cameras_used].reshape(-1, 3)
-        )
-        mapped = solved_landmarks @ rotation.T + shift
+    def fit(cameras_used: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+        if with_scale:
+            rotation, shift, scale = _similarity_fit(
+                solved_centres[cameras_used], solved_offsets[cameras_used] / lever_arms_m[cameras_used][..., None],
+                initial_centres[cameras_used], initial_offsets[cameras_used] / lever_arms_m[cameras_used][..., None],
+            )
+        else:
+            rotation, shift = _rigid_fit(
+                solved_landmarks[cameras_used].reshape(-1, 3), initial_landmarks[cameras_used].reshape(-1, 3)
+            )
+            scale = 1.0
+        mapped_centres = scale * solved_centres @ rotation.T + shift
+        mapped_tips = mapped_centres[:, None] + solved_offsets @ rotation.T
+        mapped = np.concatenate([mapped_centres[:, None], mapped_tips], axis=1)
         residuals_m = np.sqrt(np.mean(np.sum((mapped - initial_landmarks) ** 2, axis=-1), axis=-1))
-        return rotation, shift, residuals_m
+        return rotation, shift, scale, residuals_m
 
     if num_views < MIN_CONSENSUS_CAMERAS:
         reference_only = np.arange(num_views) == 0
-        rotation, shift, _ = fit(reference_only)
-        return rotation, shift, reference_only
+        rotation, shift, scale, _ = fit(reference_only)
+        return rotation, shift, scale, reference_only
 
     best_left_out, best_rms_m = 0, np.inf
     for left_out in range(num_views):
         cameras_used = np.arange(num_views) != left_out
-        residuals_m = fit(cameras_used)[2]
+        residuals_m = fit(cameras_used)[3]
         subset_rms_m = float(np.sqrt(np.mean(residuals_m[cameras_used] ** 2)))
         if subset_rms_m < best_rms_m:
             best_left_out, best_rms_m = left_out, subset_rms_m
     cameras_used = np.arange(num_views) != best_left_out
-    rotation, shift, residuals_m = fit(cameras_used)
+    rotation, shift, scale, residuals_m = fit(cameras_used)
     if residuals_m[best_left_out] <= max(WORLD_FIT_INLIER_FACTOR * best_rms_m, WORLD_FIT_INLIER_FLOOR_M):
         cameras_used = np.ones(num_views, dtype=bool)
-        rotation, shift, _ = fit(cameras_used)
-    return rotation, shift, cameras_used
+        rotation, shift, scale, _ = fit(cameras_used)
+    return rotation, shift, scale, cameras_used
 
 
 def world_frame_from_standing(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -807,6 +866,23 @@ class PersonCalibrator:
 
         params, problem = self._solve(rotations, translations, points, active, positions, weights, scale_source)
         rotations, translations, solved_points, lengths = problem.unpack(params)
+        scale_change_ratio = float("nan")
+        if initial is not None:
+            scale_change_ratio = self._scale_change_ratio(
+                rotations, translations, solved_points, positions[:, :, :NUM_KEYPOINTS], valid[:, :, :NUM_KEYPOINTS],
+                initial,
+            )
+            if scale_source == SCALE_SOURCE_INITIAL and np.isfinite(scale_change_ratio):
+                # scale is a free gauge of this solve (baseline hold only): put it back to the initial metric
+                translations, solved_points, lengths = (
+                    translations / scale_change_ratio, solved_points / scale_change_ratio, lengths / scale_change_ratio
+                )
+                scale_change_ratio = 1.0
+            elif scale_source == SCALE_SOURCE_INITIAL:
+                logger.warning(
+                    "[PERSON CALIBRATION] Too few frames to triangulate the leg segments; holding the first "
+                    "camera baseline instead (metric scale not guaranteed if one of those cameras moved)"
+                )
 
         world_anchor = WORLD_ANCHOR_PERSON
         standing_frames = 0
@@ -842,6 +918,7 @@ class PersonCalibrator:
             initial_rms_reprojection_px=initial_rms_px,
             standing_frames=standing_frames,
             solve_time_s=solve_time_s,
+            scale_change_ratio=scale_change_ratio,
         )
 
     def refine(
@@ -914,15 +991,15 @@ class PersonCalibrator:
         scale_source: str,
     ) -> tuple[np.ndarray, _BundleProblem]:
         segment_lengths = _median_segment_lengths(points, active)
-        height_prior = None
+        scale_prior = None
         if scale_source == SCALE_SOURCE_HEIGHT:
-            height_prior = _height_prior_sum(segment_lengths, self._height_m)
+            scale_prior = _height_prior_sum(segment_lengths, self._height_m)
         baseline_m = float(np.linalg.norm(translations[1]))
 
         def build(current_weights: np.ndarray) -> _BundleProblem:
             return _BundleProblem(
                 self._intrinsic_matrices, positions, current_weights, segment_lengths,
-                scale_source, self._bar_length_m, height_prior, baseline_m,
+                scale_source, self._bar_length_m, scale_prior, baseline_m,
             )
 
         def run(problem: _BundleProblem, start: np.ndarray, loss: str) -> np.ndarray:
@@ -975,11 +1052,16 @@ class PersonCalibrator:
         points, _ = self._triangulate_frames(rotations, translations, positions[standing], valid[standing])
         return points
 
-    def _initial_world_frame(
-        self, rotations: np.ndarray, translations: np.ndarray, solved_points: np.ndarray, initial: CalibrationResult
-    ) -> tuple[np.ndarray, np.ndarray]:
-        # Rotation A and origin o, in the solve's frame, of the INITIAL calibration's world:
-        # world = A (p - o), the same form world_frame_from_standing returns.
+    def _consensus_with_initial(
+        self,
+        rotations: np.ndarray,
+        translations: np.ndarray,
+        solved_points: np.ndarray,
+        initial: CalibrationResult,
+        with_scale: bool,
+    ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+        # Fit of the solved rig onto the initial one over camera landmarks (lever arm = each
+        # camera's distance to the lifter) -> rotation, shift, scale, cameras that did not move
         initial_rotations = np.stack(
             [np.asarray(initial.cameras[c].rotation_matrix, dtype=np.float64) for c in self._cam_ids]
         )
@@ -988,13 +1070,52 @@ class PersonCalibrator:
         )
         depths_m = np.einsum("vij,nj->vni", rotations, solved_points)[..., 2] + translations[:, None, 2]
         lever_arms_m = np.median(depths_m, axis=1)
-        rotation, shift, cameras_used = _consensus_rigid_fit(
+        rotation, shift, scale, cameras_used = _consensus_rigid_fit(
             _camera_landmarks(rotations, translations, lever_arms_m),
             _camera_landmarks(initial_rotations, initial_translations, lever_arms_m),
+            with_scale,
         )
         moved = [cam_id for cam_id, used in zip(self._cam_ids, cameras_used) if not used]
         if moved and len(self._cam_ids) >= MIN_CONSENSUS_CAMERAS:
-            logger.info("[PERSON CALIBRATION] Camera %s moved; world frame kept from the other cameras", moved)
+            logger.info("[PERSON CALIBRATION] Camera %s moved relative to the initial calibration", moved)
+        return rotation, shift, scale, cameras_used
+
+    def _scale_change_ratio(
+        self,
+        rotations: np.ndarray,
+        translations: np.ndarray,
+        solved_points: np.ndarray,
+        positions: np.ndarray,
+        valid: np.ndarray,
+        initial: CalibrationResult,
+    ) -> float:
+        # Leg segments triangulated by the cameras that did not move, solved / initial. The
+        # moved camera is found with a similarity fit (the solve's scale is still a free gauge
+        # here); epipolar residuals cannot see a camera sliding along its baseline, but the
+        # solved rig can. NaN when the segments are seen in too few frames.
+        cameras_used = self._consensus_with_initial(rotations, translations, solved_points, initial, True)[3]
+        if cameras_used.sum() < MIN_VIEWS_PER_POINT:
+            cameras_used = np.ones(len(self._cam_ids), dtype=bool)
+        initial_projections = np.stack(
+            [np.asarray(initial.cameras[c].projection_matrix, dtype=np.float64) for c in self._cam_ids]
+        )
+        solved_projections = _projection_matrices(self._intrinsic_matrices, rotations, translations)
+        initial_lengths = _triangulated_segment_lengths(initial_projections, positions, valid, cameras_used)
+        solved_lengths = _triangulated_segment_lengths(solved_projections, positions, valid, cameras_used)
+        indices = [
+            idx for idx, name in enumerate(BA_SEGMENT_NAMES)
+            if name in SCALE_TARGET_SEGMENTS and np.isfinite(initial_lengths[idx]) and np.isfinite(solved_lengths[idx])
+        ]
+        if not indices:
+            return float("nan")
+        return float(solved_lengths[indices].sum() / initial_lengths[indices].sum())
+
+    def _initial_world_frame(
+        self, rotations: np.ndarray, translations: np.ndarray, solved_points: np.ndarray, initial: CalibrationResult
+    ) -> tuple[np.ndarray, np.ndarray]:
+        # Rotation A and origin o, in the solve's frame, of the INITIAL calibration's world:
+        # world = A (p - o), the same form world_frame_from_standing returns. Rigid: no scale.
+        rotation, shift, _, _ = self._consensus_with_initial(rotations, translations, solved_points, initial, False)
         # world = rotation @ p + shift = rotation @ (p - o)  with  o = -rotation^T shift
         return rotation, -rotation.T @ shift
 

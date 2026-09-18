@@ -45,8 +45,8 @@
     "semantic_hash": "ea5e73bb8044d823025ebf8d07ae00cc"
   },
   "src/biomechanics/pipeline.py": {
-    "mtime": 1789676919.299943,
-    "ast_hash": "23c418fcc23ccd638c9d8471023b3d57",
+    "mtime": 1789689623.8666756,
+    "ast_hash": "0770a5d699670e3e5fb97a391d765165",
     "semantic_hash": ""
   },
   "src/biomechanics/calibration.py": {
@@ -1555,8 +1555,8 @@
     "semantic_hash": "4213e01fb450cb1620b6ce185d15e715"
   },
   "src/biomechanics/pipeline_process.py": {
-    "mtime": 1789676533.8565915,
-    "ast_hash": "a5cb640917a01f3f4924134781011768",
+    "mtime": 1789689719.9562206,
+    "ast_hash": "58e35ad603dff82248741103143f162b",
     "semantic_hash": ""
   },
   "src/biomechanics/setup.sh": {
@@ -1565,8 +1565,8 @@
     "semantic_hash": "f15db79ee7cd965228b7bd3f027f047e"
   },
   "src/biomechanics/triangulation/calibration.py": {
-    "mtime": 1789682363.7287734,
-    "ast_hash": "ea261411925ad865e12eb2c4827bec64",
+    "mtime": 1789689598.9563024,
+    "ast_hash": "a6e3a9847fb64277562227d00448633c",
     "semantic_hash": ""
   },
   "src/biomechanics/triangulation/multi_capture.py": {
@@ -1805,8 +1805,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_pipeline.py": {
-    "mtime": 1789676993.7325888,
-    "ast_hash": "41460fa4b38ed622630dfa7fc1bd7a62",
+    "mtime": 1789689574.137132,
+    "ast_hash": "b0092c00020ce7659457c7d7a60a64b2",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_pose.py": {
@@ -1970,8 +1970,8 @@
     "semantic_hash": "d1093f04bc617e7af6fca41f93b573c6"
   },
   "README.md": {
-    "mtime": 1789673666.9640954,
-    "ast_hash": "8a5c13bf46dbe3359cd70b365cd1dcf2",
+    "mtime": 1789690007.790952,
+    "ast_hash": "ec64db97e350dc9d087700e20588d9c3",
     "semantic_hash": ""
   },
   "calibrated_test_visualizer/README.md": {
@@ -2235,8 +2235,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/pose/multi_camera.py": {
-    "mtime": 1789682441.133713,
-    "ast_hash": "f12fa145e44f351340887fd4d1f3ce5f",
+    "mtime": 1789689810.1776516,
+    "ast_hash": "1c48b846d32b940763fa776375ab90ea",
     "semantic_hash": ""
   },
   "src/biomechanics/viz/demo_ws_bridge.py": {
@@ -4850,8 +4850,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/utils/preik_chain.py": {
-    "mtime": 1789672955.6468556,
-    "ast_hash": "a336b6bed17dec0cc4f949059e9c5ef7",
+    "mtime": 1789682452.1947813,
+    "ast_hash": "73b298193d6b7c3f586aeca5de87ca34",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_diagnosis/test_morph_frames.py": {
@@ -6555,8 +6555,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_multi_camera_provider.py": {
-    "mtime": 1789670079.5217392,
-    "ast_hash": "8ad29987b6704a89b9739c06662765f7",
+    "mtime": 1789689640.9283175,
+    "ast_hash": "664067bea21d94f7242f976bc7c5d966",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_multi_capture.py": {
@@ -6570,8 +6570,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_pipeline_process.py": {
-    "mtime": 1789669980.759676,
-    "ast_hash": "2c7b2af5ba5cb13e1f7bfc9cbc5baa8f",
+    "mtime": 1789689574.1365528,
+    "ast_hash": "01d59c0baa6fabcafcb2990b13c9826c",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_rtmpose.py": {
@@ -6585,8 +6585,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_tpose_calibration.py": {
-    "mtime": 1789679937.835193,
-    "ast_hash": "d5deb3cdf2c675f663f5374cb15ecd83",
+    "mtime": 1789689574.1357377,
+    "ast_hash": "76d70f908f0b15712f9183ddacfb0b62",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_triangulator.py": {
@@ -11105,8 +11105,8 @@
     "semantic_hash": ""
   },
   "src/biomechanics/triangulation/person_calibration.py": {
-    "mtime": 1789682181.2571912,
-    "ast_hash": "67a143346b097933232b15b6fc3f143f",
+    "mtime": 1789689949.932801,
+    "ast_hash": "15e7c15eff7d06cddf05e024d3b59112",
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_charuco_calibration.py": {
@@ -11115,8 +11115,8 @@
     "semantic_hash": ""
   },
   "tests/test_biomechanics/test_person_calibration.py": {
-    "mtime": 1789682328.5471976,
-    "ast_hash": "a52755e69a293d020e8539fc8623f932",
+    "mtime": 1789689949.9311357,
+    "ast_hash": "fd5c13402789ffdf91016d47d058e3d6",
     "semantic_hash": ""
   },
   ".claude/preik-audit/CALIBRATION_CONTRACTS.md": {
@@ -11125,8 +11125,8 @@
     "semantic_hash": ""
   },
   ".claude/preik-audit/CALIBRATION_NOTES.md": {
-    "mtime": 1789681982.0752409,
-    "ast_hash": "3e654258ece2f5dc9a12a4932a8d2d3c",
+    "mtime": 1789682487.2587621,
+    "ast_hash": "cca8a298935439a1b642c747110b30b1",
     "semantic_hash": ""
   },
   ".claude/preik-audit/harness/person_ba_summary.md": {
@@ -11147,6 +11147,11 @@
   ".claude/preik-audit/CALIBRATION_INTEGRATION_BRIEF.md": {
     "mtime": 1789681982.0773354,
     "ast_hash": "9a0a9708bee5d16a8a702fc46248b1db",
+    "semantic_hash": ""
+  },
+  "tests/test_biomechanics/test_calibration_flow.py": {
+    "mtime": 1789690007.790223,
+    "ast_hash": "2f21b53c2f45f0e74ba9476bc79a8212",
     "semantic_hash": ""
   }
 }
