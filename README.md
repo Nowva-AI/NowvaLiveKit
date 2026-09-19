@@ -43,7 +43,24 @@
 
 ## Project Status
 
-**Current Focus:** Multi-camera pose estimation optimization — GPU-batched inference and vectorized DLT triangulation for edge deployment.
+**Current Focus:** Squat diagnosis accuracy on the 3-camera rig (rebuilt pre-IK signal path, lifter-based camera calibration) and on-device speech affect perception so Nova adapts to how the athlete sounds.
+
+### Recent Changes (September 2026)
+
+#### Speech Affect Perception V1 (Session 2026-09-17)
+- **Edge-only perception path:** `src/affect/` runs an ONNX speech-emotion model (arousal / valence / dominance + prosody) on every utterance via onnxruntime, with per-speaker neutral baselines and hysteresis. No cloud call enters the path; the deployed graph lives in `models/affect/current/` and targets Jetson Orin Nano Super.
+- **Two-field LLM interface:** the agent sees at most `[athlete: effort=… affect=…]`, sized for a 2B local model. `AffectNodesMixin` injects it in `llm_node` with a ≤40 ms wait budget (zero added latency on coaching replies) and applies TTS style in `tts_node`; the LLM never writes voice tags.
+- **Coaching gates:** humor off when the athlete sounds frustrated or strained, calmer motivation near limit, athlete-state line in the post-set recap. Rep ascent time feeds the effort state. `FAULT_CUE` priority and the cached cue path are untouched.
+- **Training + tooling:** `training/affect/` (train / eval / export / report CLI, TensorRT build script), `benchmarks` affect component, replay and TTS-probe tools, profiler `affect` category, ContextViewer and display pill. V1a model is the audEERING wav2vec2 export; MSP-Podcast training is pending the data agreement. Start at `docs/affect/HANDOFF.md`.
+
+#### Pre-IK Signal Path Rebuild + Camera Calibration (Sessions 2026-09-16/18)
+- **Pre-IK rebuild:** a nine-agent audit against a ground-truth 3-camera squat simulator showed every legacy pre-IK filter except the velocity clamp made accuracy worse. Replaced with a fixed-lag Kalman smoother per keypoint (lagged analysis stream + undelayed display stream), world-frame foot contact (heel rise, stance width, toe-out → new `HeelRiseRule`) and session-scoped segment-length measurement. Reports in `.claude/preik-audit/`.
+- **Camera calibration:** intrinsics + factory extrinsics from a ChArUco board (`scripts/tools/calibrate_cameras.py`); field extrinsics from the lifter via sparse bundle adjustment with the barbell as metric scale — within 0.3 mm of perfect calibration on the simulator. Drift refines are validated on held-out frames and rejected if they move metric scale by more than 1 %.
+
+#### Website
+- Landing page tightened: removed the One Set section, moved the "Fully Local Intelligence" card from the Manifesto up into the RackShowcase, rewrote the Coach and Flywheel copy.
+
+**Verification:** 1478 tests passing. Known pre-existing failures outside this work: program-generator suites (`test_v6_verification.py`, `test_phase3_v5.py`, `test_phase4_v5.py`, `test_program_generator_suite.py`) and `test_audio_cue_service.py` (imports a removed constant).
 
 ### Recent Changes (August 2026)
 

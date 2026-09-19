@@ -1,11 +1,11 @@
-# Graph Report - NowvaLiveKit  (2026-09-18)
+# Graph Report - NowvaLiveKit  (2026-09-19)
 
 ## Corpus Check
-- 1909 files · ~10,526,736 words
+- 1909 files · ~10,526,733 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 18587 nodes · 49271 edges · 1016 communities (706 shown, 310 thin omitted)
+- 18587 nodes · 49271 edges · 1014 communities (704 shown, 310 thin omitted)
 - Extraction: 56% EXTRACTED · 44% INFERRED · 0% AMBIGUOUS · INFERRED: 21576 edges (avg confidence: 0.58)
 - Token cost: 0 input · 0 output
 
@@ -795,7 +795,6 @@
 - [[_COMMUNITY_Community 861|Community 861]]
 - [[_COMMUNITY_Community 862|Community 862]]
 - [[_COMMUNITY_Community 863|Community 863]]
-- [[_COMMUNITY_Community 864|Community 864]]
 - [[_COMMUNITY_Community 865|Community 865]]
 - [[_COMMUNITY_Community 866|Community 866]]
 - [[_COMMUNITY_Community 867|Community 867]]
@@ -809,7 +808,6 @@
 - [[_COMMUNITY_Community 875|Community 875]]
 - [[_COMMUNITY_Community 876|Community 876]]
 - [[_COMMUNITY_Community 877|Community 877]]
-- [[_COMMUNITY_Community 879|Community 879]]
 - [[_COMMUNITY_Community 880|Community 880]]
 - [[_COMMUNITY_Community 881|Community 881]]
 - [[_COMMUNITY_Community 882|Community 882]]
@@ -976,9 +974,9 @@
 - 1-file cycle: `scripts/benchmarks/ttft_probe_openai.py -> scripts/benchmarks/ttft_probe_openai.py`
 - 1-file cycle: `src/api/routers/programs.py -> src/api/routers/programs.py`
 - 2-file cycle: `src/api/models/requests.py -> src/api/routers/programs.py -> src/api/models/requests.py`
-- 3-file cycle: `.claude/preik-audit/harness/preik_harness/__init__.py -> .claude/preik-audit/harness/preik_harness/api.py -> .claude/preik-audit/harness/preik_harness/runner.py -> .claude/preik-audit/harness/preik_harness/__init__.py`
-- 3-file cycle: `.claude/preik-audit/harness/preik_harness/__init__.py -> .claude/preik-audit/harness/preik_harness/chains.py -> .claude/preik-audit/harness/preik_harness/runner.py -> .claude/preik-audit/harness/preik_harness/__init__.py`
 - 3-file cycle: `.claude/preik-audit/harness/preik_harness/__init__.py -> .claude/preik-audit/harness/preik_harness/proposed.py -> .claude/preik-audit/harness/preik_harness/runner.py -> .claude/preik-audit/harness/preik_harness/__init__.py`
+- 3-file cycle: `.claude/preik-audit/harness/preik_harness/__init__.py -> .claude/preik-audit/harness/preik_harness/chains.py -> .claude/preik-audit/harness/preik_harness/runner.py -> .claude/preik-audit/harness/preik_harness/__init__.py`
+- 3-file cycle: `.claude/preik-audit/harness/preik_harness/__init__.py -> .claude/preik-audit/harness/preik_harness/api.py -> .claude/preik-audit/harness/preik_harness/runner.py -> .claude/preik-audit/harness/preik_harness/__init__.py`
 - 4-file cycle: `.claude/preik-audit/harness/preik_harness/__init__.py -> .claude/preik-audit/harness/preik_harness/api.py -> .claude/preik-audit/harness/preik_harness/metrics.py -> .claude/preik-audit/harness/preik_harness/runner.py -> .claude/preik-audit/harness/preik_harness/__init__.py`
 
 ## Hyperedges (group relationships)
@@ -992,7 +990,7 @@
 - **** — concept_periodization_phases, concept_deload_week, concept_progressive_loading [INFERRED 0.85]
 - **** — exercise_power_clean, exercise_snatch, exercise_clean_and_jerk [EXTRACTED 1.00]
 
-## Communities (1016 total, 310 thin omitted)
+## Communities (1014 total, 310 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
@@ -1019,8 +1017,8 @@ Cohesion: 0.02
 Nodes (212): Load user information from database (cached - only loads once)          Args:, email_start(), Passwordless entry point.      Finds an existing user by email or creates a new, Create a new user account with a hashed password., register(), get_last_completed_session(), get_user_calibration(), get_user_calibration_full() (+204 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.08
-Nodes (27): DemoCue, DemoWSBridge, _ground_and_center_stack(), mediapipe_to_viewer_coords(), WebSocket + HTTP bridge for the Three.js choreography viewer., Serves the Three.js viewer over HTTP and bridges demo events over WebSocket., Send a static replay pose — no choreography, just show the skeleton., Stream one live skeleton frame; kept out of the event backlog.          Truncate (+19 more)
+Cohesion: 0.06
+Nodes (36): DemoCue, DemoWSBridge, _ground_and_center_stack(), mediapipe_to_viewer_coords(), WebSocket + HTTP bridge for the Three.js choreography viewer., Serves the Three.js viewer over HTTP and bridges demo events over WebSocket., Send a static replay pose — no choreography, just show the skeleton., Stream one live skeleton frame; kept out of the event backlog.          Truncate (+28 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.04
@@ -1047,8 +1045,8 @@ Cohesion: 0.05
 Nodes (42): addOnPostRun(), addOnPreRun(), addRunDependency(), AttributeOctahedronTransform(), AttributeQuantizationTransform(), AttributeTransformData(), callRuntimeCallbacks(), castObject() (+34 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.12
-Nodes (27): Ankle Mobility Block Accommodation, Barbell-Only Programming Constraint, Basketball-Specific Sport Transfer, Olympic Lifts (Clean/Snatch/Jerk), Progressive Intensity Loading (weekly intensity increments), Reps in Reserve (RIR) Prescription, Speed-Strength Training (Speed Squat/Bench/Deadlift), Unilateral Accessory Work (Bulgarian Split Squat/Step-Up) (+19 more)
+Cohesion: 0.10
+Nodes (33): Ankle Mobility Block Accommodation, Barbell-Only Programming Constraint, Basketball-Specific Sport Transfer, Glute-Targeted Hypertrophy Focus, Nova Agent Main Menu Mode (session entry state), Periodization Phases (Build/Taper/Peak/Deload), Progressive Intensity Loading (weekly intensity increments), Reps in Reserve (RIR) Prescription (+25 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.12
@@ -1100,7 +1098,7 @@ Nodes (21): ExerciseLibraryService, get_exercise_library_service(), Exercise Lib
 
 ### Community 26 - "Community 26"
 Cohesion: 0.03
-Nodes (68): entrypoint(), prewarm(), Nova Voice Agent - Multi-Agent Entrypoint Routes to the appropriate agent based, Main entry point for Nova voice agent, Pre-load heavy resources before any room connection.      Runs silero VAD model, get_movement_pattern(), build_program_generation_payload(), check_calibration() (+60 more)
+Nodes (65): entrypoint(), prewarm(), Nova Voice Agent - Multi-Agent Entrypoint Routes to the appropriate agent based, Main entry point for Nova voice agent, Pre-load heavy resources before any room connection.      Runs silero VAD model, get_movement_pattern(), build_program_generation_payload(), check_calibration() (+57 more)
 
 ### Community 27 - "Community 27"
 Cohesion: 0.05
@@ -1583,19 +1581,19 @@ Cohesion: 0.05
 Nodes (56): calculate_estimated_1rm(), calculate_velocity_loss_for_set(), get_exercise_progress(), get_recent_activity_summary(), log_completed_set(), Database utility functions for progress tracking and logging Handles ProgressLog, Calculate estimated 1RM using Epley formula.     1RM = weight × (1 + reps/30), Create a ProgressLog entry for a completed set.     Logs set immediately for dat (+48 more)
 
 ### Community 279 - "Community 279"
-Cohesion: 0.02
-Nodes (129): Get state value by key path (supports dot notation)          Args:             k, main(), percentile(), print_comparison(), print_results(), Print side-by-side comparison of two backends., Compute percentile of a list., Run benchmark for a single backend.      Returns dict with timing results. (+121 more)
+Cohesion: 0.04
+Nodes (65): Get state value by key path (supports dot notation)          Args:             k, main(), percentile(), print_comparison(), print_results(), Print side-by-side comparison of two backends., Compute percentile of a list., Run benchmark for a single backend.      Returns dict with timing results. (+57 more)
 
 ### Community 280 - "Community 280"
-Cohesion: 0.05
-Nodes (33): Broadcast an event to browsers from any thread (e.g. main.py)., Create and bind the server socket. Connectable immediately after return., Stop IPC server and clean up socket file., Listen for incoming framed messages., Disconnect from server., _remove_socket_file(), NowvaApp, Log system event (app start, mode change, etc.) (+25 more)
+Cohesion: 0.03
+Nodes (53): Broadcast an event to browsers from any thread (e.g. main.py)., Create and bind the server socket. Connectable immediately after return., Stop IPC server and clean up socket file., Listen for incoming framed messages., Disconnect from server., _remove_socket_file(), _check_python_environment(), _close_tee() (+45 more)
 
 ### Community 281 - "Community 281"
 Cohesion: 0.05
 Nodes (105): get_exercises_for_muscle(), get_exercises_for_pattern(), get_exercises_for_tier(), V5 Exercise Library Total: 144 exercises Tier 1 (Barbell — includes rack + bench, Return all exercises available at the given equipment tier., Return exercises that target a specific muscle at a given role., Return exercises matching a movement pattern at the given tier., build_profile_from_natural_language() (+97 more)
 
 ### Community 282 - "Community 282"
-Cohesion: 0.19
+Cohesion: 0.15
 Nodes (17): get_instance(), Pydantic schemas for structured program generation using OpenAI's structured out, _apply_program_updates(), _calculate_diff(), detect_update_scope(), _generate_updated_program(), _generate_updated_week(), _generate_updated_workout() (+9 more)
 
 ### Community 283 - "Community 283"
@@ -1643,8 +1641,8 @@ Cohesion: 0.12
 Nodes (24): BenchmarkConfig, BenchmarkConfig, parse_args(), main(), Entry point: python -m benchmarks, detect_regressions(), load_baseline(), BenchmarkReport (+16 more)
 
 ### Community 321 - "Community 321"
-Cohesion: 0.07
-Nodes (75): BenchmarkResult, ndarray, BenchmarkResult, BenchmarkResult, BenchmarkResult, BenchmarkResult, BenchmarkResult, SetFeatures (+67 more)
+Cohesion: 0.06
+Nodes (82): BenchmarkResult, ndarray, BenchmarkResult, BenchmarkResult, BenchmarkResult, BenchmarkResult, BenchmarkResult, BenchmarkResult (+74 more)
 
 ### Community 322 - "Community 322"
 Cohesion: 0.04
@@ -1663,8 +1661,8 @@ Cohesion: 0.16
 Nodes (13): generate_workout_events(), make_mock_openai_client(), MockAgentState, MockConversationEvent, MockConversationItem, MockFunctionCall, MockFunctionOutput, MockSession (+5 more)
 
 ### Community 326 - "Community 326"
-Cohesion: 0.12
-Nodes (21): BenchmarkResult, Benchmark: DerivativeTracker (standalone module, not in the squat path) and Squa, run(), _ensure_21_keypoints(), generate_agent_state_dict(), generate_compaction_events(), generate_ipc_message(), generate_squat_sequence() (+13 more)
+Cohesion: 0.11
+Nodes (22): _bench_backend(), Benchmark: MediaPipePoseEstimator + RTMPoseEstimator., run(), ndarray, _ensure_21_keypoints(), generate_agent_state_dict(), generate_compaction_events(), generate_ipc_message() (+14 more)
 
 ### Community 327 - "Community 327"
 Cohesion: 0.07
@@ -1779,8 +1777,8 @@ Cohesion: 0.04
 Nodes (39): _frames_to_async_gen(), get_cue_text(), _pcm_to_audio_frames(), Audio Cue Service — Loads pre-generated TTS audio for real-time coaching.  Audio, Load the single rep validation sound into memory., Play the rep validation sound on the dedicated track (non-blocking         relat, Index all pre-generated WAV files from the cues directory., Log warnings for expected cue keys missing from disk (will use slow TTS fallback (+31 more)
 
 ### Community 356 - "Community 356"
-Cohesion: 0.09
-Nodes (19): DataConfig, _build_loader(), _lr_lambda(), Trainer, AffectDataset, Sharded soft-target cache: teacher outputs per segment id, written once and read, Stores per-segment teacher outputs in npz shards plus an index; keyed by segment, TargetCache (+11 more)
+Cohesion: 0.10
+Nodes (18): DataConfig, AffectDataset, Sharded soft-target cache: teacher outputs per segment id, written once and read, Stores per-segment teacher outputs in npz shards plus an index; keyed by segment, TargetCache, Fixtures for the training package: a tiny random WavLM saved locally so nothing, synthetic_manifest(), tiny_wavlm_dir() (+10 more)
 
 ### Community 357 - "Community 357"
 Cohesion: 0.09
@@ -1864,7 +1862,7 @@ Nodes (15): _alpha(), BlendVec, bone_vectors(), BoneDirSmoother, KalmanVec, _mod
 
 ### Community 379 - "Community 379"
 Cohesion: 0.05
-Nodes (65): date, get_date_description(), get_next_weekday(), parse_natural_date(), parse_week_range(), Natural language date parsing for voice agent Supports relative dates: "tomorrow, Parse week range from natural language.      Args:         text: "this week", "n, Parse natural language date expression to date object.      Args:         text: (+57 more)
+Nodes (67): date, get_date_description(), get_next_weekday(), parse_natural_date(), parse_week_range(), Natural language date parsing for voice agent Supports relative dates: "tomorrow, Parse week range from natural language.      Args:         text: "this week", "n, Parse natural language date expression to date object.      Args:         text: (+59 more)
 
 ### Community 380 - "Community 380"
 Cohesion: 0.09
@@ -1879,8 +1877,8 @@ Cohesion: 0.04
 Nodes (36): FrameContext, Skeleton3D, ndarray, Skeleton3D, ndarray, Skeleton3D, _extra_markdown(), _fmt() (+28 more)
 
 ### Community 383 - "Community 383"
-Cohesion: 0.06
-Nodes (74): Base, _aggregate_effectiveness(), build_baseline_summary(), _compute_fault_trend(), _extract_fault_series(), get_cue_effectiveness(), get_fault_progress(), get_multi_session_fault_trends() (+66 more)
+Cohesion: 0.08
+Nodes (61): Base, _aggregate_effectiveness(), build_baseline_summary(), _compute_fault_trend(), _extract_fault_series(), get_cue_effectiveness(), get_fault_progress(), get_multi_session_fault_trends() (+53 more)
 
 ### Community 384 - "Community 384"
 Cohesion: 0.13
@@ -1915,8 +1913,8 @@ Cohesion: 0.08
 Nodes (14): Generate a set report PNG from snapshotted data., Generate all deferred set reports (called at session end)., Stop the queue processor and generate any pending set reports., generate_set_report(), Set Report Generator — Timeseries plot with labeled cue annotations.  Generates, Generate a timeseries plot for a completed set.      Args:         set_number: W, Any, Test that resting flag suppresses rep/fault processing. (+6 more)
 
 ### Community 392 - "Community 392"
-Cohesion: 0.07
-Nodes (33): Builds choreographed-demo data (corrected pose stack + cue metadata) from a diag, summarize_cue_magnitude(), _clamp(), delta_brace_trunk(), delta_center_weight(), delta_increase_depth(), delta_knees_out(), delta_widen_foot_angle() (+25 more)
+Cohesion: 0.05
+Nodes (48): Builds choreographed-demo data (corrected pose stack + cue metadata) from a diag, ankle_df_limitation(), _clamp(), expected_knee_valgus_baseline(), Pure evidence-test functions for the diagnosis hypothesis engine.  Each test fun, How restricted the ankle looks, 0 (unrestricted) to 1 (clearly limited)., test_bracing_failure(), test_depth_unfamiliarity() (+40 more)
 
 ### Community 393 - "Community 393"
 Cohesion: 0.15
@@ -1955,8 +1953,8 @@ Cohesion: 0.10
 Nodes (24): draw_angles(), draw_dotted_line(), draw_joint_angle(), draw_segment_angle(), get_personIDs_in_detection_order(), get_personIDs_on_click(), load_pose_file(), Set up video capture with OpenCV.      INPUTS:     - video_file_path: Path. The (+16 more)
 
 ### Community 403 - "Community 403"
-Cohesion: 0.11
-Nodes (25): build_demo_data(), build_pose_stack(), _lateral_hip_shift(), order_demo_causes(), _prepare_observed_kpts(), Prefix-corrected poses: stack[k] applies the first k causes to the observed pose, Hip-midpoint displacement projected on the L->R hip axis, in meters., Ground and center — match visualize_video_squats preprocessing. (+17 more)
+Cohesion: 0.08
+Nodes (28): build_demo_data(), build_pose_stack(), _lateral_hip_shift(), order_demo_causes(), _prepare_observed_kpts(), Prefix-corrected poses: stack[k] applies the first k causes to the observed pose, Hip-midpoint displacement projected on the L->R hip axis, in meters., Ground and center — match visualize_video_squats preprocessing. (+20 more)
 
 ### Community 404 - "Community 404"
 Cohesion: 0.13
@@ -2003,8 +2001,8 @@ Cohesion: 0.20
 Nodes (9): ndarray, _dot(), _floor_geometry(), FootContactModel, World-frame foot contact model: planted-foot anchors, heel rise, and floor-refer, Session-scoped per-foot contact model over world-frame keypoints (see module doc, Stabilize foot keypoints (conf > 0 only) and summarize contact; all other keypoi, _scaled_difference() (+1 more)
 
 ### Community 416 - "Community 416"
-Cohesion: 0.08
-Nodes (21): _bench_backend(), Benchmark: MediaPipePoseEstimator + RTMPoseEstimator., run(), ndarray, generate_synthetic_image(), load_video_frames(), Generate a simple synthetic BGR image for pose estimation benchmarks., Load frames from data/squats.mov, falling back to synthetic images. (+13 more)
+Cohesion: 0.10
+Nodes (13): get_global_profiler(), LayerTimer, LayerTimerContext, Performance Profiling Utilities for Biomechanics Pipeline  Provides decorators a, Record a timing measurement for a layer.          Args:             layer_name:, Decorator that records execution time of a function.      Usage:         @timed, Reset timing data.          Args:             layer_name: If provided, reset onl, Context manager for timing a layer within PipelineProfiler. (+5 more)
 
 ### Community 417 - "Community 417"
 Cohesion: 0.12
@@ -2027,8 +2025,8 @@ Cohesion: 0.11
 Nodes (14): AffectConfig, load_affect_config(), Load config/affect.yaml (or defaults when absent) and apply AFFECT_* env overrid, ndarray, Path, Path, Tests for affect config loading and env overrides., TestDefaults (+6 more)
 
 ### Community 422 - "Community 422"
-Cohesion: 0.03
-Nodes (80): apply_calibration_to_rule_engine(), build_calibration_profile(), CalibrationTracker, extract_thresholds_from_rule_engine(), _get_default_config_path(), load_pipeline_config(), Get the default configuration file path., Load pipeline configuration from a YAML file.      Args:         path: Path to c (+72 more)
+Cohesion: 0.02
+Nodes (126): apply_calibration_to_rule_engine(), build_calibration_profile(), CalibrationTracker, extract_thresholds_from_rule_engine(), _get_default_config_path(), load_pipeline_config(), Get the default configuration file path., Load pipeline configuration from a YAML file.      Args:         path: Path to c (+118 more)
 
 ### Community 423 - "Community 423"
 Cohesion: 0.05
@@ -2111,8 +2109,8 @@ Cohesion: 0.12
 Nodes (13): Handle 3-12 week programs with interpolation from closest template., Apply template directly but with smart deload override rules., Interpolate phases from closest template to target duration., Apply smart deload override rules.          Rules:         - Never deload in fin, get_closest_template(), get_template(), PhaseBlock, PhaseTemplate (+5 more)
 
 ### Community 443 - "Community 443"
-Cohesion: 0.05
-Nodes (24): CalibrationAgent, CalibrationAgent - Handles the calibration phase before a workout begins., Runs the calibration phase, then hands off to WorkoutAgent., RecommendationRecord, Call this once the user has provided sets, reps, weight, and rest time., Call this once the user has provided sets, reps, weight, and rest time., Call this once the user has provided sets, reps, weight, and rest time., Build collection instructions that only ask for parameters the user has not give (+16 more)
+Cohesion: 0.04
+Nodes (29): CalibrationAgent, CalibrationAgent - Handles the calibration phase before a workout begins., Runs the calibration phase, then hands off to WorkoutAgent., RecommendationRecord, build_task_instructions(), CollectExerciseInfoTask - Collects quick-exercise parameters then hands off to c, Call this once the user has provided sets, reps, weight, and rest time., Call this once the user has provided sets, reps, weight, and rest time. (+21 more)
 
 ### Community 444 - "Community 444"
 Cohesion: 0.19
@@ -2131,20 +2129,20 @@ Cohesion: 0.02
 Nodes (144): _apply_env_overrides(), AudioConfig, BaselineConfig, EngineConfig, _env_flag(), RecorderConfig, StateConfig, StyleConfig (+136 more)
 
 ### Community 448 - "Community 448"
-Cohesion: 0.42
-Nodes (11): Basketball-Specific Training (vertical/power), Left Ankle Injury Accommodation, Velocity-Based Training (VBT), Program 29: Advanced Strength Peak Training (Ambaka), Program 30: Advanced Strength & Athleticism for Basketball (Ambaka), Program 31: Basketball-Built Barbell Strength 3-Day (Ambaka), Program 32: Sky-High Barbell Power 8-Week VBT (Ambaka), Program 34: Court-Ready Barbell Strength 3-Day 30-Min (Ambaka) (+3 more)
+Cohesion: 0.22
+Nodes (19): Basketball-Specific Training (vertical/power), Left Ankle Injury Accommodation, Olympic Lifts (Clean/Snatch/Jerk), Power Programming Goal, Sport-Specific Goal Mapping, Velocity-Based Training (VBT), Clean and Jerk / Push Jerk, Clean Pull (+11 more)
 
 ### Community 449 - "Community 449"
-Cohesion: 0.04
-Nodes (60): CueCache, Manages audio cue lookups with rate-limiting.      Prepares exercise-specific cu, Send frame data every N frames. Skips if no joint angles., Send rep data and legacy rep_count.          Note: rep count and positive reinfo, Send per-rep rolling-window diagnosis during assessment mode., Send structured diagnosis and scoring results for a completed set., Compute set summary stats and send., Every IPC message passes here: NaN/inf (missing angles) become None. (+52 more)
+Cohesion: 0.08
+Nodes (37): CueCache, Manages audio cue lookups with rate-limiting.      Prepares exercise-specific cu, Send frame data every N frames. Skips if no joint angles., Send rep data and legacy rep_count.          Note: rep count and positive reinfo, Send per-rep rolling-window diagnosis during assessment mode., Send structured diagnosis and scoring results for a completed set., Compute set summary stats and send., Every IPC message passes here: NaN/inf (missing angles) become None. (+29 more)
 
 ### Community 450 - "Community 450"
 Cohesion: 0.22
 Nodes (13): CategoryResult, check_exercise_quality(), check_prescription_quality(), check_structural(), check_timing(), check_variety(), check_volume(), CheckResult (+5 more)
 
 ### Community 451 - "Community 451"
-Cohesion: 0.09
-Nodes (14): _is_enabled(), SessionProfiler — thread-safe event and resource collection for live sessions., Start a new conversation turn., Record when TTS audio is first scheduled (for TTFA computation)., Flush current turn to the turns list., Accumulates metrics for a single conversation turn., Reset all state for a fresh session., _system_info() (+6 more)
+Cohesion: 0.07
+Nodes (23): _is_enabled(), SessionProfiler — thread-safe event and resource collection for live sessions., Start a new conversation turn., Record when TTS audio is first scheduled (for TTFA computation)., Flush current turn to the turns list., Accumulates metrics for a single conversation turn., Reset all state for a fresh session., _system_info() (+15 more)
 
 ### Community 452 - "Community 452"
 Cohesion: 0.22
@@ -2183,8 +2181,8 @@ Cohesion: 0.19
 Nodes (17): HipPositionCounterConfig, Hip-position-based rep counter thresholds.      Uses the same signal as the post, State machine states., SignalRepState, SignalRepCounter, _assert_timing(), _hip_signal_cm(), Tests for the signal-based rep counter on synthetic no-pause squat reps.  The si (+9 more)
 
 ### Community 461 - "Community 461"
-Cohesion: 0.09
-Nodes (23): build_demo_data(), build_pose_stack(), _lateral_hip_shift(), order_demo_causes(), _prepare_observed_kpts(), summarize_cue_magnitude(), _extract_athlete_params(), main() (+15 more)
+Cohesion: 0.11
+Nodes (20): _build_html(), _compare_rep(), _load_session(), main(), _print_comparison(), _resolve_last_session(), build_demo_data(), build_pose_stack() (+12 more)
 
 ### Community 462 - "Community 462"
 Cohesion: 0.12
@@ -2203,8 +2201,8 @@ Cohesion: 0.33
 Nodes (14): ndarray, best_subset(), dlt(), dlt_depth_irls(), dlt_normalized(), look_at_camera(), lr_perm(), project() (+6 more)
 
 ### Community 466 - "4. Analytical Inverse Kinematics"
-Cohesion: 0.22
-Nodes (9): CNS Fatigue Management (axial/grip), 8-Factor Exercise Scoring Function, Exercise Rotation Group Freshness, Superset Builder (antagonist pairing), Rationale: Compounds vs isolations need different prescriptions, V5 Phase 2: Scoring + Utilities + Prompts, prompts.py module, scoring.py module (+1 more)
+Cohesion: 0.14
+Nodes (15): CNS Fatigue Management (axial/grip), Deterministic Foundation + LLM Intelligence Layer, Equipment Tiers (Tier 1/2/3), 8-Factor Exercise Scoring Function, Exercise Rotation Group Freshness, Superset Builder (antagonist pairing), V4 Critical Failures (rationale for V5), Rationale: Compounds vs isolations need different prescriptions (+7 more)
 
 ### Community 467 - "test_demo_renderer_live.py"
 Cohesion: 0.28
@@ -2267,8 +2265,8 @@ Cohesion: 0.10
 Nodes (21): Config, EmailStartRequest, login(), me(), Auth Router Login, registration, and current-user endpoints., Return the profile of the currently authenticated user., OAuth2-compatible login.      The ``username`` field of the form is treated as t, RegisterRequest (+13 more)
 
 ### Community 482 - "Community 482"
-Cohesion: 0.08
-Nodes (28): main(), parse_args(), BarbellTrackingConfig, Real-time barbell detection & tracking configuration.      Uses a YOLO11n-pose m, download_model(), main(), Download and extract the specified RTMPose ONNX model., build_review_page() (+20 more)
+Cohesion: 0.06
+Nodes (36): main(), parse_args(), BarbellTrackingConfig, Real-time barbell detection & tracking configuration.      Uses a YOLO11n-pose m, download_model(), main(), Download and extract the specified RTMPose ONNX model., build_review_page() (+28 more)
 
 ### Community 483 - "Community 483"
 Cohesion: 0.31
@@ -2340,7 +2338,7 @@ Nodes (10): ndarray, _combine_axis_scores(), get_simcc_maximum(), get_simcc_maxi
 
 ### Community 500 - "Community 500"
 Cohesion: 0.17
-Nodes (13): 3-Phase Greedy Exercise Selection Algorithm, MEV / MAV / MRV Volume Landmarks, Rationale: Exercise selection is scoring/CSP, not reasoning, Rationale: Weekly volume accounting prevents MEV violations, V5 Program Generator Implementation Prompts, Layer 3: Volume Engine, Layer 4: Program Builder (Stage A), V5 Phase 1: Schemas + Data Foundations (+5 more)
+Nodes (12): 3-Phase Greedy Exercise Selection Algorithm, MEV / MAV / MRV Volume Landmarks, Rationale: Exercise selection is scoring/CSP, not reasoning, Rationale: Weekly volume accounting prevents MEV violations, Layer 3: Volume Engine, Layer 4: Program Builder (Stage A), V5 Phase 1: Schemas + Data Foundations, V5 Phase 3: Volume Engine + Program Builder (+4 more)
 
 ### Community 501 - "Community 501"
 Cohesion: 0.17
@@ -2455,8 +2453,8 @@ Cohesion: 0.20
 Nodes (10): 1. INJURY REHABILITATION AND PREVENTION, Ankle Sprain Rehabilitation, Elbow Tendinopathy Protocols, Hip Impingement Considerations, Knee Injury Rehabilitation, Lower Back Pain Management, Prehabilitation Protocols, Red Flags Requiring Medical Referral (+2 more)
 
 ### Community 531 - "Community 531"
-Cohesion: 0.20
-Nodes (18): generate_program_v5_sync(), quick_test(), Synchronous version for testing (no LLM calls by default).      Wraps the async, Quick test of the V5 pipeline without LLM calls.      Run with: python -m progra, check(), 22-year-old advanced male powerlifter (off-season), 35-year-old intermediate female basketball player (in-season), 65-year-old beginner (general fitness) (+10 more)
+Cohesion: 0.11
+Nodes (19): Database utilities for user biomechanical calibration data., Load calibration thresholds from DB.      Returns the thresholds dict if calibra, Load full calibration data (peaks + thresholds) from DB.      Returns dict with, get_user_calibration(), get_user_calibration_full(), Database utilities for user biomechanical calibration data., Load calibration thresholds from DB.      Returns the thresholds dict if calibra, Load full calibration data (peaks + thresholds) from DB.      Returns dict with (+11 more)
 
 ### Community 532 - "Community 532"
 Cohesion: 0.19
@@ -2527,8 +2525,8 @@ Cohesion: 0.20
 Nodes (9): Per-Rep Breakdown, Rep 1, Rep 2, Rep 3, Rep 4, Rep 5, Rep Details, Set 1 Analysis (+1 more)
 
 ### Community 549 - "SQLAlchemy 2.0+ ORM"
-Cohesion: 0.06
-Nodes (40): Save state to file using atomic write (write to temp, then rename).         This, Switch to a new mode          Args:             new_mode: Mode to switch to (mus, create_program(), manage_schedule(), shutdown(), start_quick_exercise(), start_workout(), update_profile() (+32 more)
+Cohesion: 0.08
+Nodes (28): Save state to file using atomic write (write to temp, then rename).         This, Switch to a new mode          Args:             new_mode: Mode to switch to (mus, create_program(), manage_schedule(), shutdown(), start_quick_exercise(), start_workout(), update_profile() (+20 more)
 
 ### Community 550 - "Portable DB Module README"
 Cohesion: 0.20
@@ -2815,8 +2813,8 @@ Cohesion: 0.29
 Nodes (6): decode_simcc(), Decode SimCC logits (B, K, bins) of crops taken at boxes (B, 4) to full-frame, _expected_frame_coords(), _peaked_logits(), TestDecodeSimcc, ndarray
 
 ### Community 622 - "Community 622"
-Cohesion: 0.20
-Nodes (7): CompactionService, Run compaction on a timer. Never raises — logs all errors., Execute one pipeline cycle: age out HOT, cascade overflows., Call the LLM to compress content. Returns compressed text or None on failure., Compress cold context and flush to memory.md., Return number of events in the pending buffer., Pipeline-style rolling context compaction via GPT-5.4-mini.      Events accumula
+Cohesion: 0.13
+Nodes (12): CompactionService, _estimate_tokens(), _format_events(), Compaction Service — Pipeline-Style Rolling Context Summarization  Events flow t, Execute one pipeline cycle: age out HOT, cascade overflows., Call the LLM to compress content. Returns compressed text or None on failure., Compress cold context and flush to memory.md., Write any un-flushed HOT/WARM/COLD context to memory.md on stop.          Compre (+4 more)
 
 ### Community 623 - "Community 623"
 Cohesion: 0.33
@@ -2899,8 +2897,8 @@ Cohesion: 0.33
 Nodes (6): convert_to_c3d(), create_c3d_file(), extract_trc_data(), Extract marker names and coordinates from a trc file.      INPUTS:     - trc_pat, Create a c3d file from the data extracted from a trc file.      INPUTS:     - c3, Make Visual3D compatible c3d files from a trc path      INPUT:     - trc_path: P
 
 ### Community 644 - "Community 644"
-Cohesion: 0.08
-Nodes (23): calculate_cost(), calculate_rag_retrieval_cost(), Pricing Configuration for All AI Services Centralized pricing data for cost calc, Calculate cost in USD for an LLM call      Args:         input_tokens: Number of, Calculate cost for RAG retrieval (embedding + reranking)      Args:         quer, LogEvent, Session Logger Tracks all LLM calls, function calls, and conversation during a s, Log a function tool call (+15 more)
+Cohesion: 0.07
+Nodes (24): calculate_cost(), calculate_rag_retrieval_cost(), Pricing Configuration for All AI Services Centralized pricing data for cost calc, Calculate cost in USD for an LLM call      Args:         input_tokens: Number of, Calculate cost for RAG retrieval (embedding + reranking)      Args:         quer, LogEvent, Session Logger Tracks all LLM calls, function calls, and conversation during a s, Log a function tool call (+16 more)
 
 ### Community 645 - "Community 645"
 Cohesion: 0.39
@@ -3047,8 +3045,8 @@ Cohesion: 0.50
 Nodes (4): Coaching Orchestrator, Coaching System, Pre-Cached TTS, Teaching Agent
 
 ### Community 687 - "Community 687"
-Cohesion: 0.05
-Nodes (29): _check_python_environment(), _close_tee(), _detect_avfoundation_devices(), main(), Nowva FastAPI Backend Main application entry point for program generation API, Run on application shutdown, shutdown_event(), _build_html() (+21 more)
+Cohesion: 0.19
+Nodes (19): _build_background(), _build_demo(), _current_pts(), _draw_cue_label(), _draw_ground_grid(), _draw_pill(), _draw_shadow(), _draw_skeleton() (+11 more)
 
 ### Community 689 - "Community 689"
 Cohesion: 0.50
@@ -3123,8 +3121,8 @@ Cohesion: 0.36
 Nodes (3): FrameContext, Skeleton3D, ProposedChain
 
 ### Community 826 - "Community 826"
-Cohesion: 0.25
-Nodes (4): Unregister event listeners, cancel background task, write final metadata., Write any un-flushed HOT/WARM/COLD context to memory.md on stop.          Compre, Return compaction stats for monitoring and debug logging., Update session_meta.json with final stats on stop().
+Cohesion: 0.33
+Nodes (3): Unregister event listeners, cancel background task, write final metadata., Return compaction stats for monitoring and debug logging., Update session_meta.json with final stats on stop().
 
 ### Community 827 - "Community 827"
 Cohesion: 0.40
@@ -3135,20 +3133,20 @@ Cohesion: 0.29
 Nodes (4): ndarray, Skeleton3D, InnovationGate, Prototype causal outlier gate for triangulated keypoints: alpha-beta prediction,
 
 ### Community 829 - "Community 829"
-Cohesion: 0.18
-Nodes (8): drop_all_tables(), init_db(), Initialize the database by creating all tables if they don't already exist., WARNING: This will delete all tables and data!     Only use this in development/, is_sufficient_rest_between_workouts(), Determine if two workouts have sufficient muscle group separation.     Returns T, main(), Portable Database Module for Fitness/Workout Tracking This module can be importe
+Cohesion: 0.27
+Nodes (6): _build_loader(), _lr_lambda(), Trainer, DataLoader, ExperimentConfig, Path
 
 ### Community 830 - "Community 830"
-Cohesion: 0.25
-Nodes (5): _estimate_tokens(), _format_events(), Compaction Service — Pipeline-Style Rolling Context Summarization  Events flow t, Return the current summary (cold + warm + hot).          HOT tier is formatted d, Return formatted HOT/WARM/COLD tier contents for debug display.
+Cohesion: 0.24
+Nodes (11): apply_description_change(), apply_title_change(), detect_simple_update(), handle_simple_update(), Simple Program Updates Handles basic field updates without requiring LLM calls f, Main entry point for simple updates.      Returns:         (success, message) wh, Detect if the change request is a simple safe update (title/description only)., Apply a simple title change.      Returns:         True if successful, False oth (+3 more)
 
 ### Community 831 - "Community 831"
-Cohesion: 0.25
-Nodes (3): Register event listeners on the session and start the background compaction loop, Buffer a conversation turn (user or assistant speech)., Buffer tool call + result pairs.
+Cohesion: 0.20
+Nodes (4): Register event listeners on the session and start the background compaction loop, Buffer a conversation turn (user or assistant speech)., Buffer tool call + result pairs., Run compaction on a timer. Never raises — logs all errors.
 
 ### Community 833 - "Community 833"
-Cohesion: 0.32
-Nodes (8): Deterministic Foundation + LLM Intelligence Layer, Equipment Tiers (Tier 1/2/3), Power Programming Goal, Sport-Specific Goal Mapping, V4 Critical Failures (rationale for V5), Program 23: Explosive Power for Olympic Lifting (Baka), Rationale: Why V5 Exists (8 V4 failures), V5 Program Generator Spec FINAL
+Cohesion: 0.33
+Nodes (3): get_display_sink(), LiveStreamSink, Streams composed display frames to the Nowva display page over WebSocket.  Repla
 
 ### Community 834 - "Community 834"
 Cohesion: 0.44
@@ -3159,8 +3157,8 @@ Cohesion: 0.25
 Nodes (5): Data for a single completed rep., Total rep duration in seconds., Return True if rep had no significant faults., Ratio of descent to ascent time., RepData
 
 ### Community 837 - "Community 837"
-Cohesion: 0.32
-Nodes (8): Glute-Targeted Hypertrophy Focus, Periodization Phases (Build/Taper/Peak/Deload), Back Squat, Good Mornings, Barbell Hip Thrust, Romanian Deadlift (RDL), Glute Gains Before Christmas (Program 27), Program 27 PDF (cba864cb)
+Cohesion: 0.40
+Nodes (5): generate_program_markdown(), _group_similar_sets(), Markdown Generator Service Generates formatted markdown files for workout progra, Generate a formatted markdown file for a workout program.      Args:         pro, Group consecutive sets with identical parameters.      Returns:         List of
 
 ### Community 838 - "Community 838"
 Cohesion: 0.43
@@ -3176,7 +3174,7 @@ Nodes (3): style_for(), AthleteState, TestPolicy
 
 ### Community 842 - "Community 842"
 Cohesion: 0.07
-Nodes (125): BaseNovaAgent, DateParseError, Raised when date parsing fails, JobContext, JobProcess, MainMenuAgent - Primary interaction hub with schedule management, workout start,, Call this when the user wants to do a single exercise without a scheduled workou, Call this when the user wants to do a single exercise without a scheduled workou (+117 more)
+Nodes (123): BaseNovaAgent, DateParseError, Raised when date parsing fails, JobContext, JobProcess, MainMenuAgent - Primary interaction hub with schedule management, workout start,, Call this when the user wants to do a single exercise without a scheduled workou, Call this when the user wants to do a single exercise without a scheduled workou (+115 more)
 
 ### Community 843 - "Community 843"
 Cohesion: 0.29
@@ -3234,10 +3232,6 @@ Nodes (3): TestKeypointAveraging, average_detected_keypoints(), Average (F, 17, 
 Cohesion: 0.33
 Nodes (3): MockChoice, MockResponse, MockUsage
 
-### Community 864 - "Community 864"
-Cohesion: 0.53
-Nodes (5): Fixtures for the training package: a tiny random WavLM saved locally so nothing, synthetic_manifest(), tiny_wavlm_dir(), write_wav(), Path
-
 ### Community 865 - "Community 865"
 Cohesion: 0.50
 Nodes (4): Duplicate frame delivery: get_synced_frames returns the latest primary frame eve, mode: 'unique' (process each camera frame once, at camera ts), 'dup_tri' (identi, simulate(), true_knee_at()
@@ -3265,10 +3259,6 @@ Nodes (4): ndarray, main(), _make_canvas(), Run the production RTMPose-m halpe26
 ### Community 874 - "Community 874"
 Cohesion: 0.40
 Nodes (4): format_program_output(), Run the V5 pipeline with LLM., Format the program output for display., run_pipeline()
-
-### Community 879 - "Community 879"
-Cohesion: 0.67
-Nodes (3): Nova Agent Main Menu Mode (session entry state), Session Memory Tracking Pattern (user_id/started/mode), User 22d3498d Nova Session Memory Cluster (6 sessions)
 
 ### Community 881 - "Community 881"
 Cohesion: 0.50
