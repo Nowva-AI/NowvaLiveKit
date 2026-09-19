@@ -11,7 +11,7 @@ from livekit.agents.llm import function_tool
 from auth.user_management import create_user_account
 from agent.agents.prompts import BASE_PROMPT, ONBOARDING_TASK_INSTRUCTIONS
 from agent.agents.shared.base_agent import BaseNovaAgent
-from agent.services.tts_normalizer import normalize_stream
+from agent.agents.shared.affect_mixin import AffectNodesMixin
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class OnboardingAgent(BaseNovaAgent):
         self.session.update_agent(MainMenuAgent(state=self.state, userdata=self.userdata))
 
 
-class CollectOnboardingDataTask(AgentTask):
+class CollectOnboardingDataTask(AffectNodesMixin, AgentTask):
     """Collects first name and email with confirmation, then hands off to main menu."""
 
     def __init__(self, state, userdata, chat_ctx=None) -> None:
@@ -45,10 +45,6 @@ class CollectOnboardingDataTask(AgentTask):
         )
         self.state = state
         self.userdata = userdata
-
-    def tts_node(self, text, model_settings):
-        """Strip written-text artifacts (emoji, markdown, symbols) before TTS."""
-        return super().tts_node(normalize_stream(text), model_settings)
 
     async def on_enter(self):
         await self.session.generate_reply(

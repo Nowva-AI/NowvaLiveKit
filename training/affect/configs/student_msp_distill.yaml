@@ -1,0 +1,63 @@
+# V2 student: WavLM-Base+ distilled from the teacher ensemble (soft targets cached from the
+# 3-seed WavLM-Large + 3-seed Whisper-Large-v3 teachers over MSP-Podcast train + NaturalVoices
+# subset + Nowva recordings). Deploys as models/affect/<version>.
+name: v2-wavlm-base-plus-student
+seed: 0
+model:
+  encoder:
+    name: wavlm
+    pretrained: microsoft/wavlm-base-plus
+    freeze_feature_extractor: true
+    freeze_bottom_layers: 0
+    gradient_checkpointing: true
+  pooling:
+    layer_select: weighted
+    pooling: mean_std
+  categorical: true
+  avd: true
+  head_hidden: 256
+  dropout: 0.15
+data:
+  train:
+    - {manifest: data/affect/manifests/msp_podcast.jsonl, weight: 1.0}
+    - {manifest: data/affect/manifests/naturalvoices.jsonl, weight: 0.5}
+    - {manifest: data/affect/manifests/nowva_recordings.jsonl, weight: 3.0}
+  dev:
+    - {manifest: data/affect/manifests/msp_podcast.jsonl, weight: 1.0}
+  test:
+    - {manifest: data/affect/manifests/msp_podcast.jsonl, weight: 1.0}
+  sample_rate: 16000
+  crop_seconds: 8.0
+  min_seconds: 1.0
+  augment:
+    enabled: true
+    apm_prob: 0.6
+    rir_dir: data/rirs/16khz
+    rir_prob: 0.3
+    noise_dir: data/backgrounds/noise
+    noise_prob: 0.3
+  num_workers: 8
+loss:
+  w_cat: 1.0
+  w_avd: 1.0
+  class_weighting: none
+  mixup_prob: 0.3
+  mixup_layers: [2, 9]
+optim:
+  encoder_lr: 5.0e-5
+  head_lr: 1.0e-3
+  warmup_steps: 800
+  epochs_stage1: 20
+  epochs_stage2: 0
+  batch_size: 24
+  grad_accum: 2
+  bf16: true
+  early_stop_patience: 4
+  select_metric: dev/avg_ccc
+distill:
+  teacher_cache: data/affect/teacher_cache/v2_ensemble
+  w_ccc: 1.0
+  w_quadrant: 0.5
+  w_cat_kl: 1.0
+output_dir: experiments
+notes: "Swap rule: promote when avg CCC is within 0.03 of the ensemble and p95 latency is >= 1.5x better."

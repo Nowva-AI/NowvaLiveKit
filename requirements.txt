@@ -45,6 +45,7 @@ onnxruntime>=1.17.0                    # RTMPose ONNX inference
 mediapipe>=0.10.9                      # MediaPipe pose fallback
 ultralytics>=8.0.0                     # YOLO11n-pose barbell detector
 pyyaml>=6.0.0                          # Config file parsing
+soxr>=0.5.0                            # Affect runtime resampling (24k -> 16k)
 
 # Numerical Computing
 numpy>=1.24.0

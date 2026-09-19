@@ -1,0 +1,65 @@
+# V2 teacher A: WavLM-Large, partial fine-tune (CNN + bottom 9 of 24 layers frozen, top 15 trained),
+# learnable weighted layer sum + mean⊕std pooling, KL soft-label categorical head + 1-CCC A/D/V heads,
+# Manifold MixUp p=0.3, two-stage schedule (weighted 15 epochs, class-balanced 5 epochs).
+# Run 3 seeds: python -m training.affect.cli train training/affect/configs/teacher_wavlm_large_pft.yaml --seed {0,1,2}
+name: teacher-wavlm-large-pft
+seed: 0
+model:
+  encoder:
+    name: wavlm
+    pretrained: microsoft/wavlm-large
+    freeze_feature_extractor: true
+    freeze_bottom_layers: 9
+    gradient_checkpointing: true
+  pooling:
+    layer_select: weighted
+    pooling: mean_std        # try attentive_stats as an A/B (validate; evidence conflicts)
+  class_labels: [angry, sad, happy, surprise, fear, disgust, contempt, neutral]
+  categorical: true
+  avd: true
+  head_hidden: 256
+  dropout: 0.2
+data:
+  train:
+    - {manifest: data/affect/manifests/msp_podcast.jsonl, weight: 1.0}
+  dev:
+    - {manifest: data/affect/manifests/msp_podcast.jsonl, weight: 1.0}
+  test:
+    - {manifest: data/affect/manifests/msp_podcast.jsonl, weight: 1.0}
+  sample_rate: 16000
+  crop_seconds: 12.0
+  min_seconds: 1.0
+  keep_other_class: true      # keeping O/X segments helped attributes (+0.026 avg CCC)
+  augment:
+    enabled: true
+    apm_prob: 0.5
+    rir_dir: data/rirs/16khz
+    rir_prob: 0.25
+    noise_dir: data/backgrounds/noise
+    noise_prob: 0.25
+    speed_perturb: [0.9, 1.0, 1.1]
+    speed_prob: 0.2
+  num_workers: 8
+loss:
+  w_cat: 1.5
+  w_avd: 0.4
+  class_weighting: inverse_freq
+  focal_gamma: 0.0
+  mixup_prob: 0.3
+  mixup_alpha: 0.4
+  mixup_layers: [9, 20]
+  label_smoothing: 0.0        # hurt on MSP-Podcast; keep at 0
+optim:
+  encoder_lr: 1.0e-4          # bottom frozen → 1e-4; use 1e-5 if fine-tuning all layers
+  head_lr: 1.0e-3
+  weight_decay: 0.01
+  warmup_steps: 1000
+  epochs_stage1: 15
+  epochs_stage2: 5
+  batch_size: 8
+  grad_accum: 4               # effective 32
+  bf16: true
+  early_stop_patience: 4
+  select_metric: dev/avg_ccc  # switch to dev/macro_f1 for the categorical-selected variant
+output_dir: experiments
+notes: "V2 teacher A. ~15 GPU-h on a 24 GB card."

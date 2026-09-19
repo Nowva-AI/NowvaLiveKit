@@ -16,6 +16,7 @@ build/
 pip-log.txt
 pip-delete-this-directory.txt
 
+
 # Node.js / Frontend
 node_modules/
 dist/
@@ -133,12 +134,19 @@ models/*.h5
 models/*.pkl
 models/*.onnx
 models/*.json
+# Affect models: exported ONNX graphs, manifests, TensorRT engines, probes
+models/affect/
+*.onnx.data
+*.engine
+*.plan
+*.safetensors
 checkpoints/
 *.ckpt
 src/biomechanics/pose/models/
 
 # Training data
 data/
+data/affect/
 
 # User data (ensure no sensitive data is committed)
 user_data/
@@ -196,3 +204,10 @@ Nowva_Full_Rack.gltf
 rack-video/out/
 *.glb
 *.webm
+nova-penthouse/*
+
+# Graphify: the graph + report are tracked; the parse cache, dated snapshots,
+# and local interpreter path are machine-specific and regenerable
+graphify-out/cache/
+graphify-out/20*/
+graphify-out/.graphify_python

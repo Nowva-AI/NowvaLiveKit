@@ -42,6 +42,9 @@ class UserData:
     # Compaction service (live object reference, set by voice_agent entrypoint)
     compaction_service: Any = None
 
+    # AffectService (speech emotion / effort perception, set by voice_agent entrypoint)
+    affect_service: Any = None
+
     # Context summarization state (used by ProgramCreationAgent)
     current_token_count: int = 0
     is_summarizing: bool = False

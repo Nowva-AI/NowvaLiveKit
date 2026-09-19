@@ -1655,6 +1655,26 @@
     refreshWidget();
   }
 
+  // Speech affect / effort perception: a small pill in the corner, only while confident.
+  let affectPill = null;
+  function onAffect(msg) {
+    if (!affectPill) {
+      affectPill = document.createElement("div");
+      affectPill.id = "affect-pill";
+      affectPill.style.cssText =
+        "position:fixed;left:18px;bottom:18px;z-index:40;padding:6px 12px;border-radius:999px;" +
+        "font:600 12px/1 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;" +
+        "color:#e8f0ef;background:rgba(20,32,31,.72);border:1px solid rgba(95,208,200,.35);" +
+        "backdrop-filter:blur(6px);transition:opacity .3s;";
+      document.body.appendChild(affectPill);
+    }
+    const show = !!msg.confident && (msg.effort !== "fresh" || msg.affect !== "flat");
+    affectPill.textContent = `${(msg.effort || "").replace("_", " ")} · ${msg.affect || ""}`;
+    affectPill.dataset.effort = msg.effort || "";
+    affectPill.dataset.affect = msg.affect || "";
+    affectPill.style.opacity = show ? "1" : "0";
+  }
+
   function setWake(event) {
     if (event === "detected") {
       body.dataset.wake = "detected";
@@ -1738,6 +1758,9 @@
         break;
       case "cue":
         onCue(msg);
+        break;
+      case "affect":
+        onAffect(msg);
         break;
       case "set_summary":
         if (msg.set_number != null) {

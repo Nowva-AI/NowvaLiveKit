@@ -116,6 +116,7 @@ class CoachingOrchestrator:
         advance_set_fn: Optional[Callable] = None,
         on_workout_complete_fn: Optional[Callable] = None,
         prune_context_fn: Optional[Callable] = None,
+        affect_service: Any = None,
     ):
         self._play_cached = play_cached_audio_fn
         self._generate_llm = generate_llm_reply_fn
@@ -123,6 +124,10 @@ class CoachingOrchestrator:
         self._advance_set = advance_set_fn
         self._on_workout_complete = on_workout_complete_fn
         self._prune_context = prune_context_fn
+        # Speech affect / effort perception (optional). Read at dispatch time so it is fresh.
+        self._affect_service = affect_service
+        self._athlete_state: Optional[Dict[str, Any]] = None
+        self._best_ascent_time_s: Optional[float] = None
 
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._processing: bool = False
@@ -258,6 +263,13 @@ class CoachingOrchestrator:
         self._set_angle_samples = []
         self._set_rep_events = []
         self._set_start_wall_time = time.time()
+        # Effort tracking restarts with every set
+        self._best_ascent_time_s = None
+        if self._affect_service is not None:
+            try:
+                self._affect_service.on_set_reset()
+            except Exception as e:
+                logger.debug(f"[ORCHESTRATOR] affect on_set_reset failed: {e}")
 
     def on_rest_complete(self):
         """Called when rest timer expires — resume rep/fault processing."""
@@ -325,6 +337,34 @@ class CoachingOrchestrator:
             f"confidence={diagnosis.get('confidence', 0):.2f} "
             f"score={scoring.get('mean_score', 0):.3f}"
         )
+
+    def set_athlete_state(self, state: Dict[str, Any]) -> None:
+        """Store an athlete state dict (effort, affect, confident) pushed by the affect service."""
+        self._athlete_state = dict(state)
+
+    def _current_athlete_state(self) -> Dict[str, Any]:
+        """Freshest athlete state: the live affect service if attached, else the last pushed dict."""
+        if self._affect_service is not None:
+            try:
+                state = self._affect_service.last_state
+                return {"effort": state.effort, "affect": state.affect, "confident": bool(state.confident)}
+            except Exception as e:
+                logger.debug(f"[ORCHESTRATOR] affect state read failed: {e}")
+        return dict(self._athlete_state or {})
+
+    def _athlete_state_line(self) -> Optional[str]:
+        """One context line for the LLM when the athlete audibly sounds strained, frustrated or near their limit."""
+        state = self._current_athlete_state()
+        if not state.get("confident"):
+            return None
+        affect = state.get("affect", "flat")
+        effort = state.get("effort", "fresh")
+        if affect in ("strained", "frustrated") or effort == "near_limit":
+            return (
+                f"ATHLETE STATE: sounds {affect}, effort {effort.replace('_', ' ')} — "
+                "keep it calm and brief, lead with what went right, no humor."
+            )
+        return None
 
     def _consume_diagnosis(self) -> tuple:
         """Return diagnosis data if already available, otherwise skip."""
@@ -572,11 +612,24 @@ class CoachingOrchestrator:
         faults: List[str],
         max_depth_angle: float = 0.0,
         rep_duration_ms: int = 0,
+        ascent_time_s: float = 0.0,
     ):
         """Enqueue rep count cue and evaluate motivation trigger."""
         if self._resting:
             return
         self._set_rep_count += 1  # Track relative reps per set (ignores absolute pipeline number)
+
+        # Concentric slowdown vs the fastest rep of the set is the effort signal (velocity-loss proxy)
+        ascent_ratio = None
+        if ascent_time_s and ascent_time_s > 0:
+            if self._best_ascent_time_s is None or ascent_time_s < self._best_ascent_time_s:
+                self._best_ascent_time_s = ascent_time_s
+            ascent_ratio = round(ascent_time_s / self._best_ascent_time_s, 3)
+            if self._affect_service is not None:
+                try:
+                    self._affect_service.on_rep_effort(ascent_time_s)
+                except Exception as e:
+                    logger.debug(f"[ORCHESTRATOR] affect on_rep_effort failed: {e}")
 
         # Record rep event for set report
         self._set_rep_events.append({
@@ -587,6 +640,8 @@ class CoachingOrchestrator:
             "max_depth_angle": max_depth_angle,
             "rep_duration_ms": rep_duration_ms,
             "faults": faults,
+            "ascent_time_s": ascent_time_s,
+            "ascent_ratio": ascent_ratio,
         })
 
         if is_clean:
@@ -1134,11 +1189,19 @@ class CoachingOrchestrator:
 
         context_str = " ".join(parts)
 
-        instructions = (
-            "Mid-set. Shout one short motivational push — 2 to 5 words, nothing more. "
-            "React to the data below. No humor mid-set. "
-            f"Here is the data: {context_str}"
-        )
+        athlete = self._current_athlete_state()
+        if athlete.get("confident") and athlete.get("effort") == "near_limit":
+            instructions = (
+                "Mid-set and the athlete is near their limit. One calm, steady push — 2 to 4 words, "
+                "no shouting, no humor. React to the data below. "
+                f"Here is the data: {context_str}"
+            )
+        else:
+            instructions = (
+                "Mid-set. Shout one short motivational push — 2 to 5 words, nothing more. "
+                "React to the data below. No humor mid-set. "
+                f"Here is the data: {context_str}"
+            )
 
         logger.info(f"[ORCHESTRATOR] LLM motivation instructions: {instructions[:100]}...")
         try:
@@ -1233,9 +1296,15 @@ class CoachingOrchestrator:
                     if new_celebrations:
                         parts.append(celebration)
 
+        athlete_line = self._athlete_state_line()
+        if athlete_line:
+            parts.append(athlete_line)
+
         context_str = " ".join(parts)
 
-        humor_line = self._humor_line(total_reps, clean_reps, shallow_reps)
+        humor_line = self._humor_line(
+            total_reps, clean_reps, shallow_reps, affect=self._current_athlete_state().get("affect")
+        )
 
         if diagnosis and scoring:
             instructions = (
@@ -1296,12 +1365,13 @@ class CoachingOrchestrator:
                 self.reset_set(self._set_target_reps, self._positive_cue_keys)
 
     @staticmethod
-    def _humor_line(total_reps: int, clean_reps: int, shallow_reps: int) -> str:
-        """Machine-checked humor gate: only allow humor after a genuinely good set."""
+    def _humor_line(total_reps: int, clean_reps: int, shallow_reps: int, affect: Optional[str] = None) -> str:
+        """Machine-checked humor gate: only allow humor after a genuinely good set and a settled athlete."""
         good_set = (
             total_reps > 0
             and shallow_reps == 0
             and clean_reps >= max(1, round(total_reps * 0.6))
+            and affect not in ("frustrated", "strained")
         )
         if good_set:
             return "A light touch of dry humor is welcome if it comes naturally — never forced."

@@ -13,7 +13,7 @@ from agent.services.demo_narration import (
     NARRATION_TIMEOUT_SECONDS,
     build_fallback_script,
 )
-from agent.services.tts_normalizer import normalize_stream
+from agent.agents.shared.affect_mixin import AffectNodesMixin
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ _DEMO_INSTRUCTIONS_TEMPLATE = (
 )
 
 
-class CoachingDemoTask(AgentTask):
+class CoachingDemoTask(AffectNodesMixin, AgentTask):
     def __init__(
         self,
         cues: list[dict],
@@ -74,10 +74,6 @@ class CoachingDemoTask(AgentTask):
         self._lines_task = lines_task
         self._send = send_to_pipeline_fn
         self._started_ack = started_ack
-
-    def tts_node(self, text, model_settings):
-        """Strip written-text artifacts (emoji, markdown, symbols) before TTS."""
-        return super().tts_node(normalize_stream(text), model_settings)
 
     async def on_enter(self) -> None:
         try:

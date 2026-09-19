@@ -1,0 +1,67 @@
+# Affect perception runtime configuration.
+# Env overrides: AFFECT_ENABLED, AFFECT_MODEL_DIR, AFFECT_RECORD, AFFECT_LLM_WAIT_MS,
+#                AFFECT_STYLE_ADAPTER, AFFECT_INJECT_AS, AFFECT_PROVIDERS (comma list).
+# Schema: src/affect/config.py (AffectConfig).
+
+enabled: true
+# Directory holding model.onnx + model.json. Swap models by pointing this elsewhere.
+model_dir: models/affect/current
+
+audio:
+  model_sample_rate: 16000
+  min_voiced_seconds: 1.0      # shorter utterances are skipped; previous state is kept
+  max_seconds: 8.0             # crop to the last N seconds of speech
+  trim_pad_seconds: 0.1        # padding kept around the detected speech span
+  speech_prob_threshold: 0.5
+
+trigger:
+  early_silence_seconds: 0.25  # run inference once this much silence follows speech
+  early_min_voiced_seconds: 1.0
+  llm_wait_ms: 40              # llm_node waits at most this long for an in-flight result
+  coaching_wait_ms: 0          # coaching replies never wait
+  inject_as: system            # system | user_prefix (use user_prefix for Gemma chat templates)
+
+engine:
+  providers: [tensorrt, cuda, coreml, cpu]   # first available wins; CPU always appended; a provider that
+                                             # fails to compile the graph (CoreML + dynamic axis) falls back to CPU
+  intra_op_threads: 4
+  static_shape_buckets_seconds: [2.0, 4.0, 8.0]
+  coreml_static_buckets: true  # CoreML EP needs a constant input shape per session
+  warmup: true
+  trt_engine_cache_dir: models/affect/trt_cache
+  trt_fp16: true
+
+baseline:
+  enrollment_target_seconds: 45.0
+  enrollment_floor_seconds: 30.0
+  min_samples_before_gate: 5      # the first relaxed-context utterances always enroll
+  neutral_z_max: 2.5              # afterwards, outliers vs the user's own running stats are rejected
+  shrinkage_prior_n: 10.0         # prior weight pulling user stats toward the population norms
+  cross_session_ema_alpha: 0.2
+  min_std_ratio: 0.5              # user std never collapses below this fraction of population std
+  max_samples: 400
+  require_ready_for_confidence: true   # no prompt line or voice styling until the enrollment floor is met
+  profile_dir: data/affect/profiles
+
+state:
+  window_utterances: 3
+  window_seconds: 120.0
+  enter_z: 1.5                 # two consecutive utterances at this magnitude enter a state
+  enter_z_single: 2.5          # one utterance at this magnitude enters a state
+  exit_z: 1.0
+  min_dwell_utterances: 2
+  effort_working_ratio: 1.15   # ascent time / best ascent time in the set
+  effort_near_limit_ratio: 1.35
+
+style:
+  adapter: cartesia_inline     # cartesia_inline | cartesia_extra | qwen3 | none
+  speed_min: 0.9
+  speed_max: 1.1
+  volume_min: 0.9
+  volume_max: 1.15
+  pace_step: 0.1
+  energy_volume_step: 0.075
+
+recorder:
+  enabled: false               # AFFECT_RECORD=1 for consenting testers only
+  output_dir: data/affect/recordings

@@ -199,7 +199,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <h2>Turn Details</h2>
 <table class="turn-table" id="turn-table">
-  <thead><tr><th>#</th><th>Elapsed</th><th>Transcript</th><th>TTFT</th><th>TTFA</th><th>E2E</th><th>LLM Dur</th><th>TTS Dur</th><th>Tokens</th></tr></thead>
+  <thead><tr><th>#</th><th>Elapsed</th><th>Transcript</th><th>TTFT</th><th>TTFA</th><th>E2E</th><th>LLM Dur</th><th>TTS Dur</th><th>Tokens</th><th>Affect wait</th><th>Affect infer</th></tr></thead>
   <tbody></tbody>
 </table>
 
@@ -522,6 +522,8 @@ turns.forEach(t => {
     <td>${t.llm_duration_s != null ? t.llm_duration_s.toFixed(2) + 's' : '-'}</td>
     <td>${t.tts_duration_s != null ? t.tts_duration_s.toFixed(2) + 's' : '-'}</td>
     <td>${t.llm_input_tokens != null ? t.llm_input_tokens + '→' + (t.llm_output_tokens || '?') : '-'}</td>
+    <td title="fresh = state came from this turn">${t.affect_wait_ms != null ? t.affect_wait_ms.toFixed(1) + 'ms' + (t.affect_fresh ? ' ✓' : ' ·') : '-'}</td>
+    <td>${t.affect_infer_ms != null ? t.affect_infer_ms.toFixed(0) + 'ms' : '-'}</td>
   `;
   tbody.appendChild(row);
 });

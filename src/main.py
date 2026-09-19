@@ -574,6 +574,7 @@ class NowvaApp:
         ("[PREWARM] Silero VAD", "Calibrating voice activity sensors", 0.46),
         ("[PREWARM] Audio cues pre-loaded", "Loading coaching audio matrix", 0.55),
         ("[PREWARM] WakeWordModel pre-loaded", "Arming wake-word sentinel", 0.63),
+        ("[PREWARM] Affect engine pre-loaded", "Tuning affect perception", 0.66),
         ("[NOVA] Initializing cascade pipeline", "Synthesizing speech cortex", 0.74),
         ("[NOVA] Agent session created", "Linking conversational reasoning engine", 0.88),
         ("Nova voice agent started in room", "All systems nominal — Nova online", 1.0),
