@@ -202,9 +202,9 @@ class StandingPoseGate:
             self.last_failure = "distance"
             self._log_failure("distance", points)
             return False
-        # Last, because calibrating on raised heels silently poisons the
-        # session: GroundClamp records that ankle height as the floor and
-        # enforces it for every rep that follows.
+        # Last, because passing the gate on raised heels silently poisons the
+        # session: the session-scoped foot contact model anchors that ankle
+        # height as the planted floor for every rep that follows.
         if not self._check_flat_feet(points, confidences):
             self.last_failure = "flat_foot"
             self._log_failure("flat_foot", (points, confidences))

@@ -6,11 +6,17 @@ neutral (deadlift, row, RDL). Monitors the difference between
 rep-start trunk flexion and the minimum trunk flexion during the rep.
 """
 
+from __future__ import annotations
+
+import math
 from collections import deque
 from typing import Optional
 
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
 from biomechanics.faults.fault_types import FaultRule, FaultType, FAULT_MESSAGES
+
+# Minimum time between two back-rounding reports (was 90 frames at 30 fps)
+BACK_ROUNDING_COOLDOWN_S = 3.0
 
 
 class BackRoundingRule(FaultRule):
@@ -42,7 +48,7 @@ class BackRoundingRule(FaultRule):
 
         self._setup_trunk_flexion: float = 0.0
         self._setup_set: bool = False
-        self._last_fault_frame: int = -90
+        self._last_fault_time_s: float = float("-inf")
 
     @property
     def fault_type(self) -> FaultType:
@@ -64,18 +70,22 @@ class BackRoundingRule(FaultRule):
                 self.reset()
             return None
 
-        # Record setup angle at rep entry
+        trunk_flexion = angles.trunk_flexion
+        if math.isnan(trunk_flexion):
+            return None
+
+        # Record setup angle at rep entry (first valid frame)
         if not self._setup_set:
-            self._setup_trunk_flexion = angles.trunk_flexion
+            self._setup_trunk_flexion = trunk_flexion
             self._setup_set = True
             return None
 
         # Cooldown
-        if angles.frame_index - self._last_fault_frame < 90:
+        if angles.timestamp - self._last_fault_time_s < BACK_ROUNDING_COOLDOWN_S:
             return None
 
         # Trunk flexion drop (180-convention: drop = setup - current)
-        drop = self._setup_trunk_flexion - angles.trunk_flexion
+        drop = self._setup_trunk_flexion - trunk_flexion
         if drop < self.mild_threshold:
             return None
 
@@ -91,7 +101,7 @@ class BackRoundingRule(FaultRule):
         if severity == FaultSeverity.NONE:
             return None
 
-        self._last_fault_frame = angles.frame_index
+        self._last_fault_time_s = angles.timestamp
 
         message = FAULT_MESSAGES.get(FaultType.BACK_ROUNDING, {}).get(
             severity.value, "Back rounding — keep spine neutral"
@@ -105,7 +115,7 @@ class BackRoundingRule(FaultRule):
             rep_number=rep_number,
             details={
                 "setup_trunk_flexion": self._setup_trunk_flexion,
-                "current_trunk_flexion": angles.trunk_flexion,
+                "current_trunk_flexion": trunk_flexion,
                 "drop": drop,
             },
         )

@@ -92,7 +92,7 @@ async def entrypoint(ctx: agents.JobContext):
     # run during LiveKit's graceful drain. All stop() methods are idempotent,
     # so running both paths is safe.
     async def flush_session_services(reason: str):
-        for name in ("context_viewer", "compaction_service", "coaching_service"):
+        for name in ("context_viewer", "compaction_service", "coaching_service", "affect_service"):
             obj = getattr(userdata, name, None)
             if obj:
                 try:
@@ -170,6 +170,34 @@ async def entrypoint(ctx: agents.JobContext):
         vad = silero.VAD.load()
     else:
         logger.info("[NOVA] Using prewarmed Silero VAD")
+
+    # Speech affect / effort perception: wrap the VAD so every user utterance
+    # reaches the AffectService without touching STT, turn detection or agents.
+    from affect.config import load_affect_config
+    from agent.services.affect_service import AffectService
+    from agent.services.affect_vad_tap import TappedVAD
+
+    affect_config = load_affect_config()
+    affect_service = AffectService(
+        affect_config,
+        ctx.proc.userdata.get("affect_engine"),
+        state=state,
+        profiler=SessionProfiler.get_instance(),
+        visual_bridge=visual_bridge,
+        coaching_speaking_fn=lambda: bool(
+            getattr(getattr(userdata, "coaching_service", None), "is_coaching_speaking", False)
+        ),
+        user_id=user_id,
+    )
+    userdata.affect_service = affect_service
+    if affect_service.enabled:
+        vad = TappedVAD(vad, affect_service)
+        logger.info(
+            f"[NOVA] Affect perception enabled: model={affect_service.engine.manifest.version} "
+            f"provider={affect_service.engine.provider} adapter={affect_service.style_adapter.name}"
+        )
+    else:
+        logger.info("[NOVA] Affect perception disabled (AFFECT_ENABLED=0 or no model)")
 
     # Create agent session with cascade pipeline
     logger.info("[NOVA] Creating agent session...")
@@ -393,6 +421,7 @@ async def entrypoint(ctx: agents.JobContext):
                 ("context_viewer", getattr(userdata, 'context_viewer', None)),
                 ("compaction_service", getattr(userdata, 'compaction_service', None)),
                 ("coaching_service", getattr(userdata, 'coaching_service', None) if state.get_mode() == "workout" else None),
+                ("affect_service", getattr(userdata, 'affect_service', None)),
             ]:
                 if obj:
                     try:
@@ -447,11 +476,26 @@ def prewarm(proc: agents.JobProcess):
     import concurrent.futures
     import time
 
-    logger.info("[PREWARM] Starting parallel pre-load (VAD + audio cues + wake word)...")
+    logger.info("[PREWARM] Starting parallel pre-load (VAD + audio cues + wake word + affect)...")
     start = time.monotonic()
 
     def _load_vad():
         return silero.VAD.load()
+
+    def _load_affect():
+        from affect.config import load_affect_config
+        from affect.engine import AffectEngine
+
+        config = load_affect_config()
+        if not config.enabled:
+            return None
+        model_dir = config.resolve_model_dir()
+        if not (model_dir / "model.onnx").exists():
+            logger.warning(f"[PREWARM] No affect model at {model_dir} — affect perception disabled")
+            return None
+        engine = AffectEngine(model_dir, config.engine)
+        engine.initialize()
+        return engine
 
     def _load_audio_cues():
         from agent.services.audio_cue_service import AudioCueService
@@ -464,10 +508,11 @@ def prewarm(proc: agents.JobProcess):
             return WakeWordModel(models=[model_path])
         return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         vad_future = executor.submit(_load_vad)
         cue_future = executor.submit(_load_audio_cues)
         ww_future = executor.submit(_load_wakeword)
+        affect_future = executor.submit(_load_affect)
 
         try:
             proc.userdata["vad"] = vad_future.result(timeout=10)
@@ -494,6 +539,19 @@ def prewarm(proc: agents.JobProcess):
                 logger.info("[PREWARM] No wake word model found (will run without wake word detection)")
         except Exception as e:
             logger.warning(f"[PREWARM] WakeWordModel pre-load failed: {e}")
+
+        try:
+            affect_engine = affect_future.result(timeout=90)
+            if affect_engine is not None:
+                proc.userdata["affect_engine"] = affect_engine
+                logger.info(
+                    f"[PREWARM] Affect engine pre-loaded: {affect_engine.manifest.version} "
+                    f"provider={affect_engine.provider}"
+                )
+            else:
+                logger.info("[PREWARM] Affect engine not loaded (disabled or no model)")
+        except Exception as e:
+            logger.warning(f"[PREWARM] Affect engine pre-load failed: {e}")
 
     elapsed = time.monotonic() - start
     logger.info(f"[PREWARM] Parallel pre-load complete in {elapsed:.3f}s")

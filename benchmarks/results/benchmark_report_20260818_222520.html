@@ -1,0 +1,1447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nowva Benchmark Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0f1117; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 24px; }
+  h1 { color: #fff; margin-bottom: 8px; font-size: 24px; }
+  h2 { color: #a0a8c0; margin: 32px 0 16px; font-size: 18px; border-bottom: 1px solid #2a2d3a; padding-bottom: 8px; }
+  .meta { color: #707890; font-size: 13px; margin-bottom: 24px; }
+  .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .badge { padding: 8px 20px; border-radius: 8px; font-weight: 600; font-size: 15px; }
+  .badge-pass { background: #1a3a2a; color: #4ade80; }
+  .badge-warn { background: #3a3520; color: #fbbf24; }
+  .badge-fail { background: #3a1a1a; color: #f87171; }
+  .badge-skip { background: #2a2d3a; color: #707890; }
+  .badge-info { background: #1a2a3a; color: #60a5fa; }
+  .chart-container { background: #1a1d2a; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+  canvas { max-height: 500px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+  th { background: #1a1d2a; padding: 10px 12px; text-align: left; font-size: 13px; color: #a0a8c0; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1a1d2a; font-size: 13px; }
+  tr:hover { background: #1a1d2a; }
+  .status-pass { color: #4ade80; }
+  .status-warn { color: #fbbf24; }
+  .status-fail { color: #f87171; font-weight: 600; }
+  .status-skipped { color: #707890; }
+  .regression-row { background: #2a1a1a !important; }
+</style>
+</head>
+<body>
+<h1>Nowva Pipeline Benchmark Report</h1>
+<div class="meta">
+  Branch: <strong>triangulated_pipeline_optimization</strong> &middot;
+  Commit: <strong>2a07fe1</strong> &middot;
+  2026-08-18T22:25:20.213139 &middot;
+  12.19s total
+</div>
+
+<div class="summary" id="summary-badges"></div>
+
+<h2>Component Status</h2>
+<table id="status-table">
+  <thead><tr><th>Component</th><th>Status</th><th>Mean</th><th>P50</th><th>P95</th><th>P99</th><th>Peak Mem</th><th>CPU %</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>Latency Distribution (P95)</h2>
+<div class="chart-container"><canvas id="latencyChart"></canvas></div>
+
+<h2>Pipeline Breakdown</h2>
+<div class="chart-container" style="max-width:500px"><canvas id="breakdownChart"></canvas></div>
+
+<h2>Memory Profile</h2>
+<div class="chart-container"><canvas id="memoryChart"></canvas></div>
+
+<h2>CPU Utilization</h2>
+<div class="chart-container"><canvas id="cpuChart"></canvas></div>
+
+<h2>Historical Trend (P95)</h2>
+<div class="chart-container"><canvas id="trendChart"></canvas></div>
+
+<div id="regression-section" style="display:none">
+  <h2>Regression Alerts</h2>
+  <table id="regression-table">
+    <thead><tr><th>Component</th><th>Metric</th><th>Baseline</th><th>Current</th><th>Delta</th><th>Severity</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+const components = {
+  "biomechanics.ik.analytical": {
+    "latency_ms": {
+      "mean": 0.7069,
+      "p50": 0.6872,
+      "p95": 0.8813,
+      "p99": 0.9564,
+      "min": 0.6537,
+      "max": 0.9907,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 51.874,
+      "avg": 51.733,
+      "delta": 0.141
+    },
+    "cpu_percent": 85.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 2.0,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.filters.combined": {
+    "latency_ms": {
+      "mean": 1.4231,
+      "p50": 1.3532,
+      "p95": 1.6265,
+      "p99": 1.7122,
+      "min": 1.2945,
+      "max": 1.7832,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.029,
+      "avg": 0.02,
+      "delta": 0.009
+    },
+    "cpu_percent": 99.6,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 3.0,
+    "metadata": {},
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.1441,
+          "p50": 0.1391,
+          "p95": 0.1585,
+          "p99": 0.2192,
+          "min": 0.1363,
+          "max": 0.2334,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.016,
+          "avg": 0.009,
+          "delta": 0.007
+        },
+        "cpu_percent": 99.8,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.1836,
+          "p50": 0.1849,
+          "p95": 0.2062,
+          "p99": 0.2153,
+          "min": 0.0625,
+          "max": 0.2183,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.012,
+          "avg": 0.003,
+          "delta": 0.009
+        },
+        "cpu_percent": 100.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.3819,
+          "p50": 0.3773,
+          "p95": 0.4192,
+          "p99": 0.4564,
+          "min": 0.3658,
+          "max": 0.4608,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.01,
+          "avg": 0.002,
+          "delta": 0.008
+        },
+        "cpu_percent": 99.9,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.6204,
+          "p50": 0.6141,
+          "p95": 0.6794,
+          "p99": 0.7145,
+          "min": 0.5928,
+          "max": 0.7318,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.015,
+          "avg": 0.008,
+          "delta": 0.007
+        },
+        "cpu_percent": 100.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "warn",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "biomechanics.filters.confidence": {
+    "latency_ms": {
+      "mean": 0.1441,
+      "p50": 0.1391,
+      "p95": 0.1585,
+      "p99": 0.2192,
+      "min": 0.1363,
+      "max": 0.2334,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.016,
+      "avg": 0.009,
+      "delta": 0.007
+    },
+    "cpu_percent": 99.8,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.filters.velocity": {
+    "latency_ms": {
+      "mean": 0.1836,
+      "p50": 0.1849,
+      "p95": 0.2062,
+      "p99": 0.2153,
+      "min": 0.0625,
+      "max": 0.2183,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.012,
+      "avg": 0.003,
+      "delta": 0.009
+    },
+    "cpu_percent": 100.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.filters.bone": {
+    "latency_ms": {
+      "mean": 0.3819,
+      "p50": 0.3773,
+      "p95": 0.4192,
+      "p99": 0.4564,
+      "min": 0.3658,
+      "max": 0.4608,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.01,
+      "avg": 0.002,
+      "delta": 0.008
+    },
+    "cpu_percent": 99.9,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.filters.position": {
+    "latency_ms": {
+      "mean": 0.6204,
+      "p50": 0.6141,
+      "p95": 0.6794,
+      "p99": 0.7145,
+      "min": 0.5928,
+      "max": 0.7318,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.015,
+      "avg": 0.008,
+      "delta": 0.007
+    },
+    "cpu_percent": 100.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "warn",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.faults.rule_engine": {
+    "latency_ms": {
+      "mean": 0.0025,
+      "p50": 0.0025,
+      "p95": 0.0028,
+      "p99": 0.0039,
+      "min": 0.002,
+      "max": 0.0042,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.008,
+      "avg": 0.008,
+      "delta": 0.0
+    },
+    "cpu_percent": 100.3,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 2.0,
+    "metadata": {
+      "rule_count": 5
+    },
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.0006,
+          "p50": 0.0006,
+          "p95": 0.0007,
+          "p99": 0.0007,
+          "min": 0.0003,
+          "max": 0.0008,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": null,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.0005,
+          "p50": 0.0005,
+          "p95": 0.0008,
+          "p99": 0.0009,
+          "min": 0.0002,
+          "max": 0.0009,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": null,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.0003,
+          "p50": 0.0003,
+          "p95": 0.0003,
+          "p99": 0.0003,
+          "min": 0.0002,
+          "max": 0.0003,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": null,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.0003,
+          "p50": 0.0003,
+          "p95": 0.0003,
+          "p99": 0.0003,
+          "min": 0.0003,
+          "max": 0.0003,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": null,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "biomechanics.faults.depth": {
+    "latency_ms": {
+      "mean": 0.0006,
+      "p50": 0.0006,
+      "p95": 0.0007,
+      "p99": 0.0007,
+      "min": 0.0003,
+      "max": 0.0008,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": null,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.faults.bilateral_asymmetry": {
+    "latency_ms": {
+      "mean": 0.0005,
+      "p50": 0.0005,
+      "p95": 0.0008,
+      "p99": 0.0009,
+      "min": 0.0002,
+      "max": 0.0009,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": null,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.faults.forward_lean": {
+    "latency_ms": {
+      "mean": 0.0003,
+      "p50": 0.0003,
+      "p95": 0.0003,
+      "p99": 0.0003,
+      "min": 0.0002,
+      "max": 0.0003,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": null,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.faults.knee_valgus": {
+    "latency_ms": {
+      "mean": 0.0003,
+      "p50": 0.0003,
+      "p95": 0.0003,
+      "p99": 0.0003,
+      "min": 0.0003,
+      "max": 0.0003,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": null,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.gates.standing": {
+    "latency_ms": {
+      "mean": 0.0002,
+      "p50": 0.0002,
+      "p95": 0.0002,
+      "p99": 0.0004,
+      "min": 0.0001,
+      "max": 0.0004,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.003,
+      "avg": 0.003,
+      "delta": 0.0
+    },
+    "cpu_percent": 100.7,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.0002,
+          "p50": 0.0002,
+          "p95": 0.0002,
+          "p99": 0.0002,
+          "min": 0.0002,
+          "max": 0.0003,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "biomechanics.gates.readiness": {
+    "latency_ms": {
+      "mean": 0.0002,
+      "p50": 0.0002,
+      "p95": 0.0002,
+      "p99": 0.0002,
+      "min": 0.0002,
+      "max": 0.0003,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.derivatives.tracker": {
+    "latency_ms": {
+      "mean": 0.0125,
+      "p50": 0.0122,
+      "p95": 0.0161,
+      "p99": 0.0187,
+      "min": 0.0102,
+      "max": 0.0195,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.026,
+      "avg": 0.019,
+      "delta": 0.007
+    },
+    "cpu_percent": 99.9,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.108,
+          "p50": 0.1065,
+          "p95": 0.1166,
+          "p99": 0.1394,
+          "min": 0.0957,
+          "max": 0.1533,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      },
+      {
+        "latency_ms": {
+          "mean": 0.0458,
+          "p50": 0.0454,
+          "p95": 0.0499,
+          "p99": 0.0547,
+          "min": 0.0441,
+          "max": 0.0551,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 0.5,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "biomechanics.derivatives.angle_filter": {
+    "latency_ms": {
+      "mean": 0.108,
+      "p50": 0.1065,
+      "p95": 0.1166,
+      "p99": 0.1394,
+      "min": 0.0957,
+      "max": 0.1533,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.derivatives.rep_signal": {
+    "latency_ms": {
+      "mean": 0.0458,
+      "p50": 0.0454,
+      "p95": 0.0499,
+      "p99": 0.0547,
+      "min": 0.0441,
+      "max": 0.0551,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.rep_counter": {
+    "latency_ms": {
+      "mean": 0.002,
+      "p50": 0.002,
+      "p95": 0.0032,
+      "p99": 0.0038,
+      "min": 0.0007,
+      "max": 0.0038,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.013,
+      "avg": 0.006,
+      "delta": 0.007
+    },
+    "cpu_percent": 100.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 1.0,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.pose.mediapipe": {
+    "latency_ms": {
+      "mean": 12.0039,
+      "p50": 11.8928,
+      "p95": 12.5858,
+      "p99": 13.0918,
+      "min": 11.624,
+      "max": 13.483,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 3.326,
+      "avg": 0.027,
+      "delta": 3.299
+    },
+    "cpu_percent": 101.4,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 15.0,
+    "metadata": {
+      "model_load_ms": 0.02,
+      "backend": "mediapipe"
+    },
+    "sub_results": []
+  },
+  "biomechanics.bilstm": {
+    "latency_ms": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "count": 0
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 0,
+    "warmup": 0,
+    "status": "skipped",
+    "threshold_ms": null,
+    "metadata": {
+      "reason": "Model load failed: BiLSTMInference.__init__() missing 1 required positional argument: 'model_path'"
+    },
+    "sub_results": []
+  },
+  "biomechanics.diagnosis": {
+    "latency_ms": {
+      "mean": 0.2373,
+      "p50": 0.2321,
+      "p95": 0.254,
+      "p99": 0.2869,
+      "min": 0.2264,
+      "max": 0.3103,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.012,
+      "avg": 0.002,
+      "delta": 0.009
+    },
+    "cpu_percent": 100.1,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 50.0,
+    "metadata": {},
+    "sub_results": []
+  },
+  "agent.ipc.roundtrip": {
+    "latency_ms": {
+      "mean": 0.1487,
+      "p50": 0.1465,
+      "p95": 0.1718,
+      "p99": 0.1884,
+      "min": 0.1381,
+      "max": 0.1906,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.006,
+      "avg": 0.003,
+      "delta": 0.003
+    },
+    "cpu_percent": 101.4,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 1.0,
+    "metadata": {
+      "message_bytes": 342
+    },
+    "sub_results": []
+  },
+  "agent.state.save": {
+    "latency_ms": {
+      "mean": 0.2921,
+      "p50": 0.2734,
+      "p95": 0.3822,
+      "p99": 0.5986,
+      "min": 0.2535,
+      "max": 0.77,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.093,
+      "avg": 0.082,
+      "delta": 0.011
+    },
+    "cpu_percent": 98.7,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 5.0,
+    "metadata": {},
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.1036,
+          "p50": 0.0994,
+          "p95": 0.1232,
+          "p99": 0.1483,
+          "min": 0.093,
+          "max": 0.15,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 5.0,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "agent.state.load": {
+    "latency_ms": {
+      "mean": 0.1036,
+      "p50": 0.0994,
+      "p95": 0.1232,
+      "p99": 0.1483,
+      "min": 0.093,
+      "max": 0.15,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 5.0,
+    "metadata": {},
+    "sub_results": []
+  },
+  "agent.token_estimator": {
+    "latency_ms": {
+      "mean": 0.024,
+      "p50": 0.0174,
+      "p95": 0.048,
+      "p99": 0.0489,
+      "min": 0.0072,
+      "max": 0.0496,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.004,
+      "avg": 0.001,
+      "delta": 0.003
+    },
+    "cpu_percent": 101.6,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 1.0,
+    "metadata": {},
+    "sub_results": []
+  },
+  "agent.compaction.parse": {
+    "latency_ms": {
+      "mean": 0.0153,
+      "p50": 0.0146,
+      "p95": 0.0187,
+      "p99": 0.0256,
+      "min": 0.0138,
+      "max": 0.0276,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.004,
+      "avg": 0.001,
+      "delta": 0.002
+    },
+    "cpu_percent": 98.1,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 0.5,
+    "metadata": {},
+    "sub_results": []
+  },
+  "agent.audio_cues.load": {
+    "latency_ms": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "count": 0
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 0,
+    "warmup": 0,
+    "status": "skipped",
+    "threshold_ms": null,
+    "metadata": {
+      "reason": "Cues directory not found: /Users/naiahoard/NowvaLiveKit/src/agent/assets/cues/wav"
+    },
+    "sub_results": []
+  },
+  "agent.vad.load": {
+    "latency_ms": {
+      "mean": 97.9124,
+      "p50": 97.9124,
+      "p95": 97.9124,
+      "p99": 97.9124,
+      "min": 97.9124,
+      "max": 97.9124,
+      "count": 1
+    },
+    "memory_mb": {
+      "peak": 0.003,
+      "avg": 0.003,
+      "delta": 0.0
+    },
+    "cpu_percent": 101.2,
+    "gpu_vram_mb": null,
+    "iterations": 1,
+    "warmup": 0,
+    "status": "pass",
+    "threshold_ms": 500.0,
+    "metadata": {
+      "load_ms": 97.91
+    },
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.0031,
+          "p50": 0.003,
+          "p95": 0.0034,
+          "p99": 0.0041,
+          "min": 0.003,
+          "max": 0.0041,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 10,
+        "status": "pass",
+        "threshold_ms": 5.0,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "agent.vad.inference": {
+    "latency_ms": {
+      "mean": 0.0031,
+      "p50": 0.003,
+      "p95": 0.0034,
+      "p99": 0.0041,
+      "min": 0.003,
+      "max": 0.0041,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 5.0,
+    "metadata": {},
+    "sub_results": []
+  },
+  "biomechanics.pipeline_e2e": {
+    "latency_ms": {
+      "mean": 0.007,
+      "p50": 0.0062,
+      "p95": 0.0121,
+      "p99": 0.0169,
+      "min": 0.0053,
+      "max": 0.0181,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.006,
+      "avg": 0.005,
+      "delta": 0.001
+    },
+    "cpu_percent": 156.1,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 10,
+    "status": "pass",
+    "threshold_ms": 33.3,
+    "metadata": {
+      "fps": 161069.1,
+      "breakdown_pct": {
+        "capture": 26.2
+      }
+    },
+    "sub_results": [
+      {
+        "latency_ms": {
+          "mean": 0.0016,
+          "p50": 0.0016,
+          "p95": 0.0018,
+          "p99": 0.0022,
+          "min": 0.0012,
+          "max": 0.0022,
+          "count": 50
+        },
+        "memory_mb": {
+          "peak": 0.0,
+          "avg": 0.0,
+          "delta": 0.0
+        },
+        "cpu_percent": 0.0,
+        "gpu_vram_mb": null,
+        "iterations": 50,
+        "warmup": 0,
+        "status": "pass",
+        "threshold_ms": null,
+        "metadata": {},
+        "sub_results": []
+      }
+    ]
+  },
+  "biomechanics.pipeline.capture": {
+    "latency_ms": {
+      "mean": 0.0016,
+      "p50": 0.0016,
+      "p95": 0.0018,
+      "p99": 0.0022,
+      "min": 0.0012,
+      "max": 0.0022,
+      "count": 50
+    },
+    "memory_mb": {
+      "peak": 0.0,
+      "avg": 0.0,
+      "delta": 0.0
+    },
+    "cpu_percent": 0.0,
+    "gpu_vram_mb": null,
+    "iterations": 50,
+    "warmup": 0,
+    "status": "pass",
+    "threshold_ms": null,
+    "metadata": {},
+    "sub_results": []
+  }
+};
+const pipelines = {
+  "biomechanics_component_sum": {
+    "p50_total_ms": 14.19,
+    "p95_total_ms": 15.38,
+    "estimated_fps": 70.5,
+    "breakdown_pct": {
+      "biomechanics.ik.analytical": 4.8,
+      "biomechanics.filters.combined": 9.5,
+      "biomechanics.faults.rule_engine": 0.0,
+      "biomechanics.gates.standing": 0.0,
+      "biomechanics.derivatives.tracker": 0.1,
+      "biomechanics.rep_counter": 0.0,
+      "biomechanics.pose.mediapipe": 83.8,
+      "biomechanics.diagnosis": 1.6,
+      "biomechanics.pipeline_e2e": 0.0
+    }
+  }
+};
+const regressions = [];
+const trendData = {
+  "labels": [
+    "90b45d5",
+    "90b45d5",
+    "90b45d5",
+    "90b45d5",
+    "90b45d5",
+    "90b45d5",
+    "90b45d5",
+    "90b45d5",
+    "2a07fe1",
+    "2a07fe1",
+    "2a07fe1",
+    "2a07fe1"
+  ],
+  "datasets": {
+    "biomechanics.pose.mediapipe": [
+      null,
+      null,
+      null,
+      null,
+      12.2217,
+      null,
+      12.1135,
+      16.4128,
+      null,
+      null,
+      null,
+      12.5858
+    ],
+    "biomechanics.ik.analytical": [
+      0.8205,
+      0.8336,
+      null,
+      null,
+      0.989,
+      0.9123,
+      0.8583,
+      0.9735,
+      null,
+      null,
+      null,
+      0.8813
+    ],
+    "biomechanics.faults.rule_engine": [
+      null,
+      null,
+      null,
+      null,
+      0.0082,
+      null,
+      0.0053,
+      0.0096,
+      null,
+      null,
+      null,
+      0.0028
+    ],
+    "biomechanics.filters.combined": [
+      null,
+      null,
+      null,
+      1.1784,
+      1.1428,
+      null,
+      1.1615,
+      1.2881,
+      null,
+      null,
+      null,
+      1.6265
+    ],
+    "biomechanics.bilstm": [
+      null,
+      null,
+      null,
+      null,
+      0.0,
+      null,
+      0.0,
+      0.0,
+      null,
+      null,
+      null,
+      0.0
+    ],
+    "biomechanics.pipeline_e2e": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      0.0091,
+      null,
+      null,
+      null,
+      null,
+      0.0121
+    ]
+  }
+};
+const systemInfo = {
+  "cpu": "arm",
+  "platform": "darwin",
+  "python": "3.13.7",
+  "machine": "arm64",
+  "ram_gb": 8.0,
+  "gpu": "Apple Silicon (MPS)"
+};
+
+// Summary badges
+const counts = {pass:0, warn:0, fail:0, skipped:0};
+Object.values(components).forEach(c => counts[c.status] = (counts[c.status]||0) + 1);
+const badgesEl = document.getElementById('summary-badges');
+badgesEl.innerHTML = `
+  <span class="badge badge-pass">${counts.pass} Pass</span>
+  <span class="badge badge-warn">${counts.warn} Warn</span>
+  <span class="badge badge-fail">${counts.fail} Fail</span>
+  <span class="badge badge-skip">${counts.skipped} Skip</span>
+  ${pipelines.biomechanics_component_sum ? `<span class="badge badge-info">${pipelines.biomechanics_component_sum.estimated_fps} FPS est.</span>` : ''}
+`;
+
+// Status table
+const tbody = document.querySelector('#status-table tbody');
+Object.entries(components).sort((a,b) => a[0].localeCompare(b[0])).forEach(([name, c]) => {
+  const row = document.createElement('tr');
+  row.innerHTML = `
+    <td>${name}</td>
+    <td class="status-${c.status}">${c.status.toUpperCase()}</td>
+    <td>${c.latency_ms.mean.toFixed(2)}ms</td>
+    <td>${c.latency_ms.p50.toFixed(2)}ms</td>
+    <td>${c.latency_ms.p95.toFixed(2)}ms</td>
+    <td>${c.latency_ms.p99.toFixed(2)}ms</td>
+    <td>${c.memory_mb.peak.toFixed(1)}MB</td>
+    <td>${c.cpu_percent.toFixed(0)}%</td>
+  `;
+  tbody.appendChild(row);
+});
+
+// Color helper
+function statusColor(status) {
+  return {pass:'#4ade80', warn:'#fbbf24', fail:'#f87171', skipped:'#707890'}[status] || '#60a5fa';
+}
+
+// Latency bar chart
+const latencyEntries = Object.entries(components).filter(([,c]) => c.status !== 'skipped').sort((a,b) => b[1].latency_ms.p95 - a[1].latency_ms.p95);
+new Chart(document.getElementById('latencyChart'), {
+  type: 'bar',
+  data: {
+    labels: latencyEntries.map(([n]) => n),
+    datasets: [
+      { label: 'P50', data: latencyEntries.map(([,c]) => c.latency_ms.p50), backgroundColor: '#3b82f6' },
+      { label: 'P95', data: latencyEntries.map(([,c]) => c.latency_ms.p95), backgroundColor: latencyEntries.map(([,c]) => statusColor(c.status)) },
+      { label: 'P99', data: latencyEntries.map(([,c]) => c.latency_ms.p99), backgroundColor: '#6366f1' },
+    ]
+  },
+  options: {
+    indexAxis: 'y',
+    responsive: true,
+    plugins: { legend: { labels: { color: '#a0a8c0' } } },
+    scales: {
+      x: { title: { display: true, text: 'Latency (ms)', color: '#a0a8c0' }, ticks: { color: '#707890' }, grid: { color: '#1a1d2a' } },
+      y: { ticks: { color: '#a0a8c0', font: { size: 11 } }, grid: { display: false } }
+    }
+  }
+});
+
+// Pipeline breakdown doughnut
+if (pipelines.biomechanics_component_sum) {
+  const bd = pipelines.biomechanics_component_sum.breakdown_pct;
+  const colors = ['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#ef4444','#06b6d4','#84cc16','#f97316','#6366f1','#14b8a6','#e879f9'];
+  new Chart(document.getElementById('breakdownChart'), {
+    type: 'doughnut',
+    data: {
+      labels: Object.keys(bd),
+      datasets: [{ data: Object.values(bd), backgroundColor: colors.slice(0, Object.keys(bd).length) }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'right', labels: { color: '#a0a8c0', font: { size: 11 } } } }
+    }
+  });
+}
+
+// Memory chart
+const memEntries = Object.entries(components).filter(([,c]) => c.memory_mb.peak > 0).sort((a,b) => b[1].memory_mb.peak - a[1].memory_mb.peak);
+new Chart(document.getElementById('memoryChart'), {
+  type: 'bar',
+  data: {
+    labels: memEntries.map(([n]) => n),
+    datasets: [{ label: 'Peak MB', data: memEntries.map(([,c]) => c.memory_mb.peak), backgroundColor: '#8b5cf6' }]
+  },
+  options: {
+    indexAxis: 'y',
+    responsive: true,
+    plugins: { legend: { labels: { color: '#a0a8c0' } } },
+    scales: {
+      x: { title: { display: true, text: 'Memory (MB)', color: '#a0a8c0' }, ticks: { color: '#707890' }, grid: { color: '#1a1d2a' } },
+      y: { ticks: { color: '#a0a8c0', font: { size: 11 } }, grid: { display: false } }
+    }
+  }
+});
+
+// CPU chart
+const cpuEntries = Object.entries(components).filter(([,c]) => c.cpu_percent > 0).sort((a,b) => b[1].cpu_percent - a[1].cpu_percent);
+new Chart(document.getElementById('cpuChart'), {
+  type: 'bar',
+  data: {
+    labels: cpuEntries.map(([n]) => n),
+    datasets: [{ label: 'CPU %', data: cpuEntries.map(([,c]) => c.cpu_percent), backgroundColor: '#f59e0b' }]
+  },
+  options: {
+    indexAxis: 'y',
+    responsive: true,
+    plugins: { legend: { labels: { color: '#a0a8c0' } } },
+    scales: {
+      x: { title: { display: true, text: 'CPU %', color: '#a0a8c0' }, ticks: { color: '#707890' }, grid: { color: '#1a1d2a' } },
+      y: { ticks: { color: '#a0a8c0', font: { size: 11 } }, grid: { display: false } }
+    }
+  }
+});
+
+// Trend chart
+if (trendData.labels && trendData.labels.length > 1) {
+  const trendColors = ['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#ef4444'];
+  const trendDatasets = Object.entries(trendData.datasets).map(([name, values], i) => ({
+    label: name,
+    data: values,
+    borderColor: trendColors[i % trendColors.length],
+    tension: 0.3,
+    spanGaps: true,
+    pointRadius: 3,
+  }));
+  new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: { labels: trendData.labels, datasets: trendDatasets },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#a0a8c0' } } },
+      scales: {
+        x: { ticks: { color: '#707890' }, grid: { color: '#1a1d2a' } },
+        y: { title: { display: true, text: 'P95 Latency (ms)', color: '#a0a8c0' }, ticks: { color: '#707890' }, grid: { color: '#1a1d2a' } }
+      }
+    }
+  });
+} else {
+  document.getElementById('trendChart').parentElement.innerHTML = '<p style="color:#707890;text-align:center;padding:20px">Need 2+ runs for trend data</p>';
+}
+
+// Regressions
+if (regressions.length > 0) {
+  document.getElementById('regression-section').style.display = 'block';
+  const rtbody = document.querySelector('#regression-table tbody');
+  regressions.forEach(r => {
+    const row = document.createElement('tr');
+    row.className = 'regression-row';
+    row.innerHTML = `
+      <td>${r.component}</td>
+      <td>${r.metric}</td>
+      <td>${r.baseline_ms.toFixed(2)}ms</td>
+      <td>${r.current_ms.toFixed(2)}ms</td>
+      <td class="status-fail">+${r.delta_pct.toFixed(1)}%</td>
+      <td class="status-${r.severity === 'fail' ? 'fail' : 'warn'}">${r.severity.toUpperCase()}</td>
+    `;
+    rtbody.appendChild(row);
+  });
+}
+</script>
+</body>
+</html>

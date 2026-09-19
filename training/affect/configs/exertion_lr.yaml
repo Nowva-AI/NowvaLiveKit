@@ -1,0 +1,46 @@
+# Exertion head on data_after_cardio (binary high vs low breathlessness, subject-disjoint dev).
+# Encoder frozen: this is a logistic-regression-class head on the pooled embedding.
+name: exertion-head
+seed: 0
+model:
+  encoder:
+    name: wavlm
+    pretrained: microsoft/wavlm-base-plus
+    freeze_all: true
+  pooling:
+    layer_select: weighted
+    pooling: mean_std
+  categorical: false
+  avd: false
+  exertion: true
+  head_hidden: 64
+  dropout: 0.3
+data:
+  train:
+    - {manifest: data/affect/manifests/data_after_cardio.jsonl, weight: 1.0, use_exertion: true}
+    - {manifest: data/affect/manifests/nowva_recordings.jsonl, weight: 2.0, use_exertion: true}
+  dev:
+    - {manifest: data/affect/manifests/data_after_cardio.jsonl, weight: 1.0, use_exertion: true}
+  sample_rate: 16000
+  crop_seconds: 8.0
+  min_seconds: 1.0
+  augment:
+    enabled: true
+    apm_prob: 0.7
+  num_workers: 4
+loss:
+  w_exertion: 1.0
+  mixup_prob: 0.0
+optim:
+  encoder_lr: 0.0
+  head_lr: 1.0e-3
+  warmup_steps: 50
+  epochs_stage1: 30
+  epochs_stage2: 0
+  batch_size: 32
+  grad_accum: 1
+  bf16: true
+  early_stop_patience: 5
+  select_metric: dev/exertion_auroc
+output_dir: experiments
+notes: "Target: >= 0.85 subject-independent accuracy (literature 0.81-0.90 on treadmill speech)."

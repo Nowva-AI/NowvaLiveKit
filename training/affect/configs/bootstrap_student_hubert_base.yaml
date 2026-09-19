@@ -1,0 +1,58 @@
+# V1b A/B: same distillation recipe with HuBERT-Base (clean TensorRT export; fallback if WavLM's
+# gated relative position bias does not build on the Jetson).
+name: v1b-hubert-base-distill
+seed: 0
+model:
+  encoder:
+    name: hubert
+    pretrained: facebook/hubert-base-ls960
+    freeze_feature_extractor: true
+    freeze_bottom_layers: 3
+    gradient_checkpointing: true
+  pooling:
+    layer_select: weighted
+    pooling: mean_std
+  categorical: true
+  avd: true
+  head_hidden: 256
+  dropout: 0.2
+data:
+  train:
+    - {manifest: data/affect/manifests/naturalvoices.jsonl, weight: 1.0}
+    - {manifest: data/affect/manifests/nowva_recordings.jsonl, weight: 3.0}
+  dev:
+    - {manifest: data/affect/manifests/iemocap.jsonl, weight: 1.0}
+  sample_rate: 16000
+  crop_seconds: 8.0
+  min_seconds: 1.0
+  augment:
+    enabled: true
+    apm_prob: 0.5
+    rir_dir: data/rirs/16khz
+    rir_prob: 0.3
+    noise_dir: data/backgrounds/noise
+    noise_prob: 0.3
+  num_workers: 6
+loss:
+  w_cat: 1.0
+  w_avd: 1.0
+  class_weighting: none
+  mixup_prob: 0.3
+  mixup_layers: [2, 8]
+optim:
+  encoder_lr: 5.0e-5
+  head_lr: 1.0e-3
+  warmup_steps: 500
+  epochs_stage1: 12
+  epochs_stage2: 0
+  batch_size: 24
+  grad_accum: 2
+  bf16: true
+  early_stop_patience: 3
+  select_metric: dev/avg_ccc
+distill:
+  teacher_cache: data/affect/teacher_cache/bootstrap
+  w_ccc: 1.0
+  w_quadrant: 0.5
+  w_cat_kl: 1.0
+output_dir: experiments

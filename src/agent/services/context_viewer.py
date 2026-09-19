@@ -145,6 +145,15 @@ class ContextViewer:
 
         uptime = time.monotonic() - self._start_time
 
+        # Speech affect / effort perception (optional)
+        affect: dict = {}
+        try:
+            affect_service = getattr(self._session.userdata, "affect_service", None)
+            if affect_service is not None:
+                affect = affect_service.snapshot_dict()
+        except Exception:
+            affect = {"error": "Failed to read affect state"}
+
         return {
             "timestamp": now,
             "mode": mode,
@@ -155,6 +164,7 @@ class ContextViewer:
             "chat_items": items,
             "chat_item_count": len(items),
             "compaction": compaction,
+            "affect": affect,
         }
 
     # ------------------------------------------------------------------
@@ -176,6 +186,19 @@ class ContextViewer:
 
     def _render_html(self, snap: dict) -> str:
         esc = html.escape
+
+        # Athlete state badge (speech affect / effort perception)
+        affect = snap.get("affect") or {}
+        affect_state = affect.get("state") or {}
+        if not affect:
+            affect_badge = "off"
+        elif not affect.get("enabled"):
+            affect_badge = "disabled"
+        else:
+            affect_badge = (
+                f"{affect_state.get('effort', '?')} / {affect_state.get('affect', '?')}"
+                f"{'' if affect_state.get('confident') else ' (unsure)'}"
+            )
 
         # Chat items
         chat_rows = []
@@ -279,6 +302,7 @@ class ContextViewer:
   <span class="badge">Mode: <b>{esc(snap["mode"])}</b></span>
   <span class="badge">Chat items: <b>{snap["chat_item_count"]}</b></span>
   <span class="badge">Uptime: <b>{snap["uptime_seconds"]}s</b></span>
+  <span class="badge">Athlete: <b>{esc(affect_badge)}</b></span>
   <span class="badge live">Refreshing every 1.5s</span>
 </div>
 

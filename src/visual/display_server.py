@@ -30,7 +30,7 @@ _LOGO_PNG = Path(__file__).with_name("logo-white.png")
 _STICKY_EVENT_TYPES = (
     "agent_state", "wake_word", "demo", "boot",
     "workout", "rep", "set_summary", "set_scores", "rest",
-    "menu", "setup",
+    "menu", "setup", "affect",
 )
 
 # Stickies scoped to one workout — dropped when a new "workout" event arrives

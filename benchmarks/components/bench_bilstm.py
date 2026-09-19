@@ -25,8 +25,14 @@ def run(iterations: int = 100, warmup: int = 10) -> BenchmarkResult:
         )
 
     try:
+        from biomechanics.config import load_pipeline_config
+
+        cfg = load_pipeline_config()
         t0 = time.perf_counter()
-        bilstm = BiLSTMInference()
+        bilstm = BiLSTMInference(
+            model_path=cfg.bilstm.model_path,
+            device=cfg.bilstm.device,
+        )
         model_load_ms = (time.perf_counter() - t0) * 1000
     except Exception as e:
         return BenchmarkResult(

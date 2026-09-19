@@ -7,6 +7,7 @@ This is a pure extraction refactor — zero behavioral change.
 """
 
 import logging
+import math
 import os
 from typing import Dict, List, Optional
 
@@ -17,11 +18,19 @@ from biomechanics.faults.rules.symmetry import SymmetryRule
 from biomechanics.faults.rules.forward_lean import ForwardLeanRule
 from biomechanics.faults.rules.knee_valgus import KneeValgusRule
 from biomechanics.faults.rules.bar_tilt_asymmetry import BarTiltAsymmetryRule
+from biomechanics.faults.rules.heel_rise import HeelRiseRule
 from biomechanics.profiles.base import ExerciseProfile
 from biomechanics.profiles.registry import register_profile
 from biomechanics.utils.types import CocoKeypoints, JointAngles, Skeleton3D
 
 logger = logging.getLogger(__name__)
+
+# Keypoints whose absence makes the hip-to-ankle signal meaningless.
+_REP_SIGNAL_KEYPOINTS = (
+    CocoKeypoints.LEFT_HIP, CocoKeypoints.RIGHT_HIP,
+    CocoKeypoints.LEFT_ANKLE, CocoKeypoints.RIGHT_ANKLE,
+)
+MIN_REP_SIGNAL_CONFIDENCE = 0.0
 
 
 @register_profile(
@@ -44,7 +53,7 @@ class SquatProfile(ExerciseProfile):
     movement_pattern = "squat"
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
-        """Create the 5 squat fault rules with config thresholds.
+        """Create the squat fault rules with config thresholds.
 
         Identical to the previous RuleEngine._create_rules() implementation.
         """
@@ -80,6 +89,14 @@ class SquatProfile(ExerciseProfile):
             KneeValgusRule(
                 **self._valgus_thresholds(fc),
             ),
+            # Reads the FootState side channel; no-ops without one (single-camera mode).
+            HeelRiseRule(
+                mild_cm=fc.heel_rise.mild_cm,
+                moderate_cm=fc.heel_rise.moderate_cm,
+                severe_cm=fc.heel_rise.severe_cm,
+                cooldown_s=fc.heel_rise.cooldown_s,
+                min_rise_duration_s=fc.heel_rise.min_rise_duration_s,
+            ),
         ]
 
     @staticmethod
@@ -107,7 +124,13 @@ class SquatProfile(ExerciseProfile):
         Identical to the previous pipeline.py lines 314-318.
         Convention: more negative = standing, less negative = squat bottom.
         """
-        kpts = skeleton_3d.to_numpy()  # (17, 3)
+        keypoints = skeleton_3d.keypoints
+        for idx in _REP_SIGNAL_KEYPOINTS:
+            if keypoints[idx].confidence <= MIN_REP_SIGNAL_CONFIDENCE:
+                # A missing hip or ankle sits at the origin after re-centring;
+                # a NaN signal is ignored by the counter, a fake one starts a rep.
+                return math.nan
+        kpts = skeleton_3d.to_numpy()
         hip_mid_y = (
             kpts[CocoKeypoints.LEFT_HIP][1] + kpts[CocoKeypoints.RIGHT_HIP][1]
         ) / 2
@@ -176,11 +199,9 @@ class SquatProfile(ExerciseProfile):
             ft = rule.fault_type
             ft_val = ft.value if hasattr(ft, "value") else ft
 
-            if ft_val == "forward_lean" and hasattr(rule, "mild_threshold"):
+            if ft_val == "forward_lean" and hasattr(rule, "apply_baseline"):
                 peak = state["peak_trunk_flexion"]
-                rule.mild_threshold = min(rule.mild_threshold, peak - 10.0)
-                rule.moderate_threshold = min(rule.moderate_threshold, peak - 15.0)
-                rule.severe_threshold = min(rule.severe_threshold, peak - 20.0)
+                rule.apply_baseline(peak)
                 logger.info(
                     "[SQUAT] Forward lean baseline: peak=%.1f° → %.1f/%.1f/%.1f",
                     peak, rule.mild_threshold, rule.moderate_threshold,

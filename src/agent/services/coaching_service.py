@@ -498,6 +498,7 @@ class CoachingService:
                 faults = message.get("faults_in_rep", [])
                 max_depth_angle = message.get("max_depth_angle", 0.0)
                 rep_duration_ms = message.get("rep_duration_ms", 0)
+                ascent_time_s = float(message.get("ascent_time_s", 0.0) or 0.0)
                 logger.info(
                     f"[COACHING SERVICE] REP COMPLETE received: rep={rep} depth={depth} "
                     f"is_clean={is_clean} faults={faults}"
@@ -516,6 +517,7 @@ class CoachingService:
                         faults=faults,
                         max_depth_angle=max_depth_angle,
                         rep_duration_ms=rep_duration_ms,
+                        ascent_time_s=ascent_time_s,
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — rep_complete dropped")
@@ -915,6 +917,12 @@ class CoachingService:
         thresholds = message.get("thresholds", {})
         athlete_params = message.get("athlete_params")
         baseline = message.get("baseline")
+        if athlete_params is None:
+            # None tells the upsert to keep stored body measurements
+            logger.warning(
+                "[CALIBRATION] calibration_complete has no athlete_params — "
+                "body measurements unfinished; stored athlete params are kept"
+            )
 
         # Save calibration to database
         user_id = self._state.get("user.id")
@@ -985,6 +993,7 @@ class CoachingService:
             advance_set_fn=self._advance_workout_set,
             on_workout_complete_fn=self._on_workout_complete,
             prune_context_fn=self._prune_conversation_context,
+            affect_service=getattr(getattr(self._session, "userdata", None), "affect_service", None),
         )
         self._coaching_orchestrator._generate_tts_fn = self._generate_tts_audio
         self._coaching_orchestrator._play_raw_frames_fn = self._play_raw_audio

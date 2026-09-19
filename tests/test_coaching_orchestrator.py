@@ -905,3 +905,98 @@ class TestDiagnosisData:
             assert "biomechanics analysis" in call_args
 
         asyncio.run(_run())
+
+
+# =============================================================================
+# TEST ATHLETE STATE (speech affect / effort perception)
+# =============================================================================
+
+
+class _FakeAthleteState:
+    def __init__(self, effort="fresh", affect="flat", confident=True):
+        self.effort = effort
+        self.affect = affect
+        self.confident = confident
+
+
+class _FakeAffectService:
+    def __init__(self, effort="fresh", affect="flat", confident=True):
+        self.last_state = _FakeAthleteState(effort, affect, confident)
+        self.rep_efforts: list[float] = []
+        self.set_resets = 0
+
+    def on_rep_effort(self, ascent_time_s: float):
+        self.rep_efforts.append(ascent_time_s)
+        return self.last_state
+
+    def on_set_reset(self):
+        self.set_resets += 1
+
+
+class TestAthleteState:
+    """Affect gates: humor, recap tone line, motivation tone, and ascent-time effort tracking."""
+
+    def test_humor_blocked_when_frustrated(self):
+        good = CoachingOrchestrator._humor_line(8, 8, 0)
+        assert "welcome" in good
+        blocked = CoachingOrchestrator._humor_line(8, 8, 0, affect="frustrated")
+        assert "No humor" in blocked
+        assert "No humor" in CoachingOrchestrator._humor_line(8, 8, 0, affect="strained")
+
+    def test_state_line_only_when_confident_and_notable(self, mock_callbacks):
+        orch = CoachingOrchestrator(**mock_callbacks)
+        assert orch._athlete_state_line() is None
+        orch.set_athlete_state({"effort": "fresh", "affect": "flat", "confident": True})
+        assert orch._athlete_state_line() is None
+        orch.set_athlete_state({"effort": "working", "affect": "strained", "confident": False})
+        assert orch._athlete_state_line() is None
+        orch.set_athlete_state({"effort": "working", "affect": "strained", "confident": True})
+        line = orch._athlete_state_line()
+        assert line is not None and "strained" in line and "no humor" in line
+
+    def test_live_service_wins_over_pushed_dict(self, mock_callbacks):
+        service = _FakeAffectService(effort="near_limit", affect="flat")
+        orch = CoachingOrchestrator(**mock_callbacks, affect_service=service)
+        orch.set_athlete_state({"effort": "fresh", "affect": "flat", "confident": True})
+        assert orch._current_athlete_state()["effort"] == "near_limit"
+        assert "near limit" in orch._athlete_state_line()
+
+    def test_ascent_time_tracks_best_and_notifies_service(self, mock_callbacks):
+        service = _FakeAffectService()
+        orch = CoachingOrchestrator(**mock_callbacks, affect_service=service)
+        orch.reset_set(target_reps=10)
+        assert service.set_resets == 1
+
+        async def _run():
+            await orch.on_rep_complete(1, "parallel", True, [], ascent_time_s=1.0)
+            await orch.on_rep_complete(2, "parallel", True, [], ascent_time_s=1.5)
+            await orch.on_rep_complete(3, "parallel", True, [])
+
+        asyncio.run(_run())
+        assert service.rep_efforts == [1.0, 1.5]
+        assert orch._best_ascent_time_s == 1.0
+        events = orch._set_rep_events
+        assert events[1]["ascent_ratio"] == 1.5
+        assert events[2]["ascent_ratio"] is None
+
+    def test_motivation_tone_near_limit(self, mock_callbacks):
+        service = _FakeAffectService(effort="near_limit", affect="flat")
+        orch = CoachingOrchestrator(**mock_callbacks, affect_service=service)
+
+        asyncio.run(orch._speak_llm_motivation({"rep_number": 4, "reps_remaining": 4}))
+        instructions = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+        assert "near their limit" in instructions
+        assert "Shout" not in instructions
+
+    def test_recap_includes_state_line_when_strained(self, mock_callbacks):
+        service = _FakeAffectService(effort="working", affect="strained")
+        orch = CoachingOrchestrator(**mock_callbacks, affect_service=service)
+        data = {
+            "set_number": 1, "total_reps": 5, "clean_reps": 5, "shallow_reps": 0,
+            "avg_depth": 95.0, "depth_consistency": 2.0, "avg_duration_ms": 2400,
+            "fault_summary": {}, "per_rep": [],
+        }
+        asyncio.run(orch._speak_llm_set_recap(data))
+        instructions = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+        assert "ATHLETE STATE" in instructions
+        assert "No humor" in instructions

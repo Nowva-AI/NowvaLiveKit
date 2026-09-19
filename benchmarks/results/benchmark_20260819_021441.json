@@ -1,0 +1,349 @@
+{
+  "timestamp": "2026-08-19T02:14:41.303867",
+  "git_commit": "2a07fe1",
+  "git_branch": "triangulated_pipeline_optimization",
+  "system": {
+    "cpu": "arm",
+    "platform": "darwin",
+    "python": "3.13.7",
+    "machine": "arm64",
+    "ram_gb": 8.0,
+    "gpu": "Apple Silicon (MPS)"
+  },
+  "elapsed_seconds": 10.39,
+  "components": {
+    "biomechanics.pipeline_e2e": {
+      "latency_ms": {
+        "mean": 69.9491,
+        "p50": 67.9121,
+        "p95": 78.2795,
+        "p99": 81.6518,
+        "min": 64.8532,
+        "max": 90.5973,
+        "count": 100
+      },
+      "memory_mb": {
+        "peak": 4.088,
+        "avg": 0.769,
+        "delta": 3.319
+      },
+      "cpu_percent": 100.0,
+      "gpu_vram_mb": null,
+      "iterations": 100,
+      "warmup": 10,
+      "status": "fail",
+      "threshold_ms": 33.3,
+      "metadata": {
+        "fps": 14.7,
+        "breakdown_pct": {
+          "capture": 0.0,
+          "pose": 95.5,
+          "bilstm": 3.2,
+          "pre_ik_filters": 0.4,
+          "ik": 1.6,
+          "faults": 0.1
+        }
+      },
+      "sub_results": [
+        {
+          "latency_ms": {
+            "mean": 0.0016,
+            "p50": 0.0015,
+            "p95": 0.0019,
+            "p99": 0.002,
+            "min": 0.0013,
+            "max": 0.0025,
+            "count": 100
+          },
+          "memory_mb": {
+            "peak": 0.0,
+            "avg": 0.0,
+            "delta": 0.0
+          },
+          "cpu_percent": 0.0,
+          "gpu_vram_mb": null,
+          "iterations": 100,
+          "warmup": 0,
+          "status": "pass",
+          "threshold_ms": null,
+          "metadata": {},
+          "sub_results": []
+        },
+        {
+          "latency_ms": {
+            "mean": 66.3028,
+            "p50": 64.8885,
+            "p95": 72.815,
+            "p99": 74.7016,
+            "min": 63.7258,
+            "max": 76.2984,
+            "count": 100
+          },
+          "memory_mb": {
+            "peak": 0.0,
+            "avg": 0.0,
+            "delta": 0.0
+          },
+          "cpu_percent": 0.0,
+          "gpu_vram_mb": null,
+          "iterations": 100,
+          "warmup": 0,
+          "status": "pass",
+          "threshold_ms": null,
+          "metadata": {},
+          "sub_results": []
+        },
+        {
+          "latency_ms": {
+            "mean": 2.143,
+            "p50": 2.1971,
+            "p95": 2.6663,
+            "p99": 3.447,
+            "min": 0.256,
+            "max": 25.9683,
+            "count": 100
+          },
+          "memory_mb": {
+            "peak": 0.0,
+            "avg": 0.0,
+            "delta": 0.0
+          },
+          "cpu_percent": 0.0,
+          "gpu_vram_mb": null,
+          "iterations": 100,
+          "warmup": 0,
+          "status": "pass",
+          "threshold_ms": null,
+          "metadata": {},
+          "sub_results": []
+        },
+        {
+          "latency_ms": {
+            "mean": 0.3085,
+            "p50": 0.2895,
+            "p95": 0.464,
+            "p99": 0.5372,
+            "min": 0.1177,
+            "max": 0.5685,
+            "count": 31
+          },
+          "memory_mb": {
+            "peak": 0.0,
+            "avg": 0.0,
+            "delta": 0.0
+          },
+          "cpu_percent": 0.0,
+          "gpu_vram_mb": null,
+          "iterations": 31,
+          "warmup": 0,
+          "status": "pass",
+          "threshold_ms": null,
+          "metadata": {},
+          "sub_results": []
+        },
+        {
+          "latency_ms": {
+            "mean": 1.0937,
+            "p50": 1.0684,
+            "p95": 1.3388,
+            "p99": 1.4426,
+            "min": 0.9611,
+            "max": 1.478,
+            "count": 31
+          },
+          "memory_mb": {
+            "peak": 0.0,
+            "avg": 0.0,
+            "delta": 0.0
+          },
+          "cpu_percent": 0.0,
+          "gpu_vram_mb": null,
+          "iterations": 31,
+          "warmup": 0,
+          "status": "pass",
+          "threshold_ms": null,
+          "metadata": {},
+          "sub_results": []
+        },
+        {
+          "latency_ms": {
+            "mean": 0.0889,
+            "p50": 0.0649,
+            "p95": 0.1453,
+            "p99": 0.4685,
+            "min": 0.0535,
+            "max": 0.603,
+            "count": 31
+          },
+          "memory_mb": {
+            "peak": 0.0,
+            "avg": 0.0,
+            "delta": 0.0
+          },
+          "cpu_percent": 0.0,
+          "gpu_vram_mb": null,
+          "iterations": 31,
+          "warmup": 0,
+          "status": "pass",
+          "threshold_ms": null,
+          "metadata": {},
+          "sub_results": []
+        }
+      ]
+    },
+    "biomechanics.pipeline.capture": {
+      "latency_ms": {
+        "mean": 0.0016,
+        "p50": 0.0015,
+        "p95": 0.0019,
+        "p99": 0.002,
+        "min": 0.0013,
+        "max": 0.0025,
+        "count": 100
+      },
+      "memory_mb": {
+        "peak": 0.0,
+        "avg": 0.0,
+        "delta": 0.0
+      },
+      "cpu_percent": 0.0,
+      "gpu_vram_mb": null,
+      "iterations": 100,
+      "warmup": 0,
+      "status": "pass",
+      "threshold_ms": null,
+      "metadata": {},
+      "sub_results": []
+    },
+    "biomechanics.pipeline.pose": {
+      "latency_ms": {
+        "mean": 66.3028,
+        "p50": 64.8885,
+        "p95": 72.815,
+        "p99": 74.7016,
+        "min": 63.7258,
+        "max": 76.2984,
+        "count": 100
+      },
+      "memory_mb": {
+        "peak": 0.0,
+        "avg": 0.0,
+        "delta": 0.0
+      },
+      "cpu_percent": 0.0,
+      "gpu_vram_mb": null,
+      "iterations": 100,
+      "warmup": 0,
+      "status": "pass",
+      "threshold_ms": null,
+      "metadata": {},
+      "sub_results": []
+    },
+    "biomechanics.pipeline.bilstm": {
+      "latency_ms": {
+        "mean": 2.143,
+        "p50": 2.1971,
+        "p95": 2.6663,
+        "p99": 3.447,
+        "min": 0.256,
+        "max": 25.9683,
+        "count": 100
+      },
+      "memory_mb": {
+        "peak": 0.0,
+        "avg": 0.0,
+        "delta": 0.0
+      },
+      "cpu_percent": 0.0,
+      "gpu_vram_mb": null,
+      "iterations": 100,
+      "warmup": 0,
+      "status": "pass",
+      "threshold_ms": null,
+      "metadata": {},
+      "sub_results": []
+    },
+    "biomechanics.pipeline.pre_ik_filters": {
+      "latency_ms": {
+        "mean": 0.3085,
+        "p50": 0.2895,
+        "p95": 0.464,
+        "p99": 0.5372,
+        "min": 0.1177,
+        "max": 0.5685,
+        "count": 31
+      },
+      "memory_mb": {
+        "peak": 0.0,
+        "avg": 0.0,
+        "delta": 0.0
+      },
+      "cpu_percent": 0.0,
+      "gpu_vram_mb": null,
+      "iterations": 31,
+      "warmup": 0,
+      "status": "pass",
+      "threshold_ms": null,
+      "metadata": {},
+      "sub_results": []
+    },
+    "biomechanics.pipeline.ik": {
+      "latency_ms": {
+        "mean": 1.0937,
+        "p50": 1.0684,
+        "p95": 1.3388,
+        "p99": 1.4426,
+        "min": 0.9611,
+        "max": 1.478,
+        "count": 31
+      },
+      "memory_mb": {
+        "peak": 0.0,
+        "avg": 0.0,
+        "delta": 0.0
+      },
+      "cpu_percent": 0.0,
+      "gpu_vram_mb": null,
+      "iterations": 31,
+      "warmup": 0,
+      "status": "pass",
+      "threshold_ms": null,
+      "metadata": {},
+      "sub_results": []
+    },
+    "biomechanics.pipeline.faults": {
+      "latency_ms": {
+        "mean": 0.0889,
+        "p50": 0.0649,
+        "p95": 0.1453,
+        "p99": 0.4685,
+        "min": 0.0535,
+        "max": 0.603,
+        "count": 31
+      },
+      "memory_mb": {
+        "peak": 0.0,
+        "avg": 0.0,
+        "delta": 0.0
+      },
+      "cpu_percent": 0.0,
+      "gpu_vram_mb": null,
+      "iterations": 31,
+      "warmup": 0,
+      "status": "pass",
+      "threshold_ms": null,
+      "metadata": {},
+      "sub_results": []
+    }
+  },
+  "pipelines": {
+    "biomechanics_component_sum": {
+      "p50_total_ms": 67.91,
+      "p95_total_ms": 78.28,
+      "estimated_fps": 14.7,
+      "breakdown_pct": {
+        "biomechanics.pipeline_e2e": 100.0
+      }
+    }
+  }
+}

@@ -87,6 +87,8 @@ def find_bottom_frame(rep_frames: list[dict]) -> dict | None:
         if frame is None:
             continue
         knee_flex = frame["angles"].get("knee_flex", 0.0)
+        if math.isnan(knee_flex):
+            continue
         if knee_flex > best_knee_flex:
             best_knee_flex = knee_flex
             best_frame = frame

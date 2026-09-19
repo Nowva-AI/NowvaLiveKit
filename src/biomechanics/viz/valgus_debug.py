@@ -25,6 +25,7 @@ from biomechanics.faults.rules.knee_valgus import (
     FOOT_CONFIDENCE_THRESHOLD,
     KneeValgusRule,
 )
+from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import FaultEvent, PipelineFrame
 
 TEMPLATE_PATH = Path(__file__).with_name("valgus_debug_template.html")
@@ -357,6 +358,7 @@ class ValgusDebugRecorder:
             "ipc": self._ipc,
             "ipc_overflow": self._ipc_overflow,
         }
+        data = nan_to_none(data)
         (self._dir / "data.json").write_text(json.dumps(data))
 
         video_b64 = ""

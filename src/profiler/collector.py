@@ -41,6 +41,9 @@ class TurnBuilder:
     tts_audio_duration_s: float | None = None
     ttfa_s: float | None = None
     e2e_s: float | None = None
+    affect_wait_ms: float | None = None
+    affect_fresh: bool | None = None
+    affect_infer_ms: float | None = None
     cancelled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -194,6 +197,21 @@ class SessionProfiler:
                 self._current_turn.tts_duration_s = round(duration, 4)
                 self._current_turn.tts_audio_duration_s = round(audio_duration, 4)
 
+    def record_affect_wait(self, wait_ms: float, fresh: bool) -> None:
+        if not _is_enabled() or not self._started:
+            return
+        with self._lock:
+            if self._current_turn:
+                self._current_turn.affect_wait_ms = round(wait_ms, 2)
+                self._current_turn.affect_fresh = bool(fresh)
+
+    def record_affect_infer(self, infer_ms: float) -> None:
+        if not _is_enabled() or not self._started:
+            return
+        with self._lock:
+            if self._current_turn:
+                self._current_turn.affect_infer_ms = round(infer_ms, 2)
+
     def finalize_turn(self) -> None:
         """Flush current turn to the turns list."""
         if not _is_enabled() or not self._started:
@@ -259,6 +277,10 @@ class SessionProfiler:
         ipc = [e for e in events if e.get("category") == "ipc"]
         tools = [e for e in events if e.get("category") == "tool"]
         compaction = [e for e in events if e.get("category") == "compaction"]
+        affect = [e for e in events if e.get("category") == "affect"]
+
+        affect_fresh_flags = [t["affect_fresh"] for t in turns if t.get("affect_fresh") is not None]
+        affect_waits = [t["affect_wait_ms"] for t in turns if t.get("affect_wait_ms") is not None]
 
         ttfts = [t["llm_ttft_s"] for t in turns if t.get("llm_ttft_s")]
         ttfas = [t["ttfa_s"] for t in turns if t.get("ttfa_s")]
@@ -283,6 +305,9 @@ class SessionProfiler:
                 )),
                 "total_reps": total_reps,
                 "total_faults": total_faults,
+                "affect_utterances": len(affect),
+                "affect_fresh_rate": round(sum(affect_fresh_flags) / len(affect_fresh_flags), 3) if affect_fresh_flags else None,
+                "affect_avg_wait_ms": round(sum(affect_waits) / len(affect_waits), 2) if affect_waits else None,
             },
             "turns": turns,
             "mode_transitions": [
@@ -308,6 +333,10 @@ class SessionProfiler:
             "compaction_cycles": [
                 {k: v for k, v in e.items() if k not in ("timestamp", "category")}
                 for e in compaction
+            ],
+            "affect_events": [
+                {k: v for k, v in e.items() if k not in ("timestamp", "category")}
+                for e in affect
             ],
             "resource_samples": samples,
         }

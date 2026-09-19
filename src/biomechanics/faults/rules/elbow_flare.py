@@ -11,6 +11,9 @@ from typing import Optional
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
 from biomechanics.faults.fault_types import FaultRule, FaultType
 
+# Minimum time between two elbow-flare reports (was 90 frames at 30 fps)
+ELBOW_FLARE_COOLDOWN_S = 3.0
+
 
 class ElbowFlareRule(FaultRule):
     """
@@ -36,7 +39,7 @@ class ElbowFlareRule(FaultRule):
         self.moderate_threshold = moderate_threshold
         self.severe_threshold = severe_threshold
 
-        self._last_fault_frame: int = -90
+        self._last_fault_time_s: float = float("-inf")
 
     @property
     def fault_type(self) -> FaultType:
@@ -52,7 +55,7 @@ class ElbowFlareRule(FaultRule):
         if not in_rep:
             return None
 
-        if angles.frame_index - self._last_fault_frame < 90:
+        if angles.timestamp - self._last_fault_time_s < ELBOW_FLARE_COOLDOWN_S:
             return None
 
         # Check both sides
@@ -76,7 +79,7 @@ class ElbowFlareRule(FaultRule):
         if severity == FaultSeverity.NONE:
             return None
 
-        self._last_fault_frame = angles.frame_index
+        self._last_fault_time_s = angles.timestamp
 
         flared_side = (
             "left"

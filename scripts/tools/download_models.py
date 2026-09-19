@@ -46,7 +46,7 @@ MODELS = {
 DEFAULT_MODEL = "rtmpose-m"
 
 # Destination directory
-MODEL_DIR = Path(__file__).parent.parent / "src" / "biomechanics" / "pose" / "models"
+MODEL_DIR = Path(__file__).resolve().parents[2] / "src" / "biomechanics" / "pose" / "models"
 
 
 def download_model(model_key: str, force: bool = False) -> Path:

@@ -2,28 +2,35 @@
 Biomechanics Pipeline
 
 Wires all processing layers into a single pipeline:
-  Webcam capture → Pose estimation → IK solve → Fault detection → Rep counting
+  Capture → Pose estimation → Pre-IK chain (Kalman, foot contact, re-centring)
+  → IK solve → Fault detection → Rep counting
 
-Returns a PipelineFrame per iteration with per-layer timing.
+Returns a PipelineFrame per iteration with per-layer timing. The analysis
+skeleton lags the capture by `kalman.lag_frames`; the display skeleton is
+undelayed.
 """
 
 from __future__ import annotations
 
+import math
+
+import logging
 import os
 import threading
 import time
 from collections import deque
-from typing import Deque, List, Optional
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-from biomechanics.config import BiomechanicsConfig, load_pipeline_config
+from biomechanics.config import BiomechanicsConfig
 from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator
 from biomechanics.kinematics.analytical_ik import AnalyticalIKSolver
 from biomechanics.kinematics.valgus import build_valgus_estimator
 from biomechanics.faults import RuleEngine
 from biomechanics.profiles import get_profile
+from biomechanics.triangulation.triangulator import recentre_at_hips
 from biomechanics.utils.types import (
     PipelineFrame,
     Skeleton2D,
@@ -35,23 +42,33 @@ from biomechanics.utils.types import (
     BarbellDetection,
     BarTrackState,
 )
-from biomechanics.utils.filters import JointAngleFilter
-from biomechanics.utils.derivatives import DerivativeTracker
-from biomechanics.utils.confidence_blend import ConfidenceBlender
-from biomechanics.utils.velocity_clamp import VelocityClamp
-from biomechanics.utils.bone_constraints import BoneLengthConstraints
-from biomechanics.utils.ground_clamp import GroundClamp
-from biomechanics.utils.position_filter import KeypointPositionSmoother, Skeleton2DSmoother
-from biomechanics.utils.predictive_state import PredictiveStateEstimator
-from biomechanics.utils.preik_chain import apply_preik_filters
+from biomechanics.utils.filters import RunningMedian
+from biomechanics.utils.position_filter import Skeleton2DSmoother
+from biomechanics.utils.preik_chain import PreIKResult, build_preik_chain
+from biomechanics.utils.segment_lengths import SegmentLengthEstimator, MIN_ENDPOINT_CONFIDENCE
 from biomechanics.utils.standing_gate import StandingPoseGate
 
-
-_MAX_DROPOUT_HOLD_FRAMES = 5
+logger = logging.getLogger(__name__)
 
 # Roughly 20 seconds at 30 fps — long enough for any real rep, short enough
 # that a rep the counter never closes cannot grow the buffer indefinitely.
 MAX_REP_TRAJECTORY_FRAMES = 600
+
+# Below the two-view confidence cap (0.3) so 2-camera rigs can measure the body.
+TWO_CAMERA_MEASUREMENT_CONFIDENCE = 0.25
+
+# A stored bottom/standing frame is only useful with the whole lower body present.
+_LEG_KEYPOINTS = (
+    CocoKeypoints.LEFT_HIP, CocoKeypoints.RIGHT_HIP,
+    CocoKeypoints.LEFT_KNEE, CocoKeypoints.RIGHT_KNEE,
+    CocoKeypoints.LEFT_ANKLE, CocoKeypoints.RIGHT_ANKLE,
+)
+
+# With no post-IK angle filter, a per-rep max over raw frames is a
+# single-frame statistic that one transient can over-read by 7–10°. Every
+# rep extremum (bottom frame, depth class, BiLSTM window) is taken over a
+# running median of this many frames instead.
+KNEE_FLEXION_MEDIAN_FRAMES = 3
 
 
 class BiomechanicsPipeline:
@@ -65,18 +82,17 @@ class BiomechanicsPipeline:
 
     def __init__(
         self,
-        config: Optional[BiomechanicsConfig] = None,
+        config: BiomechanicsConfig | None = None,
         exercise_name: str = "Barbell Back Squat",
         defer_capture: bool = False,
     ):
         self.config = config or BiomechanicsConfig()
+        # Single-camera: counts process_frame calls. Multi-camera: the
+        # primary camera's capture sequence of the last skeleton received.
         self._frame_index = 0
 
         # Load exercise profile (bundles fault rules, rep signal, cues)
         self._profile = get_profile(exercise_name)
-
-        # Optional pre-IK filtering (off by default, enable via .env)
-        self._preik_enabled = os.getenv("ENABLE_PREIK_FILTERS", "true").lower() == "true"
 
         # Layer 1: Capture (threaded — always holds the latest frame)
         self._cap = None
@@ -90,10 +106,15 @@ class BiomechanicsPipeline:
         self._valgus_estimator = build_valgus_estimator(self._multi_camera)
         self._multi_camera_provider = None
 
+        # One barbell detector serves Layer 3b tracking and, inside a camera-calibration
+        # capture window, the provider (the bar as a metric ruler).
+        bar_detector = self._build_bar_detector()
+
         if self._multi_camera:
             from biomechanics.pose.multi_camera import MultiCameraPoseProvider
 
             tri = self.config.triangulation
+            camera_calibration = self.config.camera_calibration
             self._multi_camera_provider = MultiCameraPoseProvider(
                 device_ids=tri.device_ids,
                 confidence_threshold=self.config.pose.confidence_threshold,
@@ -104,8 +125,14 @@ class BiomechanicsPipeline:
                 resolution=self.config.capture.resolution,
                 primary_camera=tri.primary_camera,
                 focal_length_factor=tri.focal_length_factor,
+                camera_keys=camera_calibration.camera_keys,
+                calibration_buffer_frames=camera_calibration.calibration_buffer_frames,
+                bar_detection_stride=camera_calibration.bar_detection_stride,
+                bar_detector=bar_detector,
             )
-            if tri.calibration_file:
+            # The session flow loads calibrations (and writes this path when it
+            # does not exist yet); loading here serves standalone tools only.
+            if tri.calibration_file and Path(tri.calibration_file).exists():
                 self._multi_camera_provider.load_calibration(tri.calibration_file)
         elif not defer_capture:
             self._open_capture()
@@ -126,14 +153,18 @@ class BiomechanicsPipeline:
                 model_complexity=model_complexity,
             )
 
+        # Layer 2b: Pre-IK chain (temporal state reset per set) and the
+        # session-scoped body measurement that feeds proportion scaling.
+        self._preik = build_preik_chain(self.config, self._multi_camera)
+        # Two-view triangulation caps confidence at TWO_VIEW_CONFIDENCE_CAP, so
+        # a 2-camera rig needs a lower endpoint gate or it never completes.
+        measurement_gate = MIN_ENDPOINT_CONFIDENCE
+        if self._multi_camera and len(self.config.triangulation.device_ids) == 2:
+            measurement_gate = TWO_CAMERA_MEASUREMENT_CONFIDENCE
+        self.body_calibration = SegmentLengthEstimator(min_endpoint_confidence=measurement_gate)
+
         # Layer 3: Inverse kinematics
         self._ik_solver = AnalyticalIKSolver()
-
-        # Temporal smoothing
-        self._angle_filter = JointAngleFilter(min_cutoff=1.0, beta=0.007)
-
-        # Derivative computation
-        self._derivative_tracker = DerivativeTracker(smoothing_alpha=0.3)
 
         # Standing pose gate — runs unconditionally to validate user is
         # in frame and standing before any calibration starts.
@@ -168,52 +199,11 @@ class BiomechanicsPipeline:
         # all skipped until the flag is cleared.
         self.presence_only: bool = False
 
-        # Pre-IK skeleton filtering (only initialised when enabled)
-        self._confidence_blender = None
-        self._velocity_clamp = None
-        self._bone_constraints = None
-        self._ground_clamp = None
-        self._position_smoother = None
-        self._predictive_estimator = None
-        self._proportions_applied = False
-        self._last_valid_skeleton: Optional[Skeleton3D] = None
-        self._dropout_decay_frames: int = 0
-
+        # Inspector state: populated by the chain's tap when --inspect is on.
         self._inspecting: bool = False
         self._inspect_raw_kpts: np.ndarray | None = None
-        self._inspect_intermediates: dict[str, np.ndarray] | None = None
+        self._inspect_intermediates: dict[str, np.ndarray] = {}
         self._inspect_raw_angles: JointAngles | None = None
-
-        if self._preik_enabled:
-            self._confidence_blender = ConfidenceBlender(
-                min_confidence=self.config.confidence_blend.min_confidence,
-                max_confidence=self.config.confidence_blend.max_confidence,
-            )
-            self._velocity_clamp = VelocityClamp(
-                max_velocity_m_per_s=self.config.velocity_clamp.max_velocity_m_per_s,
-                target_fps=self.config.pipeline.target_fps,
-            )
-            self._bone_constraints = BoneLengthConstraints(
-                calibration_frames=self.config.bone_constraints.calibration_frames,
-                tolerance=self.config.bone_constraints.tolerance,
-                standing_gate=self._standing_gate,
-            )
-            self._ground_clamp = GroundClamp(
-                calibration_frames=self.config.ground_clamp.calibration_frames,
-                stance_width_tolerance_m=self.config.ground_clamp.stance_width_tolerance_m,
-                ankle_y_tolerance_m=self.config.ground_clamp.ankle_y_tolerance_m,
-                min_leg_extension_ratio=self.config.ground_clamp.min_leg_extension_ratio,
-                standing_gate=self._standing_gate,
-            )
-            self._position_smoother = KeypointPositionSmoother(
-                min_cutoff=self.config.position_filter.min_cutoff,
-                beta=self.config.position_filter.beta,
-                d_cutoff=self.config.position_filter.d_cutoff,
-            )
-            self._predictive_estimator = PredictiveStateEstimator(
-                horizon_seconds=self.config.predictive_state.horizon_seconds,
-                max_extrapolation_deg=self.config.predictive_state.max_extrapolation_deg,
-            )
 
         # Display-only 2D skeleton smoothing (does not affect analysis pipeline)
         self._display_smoother: Skeleton2DSmoother | None = None
@@ -231,15 +221,10 @@ class BiomechanicsPipeline:
         self._barbell_detector = None
         self._bar_tracker = None
         if self.config.barbell_tracking.enabled:
-            from biomechanics.barbell_tracking import BarbellDetector, BarPathTracker
+            from biomechanics.barbell_tracking import BarPathTracker
 
             bt = self.config.barbell_tracking
-            self._barbell_detector = BarbellDetector(
-                model_path=bt.model_path,
-                conf_threshold=bt.conf_threshold,
-                imgsz=bt.imgsz,
-                device=bt.device,
-            )
+            self._barbell_detector = bar_detector
             self._bar_tracker = BarPathTracker(
                 bar_length_m=bt.bar_length_m,
                 kalman_q=bt.kalman_q,
@@ -282,25 +267,54 @@ class BiomechanicsPipeline:
         # Buffer faults from the hip counter for the BiLSTM to consume.
         # The hip counter resets _current_faults on rep completion, which
         # happens before the BiLSTM fires — so we stash them here.
-        self._pending_bilstm_faults: List[FaultEvent] = []
+        self._pending_bilstm_faults: list[FaultEvent] = []
+
+        # Robust per-frame knee flexion: running median feeding every rep
+        # extremum below. Per-set temporal state.
+        self._knee_flexion_median = RunningMedian(window_frames=KNEE_FLEXION_MEDIAN_FRAMES)
+        # Max of the median over the current rep window; what the depth rule
+        # and RepData report as the rep's depth.
+        self._rep_max_knee_flex: float = math.nan
 
         # Bottom-of-rep buffer for diagnosis engine.
-        # Tracks the frame with max avg_knee_flexion during each rep.
+        # Tracks the frame with max median knee flexion during each rep.
         self._bottom_max_knee_flex: float = 0.0
-        self._bottom_kpts: Optional[List[List[float]]] = None
-        self._bottom_angles: Optional[dict] = None
+        self._bottom_kpts: list[list[float]] | None = None
+        self._bottom_angles: dict | None = None
 
         # Standing-frame buffer: last skeleton before in_rep becomes True.
-        self._standing_kpts: Optional[List[List[float]]] = None
+        self._standing_kpts: list[list[float]] | None = None
         self._standing_captured: bool = False
 
         # Per-rep trajectory buffer for whole-rep scoring. Holds a handful of
         # scalars per frame rather than full skeletons — a stuck rep must not
         # grow this without bound on an edge device.
-        self._rep_trajectory: Deque[dict] = deque(maxlen=MAX_REP_TRAJECTORY_FRAMES)
+        self._rep_trajectory: deque[dict] = deque(maxlen=MAX_REP_TRAJECTORY_FRAMES)
 
         # Store last raw frame for dashboard access
-        self.last_frame: Optional[np.ndarray] = None
+        self.last_frame: np.ndarray | None = None
+
+    def _build_bar_detector(self):
+        bt = self.config.barbell_tracking
+        calibration_ruler = self._multi_camera and self.config.camera_calibration.use_bar_scale
+        if not bt.enabled and not calibration_ruler:
+            return None
+        if not bt.enabled and not Path(bt.model_path).exists():
+            logger.warning(
+                "[PIPELINE] camera_calibration.use_bar_scale is on but %s is missing; "
+                "camera calibration takes its scale from the user's height instead",
+                bt.model_path,
+            )
+            return None
+
+        from biomechanics.barbell_tracking import BarbellDetector
+
+        return BarbellDetector(
+            model_path=bt.model_path,
+            conf_threshold=bt.conf_threshold,
+            imgsz=bt.imgsz,
+            device=bt.device,
+        )
 
     def _open_capture(self) -> None:
         self._cap = cv2.VideoCapture(self.config.capture.device_id)
@@ -359,16 +373,26 @@ class BiomechanicsPipeline:
         """Whether the readiness gate has passed and data is being collected."""
         return self._readiness_gate.is_ready
 
+    @property
+    def preik_stage_names(self) -> tuple[str, ...]:
+        return self._preik.stage_names
+
     def reset_readiness_gate(self) -> None:
-        """Reset the per-set readiness gate.
+        """Reset the per-set state.
 
         Call this at set boundaries (shortly before rest ends, set
         timeout) so the next set requires the user to be fully detected
-        before collection resumes. Also resets pre-IK filter state so
-        set 2+ doesn't blend against stale positions from the previous
-        set.
+        before collection resumes. Resets the temporal filter state so
+        set 2+ doesn't smooth against stale positions. Body measurements
+        and foot contact anchors are session-scoped and untouched.
         """
         self._readiness_gate.reset()
+        self._preik.reset()
+        # Per-rep rule state (asymmetry samples, cooldowns) must not cross sets;
+        # baseline calibration is kept by the engine's reset.
+        self._rule_engine.reset()
+        self._knee_flexion_median.reset()
+        self._rep_max_knee_flex = math.nan
         self._bilstm_max_knee_flex = 0.0
         self._bilstm_min_knee_flex = 180.0
         self._pending_bilstm_faults.clear()
@@ -379,18 +403,54 @@ class BiomechanicsPipeline:
         self._standing_captured = False
         self._rep_trajectory.clear()
 
-        if self._preik_enabled:
-            self._confidence_blender.reset()
-            self._velocity_clamp.reset()
-            self._position_smoother.reset()
-            self._bone_constraints.reset()
-            self._ground_clamp.reset()
-            self._proportions_applied = False
+        if self._multi_camera_provider is not None:
+            logger.info(
+                "[PIPELINE] Triangulator L/R swap corrections this session: %d",
+                getattr(self._multi_camera_provider, "swap_count", 0),
+            )
+            reset_provider = getattr(self._multi_camera_provider, "reset_temporal_state", None)
+            if callable(reset_provider):
+                reset_provider()
+        else:
+            reset_tracking = getattr(self._pose_estimator, "reset_tracking", None)
+            if callable(reset_tracking):
+                reset_tracking()
 
         if self._display_smoother is not None:
             self._display_smoother.reset()
 
-    def consume_bottom_frame(self) -> tuple[Optional[List[List[float]]], Optional[dict]]:
+    def on_calibration_changed(self, world_frame_changed: bool) -> None:
+        """
+        A new camera calibration was installed in the provider. Temporal state, foot
+        contact anchors and the floor restart: even a refine that keeps the world frame
+        shifts it by ~1 cm, which the planted-foot model would carry as a heel-rise bias.
+        Body measurements are lengths, so they survive. world_frame_changed says whether
+        the origin, heading or vertical moved (first calibration, board -> person re-anchor).
+        """
+        self._preik.reset_world_state()
+        if self._multi_camera_provider is not None:
+            self._multi_camera_provider.reset_temporal_state()
+        logger.info(
+            "[PIPELINE] Camera calibration installed (%s): temporal and foot contact state reset",
+            "world frame moved" if world_frame_changed else "world frame kept",
+        )
+
+    def apply_athlete_params(self, params: dict) -> None:
+        """Adopt a returning user's stored body measurements and scale thresholds once."""
+        self.body_calibration = SegmentLengthEstimator.from_athlete_params(params)
+        self._apply_body_proportions()
+
+    def _apply_body_proportions(self) -> None:
+        proportions = self.body_calibration.body_proportions
+        if proportions is None:
+            return
+        self._rule_engine.apply_body_proportion_scaling(proportions)
+        logger.info(
+            "[PIPELINE] Body proportions applied: femur=%.3fm torso=%.3fm lean_scale=%.2f",
+            proportions.femur_length_avg, proportions.torso_length_avg, proportions.forward_lean_scale,
+        )
+
+    def consume_bottom_frame(self) -> tuple[list[list[float]] | None, dict | None]:
         """Return and reset the bottom-of-rep keypoints and angles.
 
         Returns (bottom_kpts, bottom_angles) captured at max knee flexion
@@ -403,7 +463,7 @@ class BiomechanicsPipeline:
         self._bottom_angles = None
         return kpts, angles
 
-    def consume_standing_frame(self) -> Optional[List[List[float]]]:
+    def consume_standing_frame(self) -> list[list[float]] | None:
         """Return the standing keypoints captured just before the rep started."""
         kpts = self._standing_kpts
         self._standing_captured = False
@@ -413,19 +473,32 @@ class BiomechanicsPipeline:
     def _build_trajectory_sample(
         skeleton_3d: Skeleton3D, angles: JointAngles
     ) -> dict:
-        """One frame of scoring input, taken as measured — no re-grounding."""
+        """One frame of scoring input, taken as measured — no re-grounding. NaN angles pass through."""
         kpts = skeleton_3d.to_numpy()
+        keypoints = skeleton_3d.keypoints
+
+        def _height_cm(idx: int) -> float:
+            if keypoints[idx].confidence <= 0.0:
+                return float("nan")
+            return float(kpts[idx][1]) * 100.0
+
         return {
             "trunk_pitch": 180.0 - angles.trunk_flexion,
             "knee_valgus_l": angles.knee_valgus_l,
             "knee_valgus_r": angles.knee_valgus_r,
-            "hip_y_l": float(kpts[CocoKeypoints.LEFT_HIP][1]) * 100.0,
-            "hip_y_r": float(kpts[CocoKeypoints.RIGHT_HIP][1]) * 100.0,
-            "knee_y_l": float(kpts[CocoKeypoints.LEFT_KNEE][1]) * 100.0,
-            "knee_y_r": float(kpts[CocoKeypoints.RIGHT_KNEE][1]) * 100.0,
+            "hip_y_l": _height_cm(CocoKeypoints.LEFT_HIP),
+            "hip_y_r": _height_cm(CocoKeypoints.RIGHT_HIP),
+            "knee_y_l": _height_cm(CocoKeypoints.LEFT_KNEE),
+            "knee_y_r": _height_cm(CocoKeypoints.RIGHT_KNEE),
         }
 
-    def consume_rep_trajectory(self) -> List[dict]:
+    @staticmethod
+    def _legs_present(skeleton_3d: Skeleton3D) -> bool:
+        return all(
+            skeleton_3d.keypoints[idx].confidence > 0.0 for idx in _LEG_KEYPOINTS
+        )
+
+    def consume_rep_trajectory(self) -> list[dict]:
         """Return and reset the per-frame samples buffered during the last rep."""
         samples = list(self._rep_trajectory)
         self._rep_trajectory.clear()
@@ -433,24 +506,13 @@ class BiomechanicsPipeline:
 
     def enable_inspect(self) -> None:
         self._inspecting = True
+        self._preik.set_tap(self._record_inspect_stage)
 
-    def _apply_preik_filters_inspected(self, skeleton_3d: Skeleton3D) -> Skeleton3D:
-        intermediates: dict[str, np.ndarray] = {}
-        skeleton_3d = self._confidence_blender.blend(skeleton_3d)
-        intermediates["confidence_blend"] = skeleton_3d.to_numpy().copy()
-        skeleton_3d = self._velocity_clamp.clamp(skeleton_3d)
-        intermediates["velocity_clamp"] = skeleton_3d.to_numpy().copy()
-        # Disabled stages mirrored from apply_preik_filters (preik_chain.py)
-        # skeleton_3d = self._bone_constraints.enforce(skeleton_3d)
-        # intermediates["bone_constraints_1"] = skeleton_3d.to_numpy().copy()
-        # skeleton_3d = self._ground_clamp.clamp(skeleton_3d)
-        # intermediates["ground_clamp"] = skeleton_3d.to_numpy().copy()
-        # skeleton_3d = self._position_smoother.smooth(skeleton_3d)
-        # intermediates["position_smoother"] = skeleton_3d.to_numpy().copy()
-        # skeleton_3d = self._bone_constraints.enforce(skeleton_3d)
-        # intermediates["bone_constraints_2"] = skeleton_3d.to_numpy().copy()
-        self._inspect_intermediates = intermediates
-        return skeleton_3d
+    def _record_inspect_stage(self, stage: str, points: np.ndarray, confidences: np.ndarray) -> None:
+        snapshot = np.array(points, dtype=np.float64, copy=True)
+        self._inspect_intermediates[stage] = snapshot
+        if stage == self._preik.stage_names[0]:
+            self._inspect_raw_kpts = snapshot
 
     def _capture_loop(self) -> None:
         """Continuously read frames from the camera in a background thread."""
@@ -460,6 +522,13 @@ class BiomechanicsPipeline:
                 with self._frame_lock:
                     self._latest_frame = frame
 
+    def _record_body_measurements(self, result: PreIKResult) -> None:
+        source = result.analysis_world if result.analysis_world is not None else result.analysis
+        confidences = np.array([kp.confidence for kp in source.keypoints], dtype=np.float64)
+        self.body_calibration.record(source.to_numpy(), confidences, self.rep_count)
+        if self.body_calibration.is_complete:
+            self._apply_body_proportions()
+
     def process_frame(self) -> PipelineFrame:
         """
         Run one full pipeline iteration.
@@ -467,21 +536,31 @@ class BiomechanicsPipeline:
         Returns:
             PipelineFrame with all layer outputs and per-layer timing.
         """
-        latency_ms = {}
+        latency_ms: dict[str, float] = {}
         now = time.time()
 
+        if self._inspecting:
+            self._inspect_raw_kpts = None
+            self._inspect_intermediates = {}
+            self._inspect_raw_angles = None
+
         # --- Capture + Pose estimation ---
-        skeleton_2d: Optional[Skeleton2D] = None
-        skeleton_3d: Optional[Skeleton3D] = None
-        bar_detection: Optional[BarbellDetection] = None
-        bar_track: Optional[BarTrackState] = None
+        skeleton_2d: Skeleton2D | None = None
+        raw_3d: Skeleton3D | None = None
+        bar_detection: BarbellDetection | None = None
+        bar_track: BarTrackState | None = None
 
         if self._multi_camera and self._multi_camera_provider is not None:
             t0 = time.perf_counter()
-            frame, skeleton_2d, skeleton_3d = self._multi_camera_provider.get_pose()
+            frame, skeleton_2d, raw_3d = self._multi_camera_provider.get_pose()
             latency_ms["capture"] = 0.0
             latency_ms["pose"] = (time.perf_counter() - t0) * 1000.0
+            if raw_3d is not None:
+                # The skeleton carries the primary camera's capture sequence
+                # and timestamp; never overwrite them.
+                self._frame_index = raw_3d.frame_index
         else:
+            self._frame_index += 1
             t0 = time.perf_counter()
             with self._frame_lock:
                 frame = self._latest_frame
@@ -490,34 +569,44 @@ class BiomechanicsPipeline:
             if frame is not None:
                 t0 = time.perf_counter()
                 try:
-                    skeleton_2d, skeleton_3d = self._pose_estimator.estimate_both(frame)
+                    skeleton_2d, raw_3d = self._pose_estimator.estimate_both(frame)
                 except Exception:
                     pass
                 latency_ms["pose"] = (time.perf_counter() - t0) * 1000.0
 
+        frame_index = self._frame_index
+
         if frame is None:
-            self._frame_index += 1
             return PipelineFrame(
-                frame_index=self._frame_index,
+                frame_index=frame_index,
                 timestamp=now,
                 latency_ms=latency_ms,
             )
 
         self.last_frame = frame
 
+        # Hip-centred view of the measured skeleton for the gates and the
+        # BiLSTM. Triangulated skeletons arrive in the world frame; MediaPipe
+        # ones are hip-centred already. Missing hips = no skeleton this tick.
+        raw_centred: Skeleton3D | None = None
+        if raw_3d is not None:
+            raw_centred = recentre_at_hips(raw_3d) if self._multi_camera else raw_3d
+
         # Presence-only mode: return after pose estimation so rest
         # periods keep detecting the user without advancing gates,
         # tracking state, or collecting any data.
         if self.presence_only:
-            self._frame_index += 1
             return PipelineFrame(
-                frame_index=self._frame_index,
+                frame_index=frame_index,
                 timestamp=now,
                 skeleton_2d=skeleton_2d,
-                skeleton_3d=skeleton_3d,
+                skeleton_3d_raw=raw_centred,
                 latency_ms=latency_ms,
             )
 
+        # The single-camera valgus estimator reads the raw 2D pose; the
+        # display smoother must never leak into diagnosis.
+        skeleton_2d_raw = skeleton_2d
         if skeleton_2d is not None and self._display_smoother is not None:
             skeleton_2d = self._display_smoother.smooth(skeleton_2d)
 
@@ -526,7 +615,7 @@ class BiomechanicsPipeline:
             t0 = time.perf_counter()
             try:
                 bar_detection = self._barbell_detector.detect(
-                    frame, timestamp=now, frame_index=self._frame_index
+                    frame, timestamp=now, frame_index=frame_index
                 )
             except Exception:
                 bar_detection = None
@@ -534,187 +623,151 @@ class BiomechanicsPipeline:
                 bar_track = self._bar_tracker.update(bar_detection, timestamp=now)
             latency_ms["barbell"] = (time.perf_counter() - t0) * 1000.0
 
-        if skeleton_3d is None:
-            if (
-                self._last_valid_skeleton is not None
-                and self._dropout_decay_frames < _MAX_DROPOUT_HOLD_FRAMES
-            ):
-                self._dropout_decay_frames += 1
-                decay = 1.0 - (self._dropout_decay_frames / _MAX_DROPOUT_HOLD_FRAMES)
-                held = self._last_valid_skeleton
-                skeleton_3d = Skeleton3D.from_numpy(
-                    held.to_numpy(),
-                    confidences=[
-                        kp.confidence * decay for kp in held.keypoints
-                    ],
-                    timestamp=now,
-                    frame_index=self._frame_index,
-                )
-            else:
-                self._frame_index += 1
-                return PipelineFrame(
-                    frame_index=self._frame_index,
-                    timestamp=now,
-                    skeleton_2d=skeleton_2d,
-                    bar_detection=bar_detection,
-                    bar_track=bar_track,
-                    latency_ms=latency_ms,
-                )
-        else:
-            self._dropout_decay_frames = 0
-            self._last_valid_skeleton = skeleton_3d
-
-        if self._inspecting:
-            self._inspect_raw_kpts = skeleton_3d.to_numpy().copy()
-
-        # --- BiLSTM rep counting (runs on raw skeleton, before IK) ---
+        # --- BiLSTM rep counting + gates: measured skeletons only, never
+        # predicted ones ---
         bilstm_rep_data = None
         bilstm_shallow_class = None
         bilstm_prob = None
         bilstm_depth_class = None
         bilstm_depth_class_name = None
         bilstm_class_probs = None
-        if self._bilstm is not None:
-            t0 = time.perf_counter()
-            bilstm_rep_data, bilstm_shallow_class = self._bilstm.process_skeleton(skeleton_3d)
-            bilstm_prob = self._bilstm.current_probability
-            bilstm_depth_class = self._bilstm.current_depth_class
-            bilstm_depth_class_name = DEPTH_CLASS_NAMES.get(bilstm_depth_class, "Unknown")
-            bilstm_class_probs = self._bilstm.current_class_probabilities.tolist()
-            latency_ms["bilstm"] = (time.perf_counter() - t0) * 1000.0
+        if raw_centred is not None:
+            if self._bilstm is not None:
+                t0 = time.perf_counter()
+                bilstm_rep_data, bilstm_shallow_class = self._bilstm.process_skeleton(raw_centred)
+                bilstm_prob = self._bilstm.current_probability
+                bilstm_depth_class = self._bilstm.current_depth_class
+                bilstm_depth_class_name = DEPTH_CLASS_NAMES.get(bilstm_depth_class, "Unknown")
+                bilstm_class_probs = self._bilstm.current_class_probabilities.tolist()
+                latency_ms["bilstm"] = (time.perf_counter() - t0) * 1000.0
 
-        # --- Standing pose gate (runs every frame, unconditional) ---
-        self._standing_gate.check(skeleton_3d)
+            # Standing pose gate runs every frame, unconditionally; the
+            # readiness gate is per-set and resets between sets.
+            self._standing_gate.check(raw_centred)
+            self._readiness_gate.check(raw_centred)
 
-        # --- Readiness gate (per-set, resets between sets) ---
-        self._readiness_gate.check(skeleton_3d)
         if not self._readiness_gate.is_ready:
-            self._frame_index += 1
             return PipelineFrame(
-                frame_index=self._frame_index,
+                frame_index=frame_index,
                 timestamp=now,
                 skeleton_2d=skeleton_2d,
-                skeleton_3d=skeleton_3d,
+                skeleton_3d_raw=raw_centred,
                 bar_detection=bar_detection,
                 bar_track=bar_track,
                 latency_ms=latency_ms,
             )
 
-        # --- Pre-IK filtering layers (optional) ---
-        if self._inspecting:
-            self._inspect_intermediates = None
-            self._inspect_raw_angles = None
+        # --- Pre-IK chain: analysis continues through short dropouts ---
+        t0 = time.perf_counter()
+        if raw_centred is not None:
+            result = self._preik.run(raw_3d)
+        else:
+            result = self._preik.predict_missing(raw_3d.timestamp if raw_3d is not None else time.time())
+        latency_ms["pre_ik"] = (time.perf_counter() - t0) * 1000.0
 
-        if self._preik_enabled:
-            t0 = time.perf_counter()
-            if self._inspecting:
-                skeleton_3d = self._apply_preik_filters_inspected(skeleton_3d)
-            else:
-                skeleton_3d = apply_preik_filters(
-                    skeleton_3d,
-                    confidence_blender=self._confidence_blender,
-                    velocity_clamp=self._velocity_clamp,
-                    bone_constraints=self._bone_constraints,
-                    ground_clamp=self._ground_clamp,
-                    position_smoother=self._position_smoother,
-                )
-            latency_ms["pre_ik_filters"] = (time.perf_counter() - t0) * 1000.0
+        if result is None:
+            return PipelineFrame(
+                frame_index=frame_index,
+                timestamp=now,
+                skeleton_2d=skeleton_2d,
+                skeleton_3d_raw=raw_centred,
+                bar_detection=bar_detection,
+                bar_track=bar_track,
+                latency_ms=latency_ms,
+            )
 
-            # Apply body-proportion scaling once after bone calibration
-            if (
-                not self._proportions_applied
-                and self._bone_constraints.is_calibrated
-                and self._bone_constraints.body_proportions is not None
-            ):
-                proportions = self._bone_constraints.body_proportions
-                self._rule_engine.apply_body_proportion_scaling(proportions)
-                self._ik_solver.set_body_proportions(proportions)
-                self._proportions_applied = True
+        analysis = result.analysis
+        predicted_frame = raw_centred is None
+
+        if not self.body_calibration.is_complete and not predicted_frame:
+            self._record_body_measurements(result)
 
         # --- IK solve ---
         t0 = time.perf_counter()
-        raw_angles = self._ik_solver.solve(skeleton_3d)
+        angles = self._ik_solver.solve(analysis)
 
-        # Mode-aware valgus estimation (2D FPPA or 3D abduction)
-        vr = self._valgus_estimator.estimate(skeleton_2d, skeleton_3d)
-        raw_angles.knee_valgus_l = vr.valgus_l
-        raw_angles.knee_valgus_r = vr.valgus_r
-        raw_angles.foot_confidence_l = vr.foot_confidence_l
-        raw_angles.foot_confidence_r = vr.foot_confidence_r
-        raw_angles.knee_ankle_sep_ratio = vr.kasr
-        raw_angles.hip_rotation_l = vr.hip_rotation_l
-        raw_angles.hip_rotation_r = vr.hip_rotation_r
+        # Mode-aware valgus estimation (2D FPPA on the raw 2D pose, or 3D)
+        vr = self._valgus_estimator.estimate(
+            None if self._multi_camera else skeleton_2d_raw, analysis,
+        )
+        angles.knee_valgus_l = vr.valgus_l
+        angles.knee_valgus_r = vr.valgus_r
+        angles.foot_confidence_l = vr.foot_confidence_l
+        angles.foot_confidence_r = vr.foot_confidence_r
+        angles.knee_ankle_sep_ratio = vr.kasr
+        angles.hip_rotation_l = vr.hip_rotation_l
+        angles.hip_rotation_r = vr.hip_rotation_r
 
         if self._inspecting:
-            self._inspect_raw_angles = raw_angles
-
-        # Update phase-aware smoothing BEFORE filtering so the current
-        # frame uses the correct parameters (not the previous frame's).
-        if self._preik_enabled:
-            self._angle_filter.update_phase(self._rep_counter.phase)
-
-        # Apply temporal filter for stability
-        angles = self._angle_filter.filter_angles(raw_angles)
-
-        # Compute derivatives (velocity, acceleration)
-        derivatives = self._derivative_tracker.update(angles)
+            self._inspect_raw_angles = angles
+        knee_flexion = self._knee_flexion_median.update(angles.avg_knee_flexion)
         latency_ms["ik"] = (time.perf_counter() - t0) * 1000.0
 
         # --- Compute rep signal (exercise-specific, from profile) ---
-        rep_signal = self._profile.get_rep_signal(skeleton_3d, angles)
+        rep_signal = self._profile.get_rep_signal(analysis, angles)
 
         # --- Buffer standing frame: last skeleton before rep starts ---
+        legs_present = self._legs_present(analysis)
         if not self._rep_counter.in_rep:
-            self._standing_kpts = skeleton_3d.to_numpy().tolist()
+            if legs_present:
+                self._standing_kpts = analysis.to_numpy().tolist()
             self._standing_captured = False
         elif not self._standing_captured:
             self._standing_captured = True
 
         # --- Buffer bottom-of-rep frame for diagnosis engine ---
         if self._rep_counter.in_rep:
-            knee_flex = angles.avg_knee_flexion
-            if knee_flex > self._bottom_max_knee_flex:
-                self._bottom_max_knee_flex = knee_flex
-                self._bottom_kpts = skeleton_3d.to_numpy().tolist()
+            if math.isnan(self._rep_max_knee_flex) or knee_flexion > self._rep_max_knee_flex:
+                self._rep_max_knee_flex = knee_flexion
+            if knee_flexion > self._bottom_max_knee_flex and legs_present:
+                self._bottom_max_knee_flex = knee_flexion
+                self._bottom_kpts = analysis.to_numpy().tolist()
                 self._bottom_angles = angles.as_dict()
 
             self._rep_trajectory.append(
-                self._build_trajectory_sample(skeleton_3d, angles)
+                self._build_trajectory_sample(analysis, angles)
             )
+        else:
+            self._rep_max_knee_flex = math.nan
 
         # --- Fault detection + rep counting ---
         t0 = time.perf_counter()
 
-        # Use predicted angles for fault evaluation when pre-IK filters are on,
-        # otherwise use actual angles directly.
-        if self._preik_enabled:
-            eval_angles = self._predictive_estimator.predict(angles, derivatives)
-        else:
-            eval_angles = angles
+        # Extrapolated frames keep the rep counter alive but never justify a cue.
+        faults: list[FaultEvent] = []
+        if not predicted_frame:
+            faults = self._rule_engine.evaluate(
+                angles,
+                in_rep=self._rep_counter.in_rep,
+                rep_number=self._rep_counter.rep_count + 1,
+                bar_detection=bar_detection,
+                derivatives=None,
+                phase=self._rep_counter.phase,
+                foot_state=result.foot_state,
+            )
 
-        faults = self._rule_engine.evaluate(
-            eval_angles,
-            in_rep=self._rep_counter.in_rep,
-            rep_number=self._rep_counter.rep_count + 1,
-            bar_detection=bar_detection,
-            derivatives=derivatives,
-            phase=self._rep_counter.phase,
-        )
-
-        # Calibration uses ACTUAL angles
         if not self._rule_engine.calibrated and self._rep_counter.in_rep:
             self._rule_engine.record_frame_for_calibration(angles)
 
-        # Rep counter uses profile-provided signal for state, angles for metrics
+        # Rep counter uses profile-provided signal for state, angles for
+        # metrics, and the analysis clock so velocities match the capture.
         rep_data, feedback = self._rep_counter.update(
             signal_value=rep_signal,
-            timestamp=now,
+            timestamp=analysis.timestamp,
             angles=angles,
             faults=faults,
         )
 
         # If rep completed, check depth faults and advance calibration
         if rep_data is not None:
+            # The rep's depth is the robust statistic, not the counter's
+            # single-frame max.
+            # NaN when no frame of the rep had both knees; the depth rule skips it.
+            rep_data.max_depth_angle = self._rep_max_knee_flex
+            # Per-rep verdicts (bilateral asymmetry) belong to this rep.
+            rep_faults = self._rule_engine.finish_rep(angles, rep_data.rep_number)
+            faults.extend(rep_faults)
+            rep_data.faults.extend(rep_faults)
             # Only evaluate depth here when BiLSTM is NOT active.
             # When BiLSTM is active, depth evaluation happens in the BiLSTM
             # path below to avoid double-counting.
@@ -730,6 +783,20 @@ class BiomechanicsPipeline:
             # BiLSTM path can pick them up via _pending_bilstm_faults.
             if self._bilstm is not None:
                 self._pending_bilstm_faults.extend(rep_data.faults)
+        elif feedback == "go_deeper" and self._bilstm is None:
+            self._rule_engine.discard_rep()
+            # A descent rejected for depth produces no rep; the depth fault
+            # is the only thing telling the lifter why nothing was counted.
+            rejected_depth = (
+                self._rep_max_knee_flex
+                if not math.isnan(self._rep_max_knee_flex)
+                else self._rep_counter.rejected_rep_max_depth_angle
+            )
+            faults.extend(
+                self._rule_engine.evaluate_rep_complete(
+                    rejected_depth, angles, self._rep_counter.rep_count + 1,
+                )
+            )
 
         latency_ms["faults"] = (time.perf_counter() - t0) * 1000.0
 
@@ -740,13 +807,10 @@ class BiomechanicsPipeline:
         if self._bilstm is not None and (
             self._bilstm.in_rep or self._bilstm.current_depth_class > 0
         ):
-            knee = angles.avg_knee_flexion
-            if knee > self._bilstm_max_knee_flex:
-                self._bilstm_max_knee_flex = knee
-            if knee < self._bilstm_min_knee_flex:
-                self._bilstm_min_knee_flex = knee
-
-        self._frame_index += 1
+            if knee_flexion > self._bilstm_max_knee_flex:
+                self._bilstm_max_knee_flex = knee_flexion
+            if knee_flexion < self._bilstm_min_knee_flex:
+                self._bilstm_min_knee_flex = knee_flexion
 
         # Use BiLSTM rep data as primary when enabled and available.
         # When BiLSTM is active, suppress rule-based rep events to prevent
@@ -756,7 +820,7 @@ class BiomechanicsPipeline:
             # Enrich BiLSTM RepData with rule-based metrics so downstream
             # consumers (IPC bridge, coaching LLM, set reports) get real
             # angle data, faults, timing, and asymmetry values.
-            metrics = self._rep_counter.snapshot_rep_metrics()
+            metrics = self._rep_counter.snapshot_rep_metrics(now=analysis.timestamp)
 
             # Use our independently-tracked knee flexion for depth, since
             # the hip counter's snapshot may be desync'd from the BiLSTM's
@@ -805,10 +869,13 @@ class BiomechanicsPipeline:
             self._bilstm_min_knee_flex = 180.0
 
         return PipelineFrame(
-            frame_index=self._frame_index,
+            frame_index=frame_index,
             timestamp=now,
             skeleton_2d=skeleton_2d,
-            skeleton_3d=skeleton_3d,
+            skeleton_3d=analysis,
+            skeleton_3d_raw=raw_centred,
+            skeleton_3d_display=result.display,
+            foot_state=result.foot_state,
             joint_angles=angles,
             faults=faults,
             rep_data=final_rep_data,

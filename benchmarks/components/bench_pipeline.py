@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from biomechanics.config import BiomechanicsConfig
+from biomechanics.config import load_pipeline_config
 from biomechanics.pipeline import BiomechanicsPipeline
 from biomechanics.utils.timing import PipelineProfiler
 
@@ -25,10 +25,10 @@ def run(iterations: int = 100, warmup: int = 10) -> BenchmarkResult:
             metadata={"reason": "No video frames available"},
         )
 
-    config = BiomechanicsConfig()
+    config = load_pipeline_config()
 
     try:
-        pipeline = BiomechanicsPipeline(config)
+        pipeline = BiomechanicsPipeline(config, defer_capture=True)
     except Exception as e:
         return BenchmarkResult(
             component_name=name,
@@ -39,31 +39,23 @@ def run(iterations: int = 100, warmup: int = 10) -> BenchmarkResult:
 
     profiler = PipelineProfiler(window_size=iterations)
 
-    # Warmup — feed frames through the pipeline
-    for i in range(min(warmup, len(frames))):
-        try:
-            pipeline.process_frame(frames[i])
-        except TypeError:
-            pipeline.process_frame()
-            break
+    # process_frame() reads the capture thread's latest frame; with
+    # capture deferred we inject video frames the same way.
+    def _inject(frame) -> None:
+        with pipeline._frame_lock:
+            pipeline._latest_frame = frame
 
-    # Check if process_frame accepts a frame argument
-    accepts_frame = True
-    try:
-        pipeline.process_frame(frames[0])
-    except TypeError:
-        accepts_frame = False
+    for i in range(min(warmup, len(frames))):
+        _inject(frames[i])
+        pipeline.process_frame()
 
     layer_timings: dict[str, list[float]] = {}
 
     with ResourceProfiler() as rp:
         for i in range(iterations):
-            frame = frames[i % len(frames)]
+            _inject(frames[i % len(frames)])
             with profiler.time_layer(name):
-                if accepts_frame:
-                    result = pipeline.process_frame(frame)
-                else:
-                    result = pipeline.process_frame()
+                result = pipeline.process_frame()
 
             if result and hasattr(result, "latency_ms"):
                 for layer, ms in result.latency_ms.items():

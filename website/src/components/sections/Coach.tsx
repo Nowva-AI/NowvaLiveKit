@@ -46,7 +46,7 @@ export function Coach() {
               <span className="gradient-text">A full coach.</span>
             </>
           }
-          lead="A great trainer does more than watch your reps — they write your program, plan your nutrition, and track every number. Nova does the whole job."
+          lead="A great trainer notices things. The knee that flares up at depth, the rep you always rush when you're tired, the cue that finally makes it click. That's the attention and proximity that Nova is built to have."
         />
 
         <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">

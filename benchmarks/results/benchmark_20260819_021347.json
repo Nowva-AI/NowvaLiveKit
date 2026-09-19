@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-08-19T02:13:47.776831",
+  "git_commit": "2a07fe1",
+  "git_branch": "triangulated_pipeline_optimization",
+  "system": {
+    "cpu": "arm",
+    "platform": "darwin",
+    "python": "3.13.7",
+    "machine": "arm64",
+    "ram_gb": 8.0,
+    "gpu": "Apple Silicon (MPS)"
+  },
+  "elapsed_seconds": 1.45,
+  "components": {
+    "biomechanics.bilstm": {
+      "latency_ms": {
+        "mean": 1.7355,
+        "p50": 1.8036,
+        "p95": 1.9028,
+        "p99": 15.3714,
+        "min": 0.1845,
+        "max": 28.286,
+        "count": 50
+      },
+      "memory_mb": {
+        "peak": 0.53,
+        "avg": 0.525,
+        "delta": 0.005
+      },
+      "cpu_percent": 74.5,
+      "gpu_vram_mb": null,
+      "iterations": 50,
+      "warmup": 10,
+      "status": "pass",
+      "threshold_ms": 5.0,
+      "metadata": {
+        "model_load_ms": 0.01
+      },
+      "sub_results": []
+    }
+  },
+  "pipelines": {
+    "biomechanics_component_sum": {
+      "p50_total_ms": 1.8,
+      "p95_total_ms": 1.9,
+      "estimated_fps": 554.4,
+      "breakdown_pct": {
+        "biomechanics.bilstm": 100.0
+      }
+    }
+  }
+}

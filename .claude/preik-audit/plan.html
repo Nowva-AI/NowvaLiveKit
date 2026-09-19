@@ -1,0 +1,570 @@
+<title>Pre-IK Filter Rebuild</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #F2F5F3;
+  --surface: #FFFFFF;
+  --ink: #131A17;
+  --muted: #56625C;
+  --faint: #7A8680;
+  --rule: #D4DBD7;
+  --accent: #0A6B6A;
+  --accent-soft: #DCEEED;
+  --crit: #B3261E;
+  --crit-soft: #FBE8E6;
+  --high: #9A5700;
+  --high-soft: #FAEFDC;
+  --ok: #2B7446;
+  --ok-soft: #E1F1E6;
+  --gone: #8C9690;
+  --display: "Archivo", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0D1210;
+    --surface: #151C19;
+    --ink: #E2E9E5;
+    --muted: #9BA7A1;
+    --faint: #75817B;
+    --rule: #28322E;
+    --accent: #5FC6C0;
+    --accent-soft: #14302D;
+    --crit: #F28A80;
+    --crit-soft: #3A1D1A;
+    --high: #E8B065;
+    --high-soft: #33270F;
+    --ok: #80CC9B;
+    --ok-soft: #15291D;
+    --gone: #66716B;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0D1210;
+  --surface: #151C19;
+  --ink: #E2E9E5;
+  --muted: #9BA7A1;
+  --faint: #75817B;
+  --rule: #28322E;
+  --accent: #5FC6C0;
+  --accent-soft: #14302D;
+  --crit: #F28A80;
+  --crit-soft: #3A1D1A;
+  --high: #E8B065;
+  --high-soft: #33270F;
+  --ok: #80CC9B;
+  --ok-soft: #15291D;
+  --gone: #66716B;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 15.5px;
+  line-height: 1.6;
+  padding-inline: 20px;
+  padding-block: 48px 72px;
+}
+.page { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+.prose { max-width: 68ch; }
+
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.1rem, 4.6vw, 3.1rem); font-weight: 780; font-stretch: 82%; letter-spacing: -0.015em; line-height: 1.05; }
+h2 { font-size: 1.55rem; font-weight: 720; font-stretch: 88%; letter-spacing: -0.005em; line-height: 1.2; }
+h3 { font-size: 1.08rem; font-weight: 680; font-stretch: 92%; line-height: 1.3; }
+p { margin: 0; }
+code, .mono { font-family: var(--mono); font-size: 0.84em; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+.eyebrow { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.section-head { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--rule); padding-top: 22px; }
+.section-head p { color: var(--muted); max-width: 68ch; }
+section { display: flex; flex-direction: column; gap: 22px; }
+
+/* Header */
+header { display: flex; flex-direction: column; gap: 18px; }
+.lede { font-size: 1.12rem; line-height: 1.55; max-width: 64ch; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 28px; font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+.facts b { color: var(--ink); font-weight: 500; }
+
+.findings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; }
+.finding { display: flex; flex-direction: column; gap: 6px; }
+.finding .num { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); letter-spacing: 0.04em; }
+.finding p { color: var(--muted); font-size: 0.95rem; }
+.finding p strong { color: var(--ink); font-weight: 600; }
+
+/* Severity chips */
+.chip { display: inline-block; font-family: var(--mono); font-size: 0.68rem; font-weight: 500; letter-spacing: 0.07em; text-transform: uppercase; padding: 2px 8px; border-radius: 3px; white-space: nowrap; }
+.chip.crit { color: var(--crit); background: var(--crit-soft); }
+.chip.high { color: var(--high); background: var(--high-soft); }
+.chip.ok { color: var(--ok); background: var(--ok-soft); }
+.chip.acc { color: var(--accent); background: var(--accent-soft); }
+.chip.gone { color: var(--gone); background: transparent; border: 1px solid var(--rule); }
+
+/* Bug list */
+.bugs { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.bug { display: grid; grid-template-columns: 92px minmax(0, 1fr) minmax(0, 300px); gap: 6px 22px; padding: 16px 0; border-bottom: 1px solid var(--rule); align-items: baseline; }
+.bug h3 { font-family: var(--body); font-size: 1rem; font-weight: 600; font-stretch: 100%; }
+.bug .why { color: var(--muted); font-size: 0.93rem; margin-top: 3px; }
+.bug .where { font-family: var(--mono); font-size: 0.76rem; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.bug .where .ev { display: block; margin-top: 4px; color: var(--faint); font-family: var(--body); font-size: 0.8rem; }
+
+/* Signal path lanes */
+.lanes { display: flex; flex-direction: column; gap: 26px; }
+.lane { display: flex; flex-direction: column; gap: 10px; }
+.lane-label { display: flex; align-items: baseline; gap: 12px; }
+.lane-label h3 { font-size: 1rem; }
+.lane-label span { color: var(--muted); font-size: 0.88rem; }
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px 4px; }
+.stage { display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 8px 11px; min-width: 0; max-width: 190px; }
+.stage b { font-weight: 600; font-size: 0.86rem; line-height: 1.25; }
+.stage small { color: var(--muted); font-size: 0.74rem; line-height: 1.35; }
+.stage.bad { border-color: color-mix(in srgb, var(--crit) 45%, var(--rule)); }
+.stage.bad small { color: var(--crit); }
+.stage.off { background: transparent; border-style: dashed; }
+.stage.off b { color: var(--gone); text-decoration: line-through; text-decoration-thickness: 1px; }
+.stage.off small { color: var(--gone); }
+.stage.new { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.stage.new small { color: var(--accent); }
+.arrow { align-self: center; color: var(--faint); font-family: var(--mono); font-size: 0.8rem; padding: 0 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.8rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.sw { width: 14px; height: 10px; border-radius: 2px; border: 1px solid var(--rule); background: var(--surface); }
+.sw.bad { border-color: var(--crit); }
+.sw.off { border-style: dashed; background: transparent; }
+.sw.new { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* Tables */
+.table-wrap { overflow-x: auto; border-top: 1px solid var(--ink); }
+table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 0.9rem; }
+th { text-align: left; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); padding: 10px 14px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: bottom; }
+td { padding: 11px 14px 11px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+td.num, th.num { font-variant-numeric: tabular-nums; text-align: right; font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
+td .sub { display: block; color: var(--muted); font-size: 0.82rem; margin-top: 2px; }
+tr.hl td { background: var(--accent-soft); }
+tr.hl td:first-child { padding-left: 8px; }
+tr.hl td:last-child { padding-right: 8px; }
+.neg { color: var(--crit); }
+.pos { color: var(--ok); }
+.caption { color: var(--muted); font-size: 0.84rem; max-width: 76ch; }
+
+/* Phases */
+.phases { display: flex; flex-direction: column; border-top: 1px solid var(--rule); }
+.phase { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(0, 320px); gap: 10px 26px; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+.phase-letter { font-family: var(--display); font-weight: 800; font-stretch: 75%; font-size: 2.6rem; line-height: 0.9; color: var(--accent); }
+.phase-body { display: flex; flex-direction: column; gap: 10px; }
+.phase-body > p { color: var(--muted); font-size: 0.93rem; }
+.phase ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; font-size: 0.92rem; }
+.phase li::marker { color: var(--faint); }
+.exit { display: flex; flex-direction: column; gap: 8px; background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 12px 14px; align-self: start; }
+.exit .eyebrow { font-size: 0.68rem; }
+.exit ul { font-size: 0.84rem; gap: 4px; }
+.exit .gain { font-family: var(--mono); font-size: 0.78rem; color: var(--ink); border-top: 1px solid var(--rule); padding-top: 8px; line-height: 1.5; }
+
+/* Decisions */
+.decisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 32px; border-top: 1px solid var(--rule); }
+.decision { display: flex; flex-direction: column; gap: 6px; padding: 18px 0; border-bottom: 1px solid var(--rule); }
+.decision p { color: var(--muted); font-size: 0.92rem; }
+.rec { font-size: 0.9rem; color: var(--ink) !important; }
+.rec b { color: var(--accent); font-weight: 600; }
+
+.two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; }
+.plain-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 0.92rem; color: var(--muted); }
+.plain-list strong { color: var(--ink); font-weight: 600; }
+.files { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 16px; }
+.files span:nth-child(odd) { color: var(--ink); }
+
+footer { color: var(--faint); font-size: 0.8rem; border-top: 1px solid var(--rule); padding-top: 18px; }
+
+@media (max-width: 820px) {
+  .findings { grid-template-columns: 1fr; gap: 20px; }
+  .bug { grid-template-columns: 1fr; }
+  .phase { grid-template-columns: 1fr; }
+  .phase-letter { font-size: 2rem; }
+  .decisions, .two-col { grid-template-columns: 1fr; }
+  .stage { max-width: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="page">
+
+<header>
+  <div class="eyebrow">Nowva · Biomechanics pipeline · Audit 2026-09-16</div>
+  <h1>Pre-IK Filter Rebuild</h1>
+  <p class="lede">The pre-IK filters are not the main problem, and turning them back on would make the 3-camera pipeline worse. On a ground-truth simulator, every original stage except the velocity clamp hurt squat accuracy. The largest errors sit on either side of the filters: in how the 3D skeleton is built, and in the angle smoothing and prediction after IK. Several bugs in the 3-camera path are breaking live sessions today.</p>
+  <div class="facts">
+    <span><b>9</b> parallel audits</span>
+    <span><b>1</b> ground-truth squat simulator (real repo classes)</span>
+    <span><b>12</b> live or latent bugs</span>
+    <span><b>0</b> code changes so far</span>
+  </div>
+</header>
+
+<section>
+  <div class="findings">
+    <div class="finding">
+      <span class="num">Finding</span>
+      <h3>The filters remove faults instead of noise</h3>
+      <p>The original full chain was <strong>worst on every metric</strong>. It added 112 ms of lag and cut 6° from knee flexion at the bottom. It also erased 53–100% of stance changes and pelvic list. Your decision to disable it was right.</p>
+    </div>
+    <div class="finding">
+      <span class="num">Finding</span>
+      <h3>The biggest errors are upstream and downstream</h3>
+      <p>Low-confidence joints give a knee angle of <strong>exactly 0° on 25–28% of frames</strong>. With no person crop, joints are about <strong>60 mm</strong> off in 3D. The angle filter after IK turns +0.9° of depth error into −9.5°.</p>
+    </div>
+    <div class="finding">
+      <span class="num">Finding</span>
+      <h3>One smoother does better than all of them</h3>
+      <p>A single Kalman filter that waits two frames before committing (66 ms): knee error while moving <strong>14.5° → 1.3°</strong>, depth bias <strong>−4.5° → +0.5°</strong>, 32 µs per frame, edge-friendly.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Fix first</span>
+    <h2>Bugs breaking 3-camera sessions today</h2>
+    <p>Ordered by impact on the demo loop (squat, diagnose, cue, improve). "Verified in code" means I read the lines myself; the rest were reproduced by the audit agents with scripts.</p>
+  </div>
+  <ul class="bugs">
+    <li class="bug">
+      <span class="chip crit">Critical</span>
+      <div><h3>Every rep ends the set</h3><p class="why">The rep end time comes from the camera's <code>perf_counter</code> clock; the set timeout compares it against <code>time.time()</code>. The gap is always ~1.8 billion seconds, so the set closes and the readiness gate resets after each rep.</p></div>
+      <div class="where">session_tracker.py:111 · pipeline_process.py:1287 · multi_capture.py:94<span class="ev">Verified in code; 3 reps → 3 set_complete events</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip crit">Critical</span>
+      <div><h3>Fault cues fire once per session</h3><p class="why">Triangulated skeletons always carry <code>frame_index=0</code>. Rule cooldowns count frames, so after the first fault the cooldown never expires. 6 reps with knee cave and forward lean: 1 cue each vs 6 and 3 with real indices.</p></div>
+      <div class="where">multi_camera.py:201 · knee_valgus.py:88 · rule_engine.py:153<span class="ev">Verified in code; reproduced on the real pipeline</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip crit">Critical</span>
+      <div><h3>Knee angle reads 0° mid-squat</h3><p class="why">The triangulator scales confidence down to below 0.1 for poor reprojection; IK treats anything below 0.1 as missing and returns 0.0°. Flooring confidence alone cuts moving knee error 14.3° → 4.3° and final depth error −9.5° → −3.1°.</p></div>
+      <div class="where">triangulator.py:126 · analytical_ik.py:160, 262<span class="ev">Verified in code; simulator: 25–28% of frames</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip crit">Critical</span>
+      <div><h3>Returning users lose diagnosis</h3><p class="why">Calibration mode measures the athlete, then the per-set reset wipes it. The database upsert saves <code>None</code> over the stored params, so the next session starts with diagnosis off.</p></div>
+      <div class="where">pipeline_process.py:827, 909 · calibration_utils.py:87<span class="ev">Reproduced independently by two agents</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip crit">Critical</span>
+      <div><h3>3D joints about 60 mm off</h3><p class="why">RTMPose receives the full 1280×720 frame squashed to 192×256 with no person crop. The same error appears in every view, so reprojection can't catch it. Knee flexion error 6.0° vs 1.2° with a tracked crop.</p></div>
+      <div class="where">rtmpose.py:181<span class="ev">Measured on real video (mirror test 7.9 px vs 1.15 px)</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip crit">Critical</span>
+      <div><h3>Empty frames pass as people</h3><p class="why">Keypoint scores go through a sigmoid, so every keypoint scores ≥ 0.53 even on a black image. All 26 keypoints clear the 0.3 threshold and hallucinated skeletons get triangulated.</p></div>
+      <div class="where">rtmpose.py:238<span class="ev">Measured on blank, noise and background images</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip high">High</span>
+      <div><h3>Knee cave can read as bowed-out</h3><p class="why">The valgus size comes from the pelvic axis but its sign from the hip-ankle line. With 15° toe-out a 10° knee cave reads −4.7° (varus).</p></div>
+      <div class="where">valgus.py:294–304<span class="ev">Synthetic; logic read in code — confirm with a failing test</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip high">High</span>
+      <div><h3>Reps merge together</h3><p class="why">The counter enters "bottom" only below 5 cm/s. A squat with no pause skips that band. Counts 5.4/6 today and 4.0/6 with better smoothing, so this must land before any smoothing change.</p></div>
+      <div class="where">hip_position_counter.py:245<span class="ev">Reproduced on clean synthetic reps</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip high">High</span>
+      <div><h3>A quarter to half of frames never processed</h3><p class="why">Sync always takes the newest main-camera frame before the side cameras deliver, and one miss drops the whole set. 26–45% of frames lost; a sequence-number prototype got 24–27 Hz with ~1% misses.</p></div>
+      <div class="where">multi_capture.py:111–145<span class="ev">Simulated with the real class; not measured on hardware</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip high">High</span>
+      <div><h3>One bad camera drags a joint 15–29 cm</h3><p class="why">Unweighted DLT with no view rejection. A single-view knee outlier gives 17–33° knee error; a left/right swap in one view moves all legs 24 cm. Best-subset plus swap test: 2–3° and 7 mm.</p></div>
+      <div class="where">triangulator.py:107–131<span class="ev">Synthetic, real DLT code path</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip high">High</span>
+      <div><h3>Threshold scaling compounds and points the wrong way</h3><p class="why">Body-proportion scaling multiplies thresholds again every set. Forward-lean thresholds count down from 180°, so "more lenient" becomes stricter. By set 4 the rule fires on any posture or never.</p></div>
+      <div class="where">forward_lean.py:50 · knee_valgus.py:64 · pipeline.py:388<span class="ev">Live in calibration mode; worsens if bone calibration is re-enabled</span></div>
+    </li>
+    <li class="bug">
+      <span class="chip high">High</span>
+      <div><h3>+Z is the athlete's back in 3-camera mode</h3><p class="why">T-pose PnP places the cameras at −Z, so direction-dependent outputs (pelvis tilt sign, wrist x, hip rotation, possibly forward-lean sign) are mirrored against the docstrings.</p></div>
+      <div class="where">calibration.py:9–14 · analytical_ik.py:417<span class="ev">Two agents independently; forward-lean impact unconfirmed</span></div>
+    </li>
+  </ul>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Architecture</span>
+    <h2>Signal path, today and proposed</h2>
+    <p>Reject bad data where the cameras can outvote it, estimate in world coordinates, smooth once, and never force the body into a shape. Hip re-centering moves to the IK boundary so hip noise stops leaking into every joint.</p>
+  </div>
+  <div class="legend">
+    <span><i class="sw bad"></i>Measured defect</span>
+    <span><i class="sw off"></i>Removed from analysis path</span>
+    <span><i class="sw new"></i>New or rebuilt</span>
+  </div>
+  <div class="lanes">
+    <div class="lane">
+      <div class="lane-label"><h3>Today</h3><span>3-camera mode, as shipped plus the disabled stages</span></div>
+      <div class="flow">
+        <div class="stage bad"><b>Sync capture</b><small>26–45% frames lost · two clocks</small></div><span class="arrow">→</span>
+        <div class="stage bad"><b>RTMPose ×3</b><small>full-frame squash · sigmoid score · heels dropped</small></div><span class="arrow">→</span>
+        <div class="stage bad"><b>DLT + hip centre</b><small>no view rejection · conf×0.1</small></div><span class="arrow">→</span>
+        <div class="stage bad"><b>Confidence blend</b><small>+49 ms lag</small></div><span class="arrow">→</span>
+        <div class="stage"><b>Velocity clamp</b><small>−2 mm, crawls on recovery</small></div><span class="arrow">→</span>
+        <div class="stage off"><b>Bone snap</b><small>disabled · list 0.43×</small></div><span class="arrow">→</span>
+        <div class="stage off"><b>Ground clamp</b><small>disabled · stance erased</small></div><span class="arrow">→</span>
+        <div class="stage off"><b>One Euro</b><small>disabled · +49 ms</small></div><span class="arrow">→</span>
+        <div class="stage bad"><b>IK</b><small>0° when conf &lt; 0.1</small></div><span class="arrow">→</span>
+        <div class="stage bad"><b>Angle filter</b><small>depth +0.9° → −9.5°</small></div><span class="arrow">→</span>
+        <div class="stage bad"><b>Predictor</b><small>+6.3° depth overshoot</small></div><span class="arrow">→</span>
+        <div class="stage"><b>Rules</b><small>per-frame symmetry</small></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label"><h3>Proposed</h3><span>whole chain under 1 ms/frame on Mac, numpy only</span></div>
+      <div class="flow">
+        <div class="stage new"><b>Sequenced capture</b><small>one clock · real frame index</small></div><span class="arrow">→</span>
+        <div class="stage new"><b>RTMPose ×3</b><small>tracked crop · raw score · sub-pixel · heels</small></div><span class="arrow">→</span>
+        <div class="stage new"><b>Robust triangulation</b><small>best subset · swap test · metric uncertainty · world coords</small></div><span class="arrow">→</span>
+        <div class="stage new"><b>Kalman, 2-frame lag</b><small>innovation gate · R from reprojection</small></div><span class="arrow">→</span>
+        <div class="stage new"><b>Foot contact</b><small>per-foot anchors · heel rise · floor</small></div><span class="arrow">→</span>
+        <div class="stage"><b>Hip centre</b><small>moved to IK boundary</small></div><span class="arrow">→</span>
+        <div class="stage new"><b>IK</b><small>NaN for missing, never 0°</small></div><span class="arrow">→</span>
+        <div class="stage new"><b>Rules</b><small>per-rep symmetry · heel-rise rule</small></div>
+      </div>
+      <p class="caption">Alongside the chain, once per session: a segment-length estimator that measures bones over the whole assessment and feeds athlete params. It never moves joints and is never reset between sets.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Verdicts</span>
+    <h2>Every filter, measured</h2>
+    <p>Paired changes against unfiltered triangulation on the simulator: realistic noise from real RTMPose footage, 8 squat scenarios × 3 seeds, perfect calibration unless noted.</p>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Stage</th><th class="num">Lag</th><th class="num">Knee at bottom</th><th>What it breaks</th><th>Verdict</th><th>Replaced by</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Confidence blend<span class="sub">active today</span></td><td class="num neg">+49 ms</td><td class="num neg">−2.9°</td><td>Acts as a fixed α≈0.5 smoother. Doesn't use timestamps. Freezes 8% of lower-body joints. Exaggerates heel rise 1.7–2.0×.</td><td><span class="chip crit">Remove</span></td><td>Triangulation rejection + Kalman noise model</td></tr>
+        <tr><td>Velocity clamp<span class="sub">active today</span></td><td class="num">+3 ms</td><td class="num">−0.1°</td><td>Too loose to catch outliers under 8 cm, too tight for fast reps. Stores its clamped value, so recovery crawls over 4–12 frames.</td><td><span class="chip high">Replace</span></td><td>Innovation gate inside the Kalman</td></tr>
+        <tr><td>Bone-length snap<span class="sub">disabled</span></td><td class="num">+0 ms</td><td class="num">−0.2°</td><td>Treats shoulder→hip as rigid, so shoulder noise moves the hips. Pelvic list kept 0.43× (0.36× with T-pose calibration).</td><td><span class="chip crit">Remove</span></td><td>Session segment-length estimator</td></tr>
+        <tr><td>Ground clamp<span class="sub">disabled</span></td><td class="num">+0 ms</td><td class="num">+0.5°</td><td>No floor in a hip-centred frame. Stance change kept 0.02×. One-sided heel rise 99% erased.</td><td><span class="chip crit">Remove</span></td><td>Per-foot contact model</td></tr>
+        <tr><td>One Euro positions<span class="sub">disabled</span></td><td class="num neg">+49 ms</td><td class="num neg">−1.8°</td><td>Cutoff stays near 2 Hz mid-squat; derivative uses raw sample. Hip shift kept 0.66×.</td><td><span class="chip high">Replace</span></td><td>Fixed-lag Kalman</td></tr>
+        <tr><td>Angle filter<span class="sub">after IK</span></td><td class="num neg">+79 ms</td><td class="num neg">−3.6°</td><td>Phase-aware cutoff drops exactly at the reversal. Short knee cave loses 9.3° of 17.7°.</td><td><span class="chip crit">Remove</span></td><td>Nothing; smoothing happens once, before IK</td></tr>
+        <tr><td>Predictor<span class="sub">after IK</span></td><td class="num">—</td><td class="num neg">+6.3° depth</td><td>Sits at its ±15° clamp for most of each descent. False symmetry events 1.2 → 8.6 per set.</td><td><span class="chip crit">Remove</span></td><td>Nothing; cues play between reps</td></tr>
+        <tr class="hl"><td><b>Proposed Kalman</b><span class="sub">2-frame lag, gated</span></td><td class="num">66 ms fixed</td><td class="num pos">+0.5°</td><td>Knee RMS while moving 1.27° vs 14.46° today. Short knee cave −2.2° vs −12.6°. 32 µs/frame.</td><td><span class="chip ok">Build</span></td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="caption">Lag and knee-at-bottom numbers for the first five rows come from the simulator baseline. The angle filter, predictor and proposed Kalman rows come from the smoothing audit's replay of <code>process_frame</code> (4 px noise, 5 seeds). They're the same kind of measure, but from a different harness.</p>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Missing filters</span>
+    <h2>What to add, ranked by accuracy gain</h2>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Addition</th><th>Where</th><th>Measured gain</th><th class="num">Cost</th></tr></thead>
+      <tbody>
+        <tr><td>Tracked person crop, 3:4, 1.25 padding</td><td>Per-view 2D</td><td>3D body error ~60 → ~7 mm; knee 6.0° → 1.2°; hip-width bias +118 mm → 0</td><td class="num">+0.3 ms/view</td></tr>
+        <tr><td>Raw keypoint score instead of sigmoid</td><td>Per-view 2D</td><td>Empty-image keypoints passing: 26/26 → 0/26</td><td class="num">0</td></tr>
+        <tr><td>Best-subset triangulation + previous-frame tie-break</td><td>Triangulation</td><td>Single-view outliers 145–293 mm → 9–24 mm; knee 17–33° → 2–3°</td><td class="num">+0.4 ms</td></tr>
+        <tr><td>Metric uncertainty, conf 0 for rejected points</td><td>Triangulation</td><td>Ends 0° knee readings; gives Kalman a real noise level</td><td class="num">~0</td></tr>
+        <tr><td>Sequenced sync, one clock, frame counter</td><td>Capture</td><td>Frame loss 26–45% → 0–11%; removes velocity spikes and muted cues</td><td class="num">~0</td></tr>
+        <tr><td>Fixed-lag Kalman with innovation gate</td><td>3D, world frame</td><td>Depth bias −4.5° → +0.5°; standing jitter 35 → ~2 mm</td><td class="num">32 µs</td></tr>
+        <tr><td>Per-foot contact model + heels</td><td>3D, world frame</td><td>Ankle error 2.8 → 0.5 cm; heel rise 3.06 of 3.37 cm kept; stance changes tracked</td><td class="num">89 µs</td></tr>
+        <tr><td>Left/right swap test per view</td><td>Triangulation</td><td>One-view swap 240 → 7 mm (frequency at ±40° unknown; log it)</td><td class="num">~0.3 ms</td></tr>
+        <tr><td>Parabola sub-pixel decode</td><td>Per-view 2D</td><td>Motion noise −20%</td><td class="num">0.08 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Sequence</span>
+    <h2>Rebuild in four phases</h2>
+    <p>Order matters. Filters can't be tuned against a broken front end, and removing the blender before the predictor would let shallow reps pass the depth check. Each phase ends with a paired simulator run against today's pipeline. Bug fixes start with a failing test.</p>
+  </div>
+  <div class="phases">
+    <div class="phase">
+      <div class="phase-letter">A</div>
+      <div class="phase-body">
+        <h3>Stop the live bugs</h3>
+        <p>Small, independent diffs. None of them changes the filter design.</p>
+        <ul>
+          <li>One wall-aligned clock stamped at capture</li>
+          <li>Real frame index from a capture sequence counter</li>
+          <li>IK returns NaN for missing joints; rules skip NaN; triangulator stops emitting conf×0.1 points</li>
+          <li>Athlete params kept for the whole session; DB upsert refuses to write None over stored params</li>
+          <li>Proportion scaling applied once from stored base thresholds; delete <code>valgus_scale</code></li>
+          <li>Raw RTMPose score; map halpe26 heels to indices 19/20</li>
+          <li>Valgus sign fix (after a failing test confirms it)</li>
+        </ul>
+      </div>
+      <div class="exit">
+        <span class="eyebrow">Exit check</span>
+        <ul>
+          <li>3 reps → 0 set_complete events</li>
+          <li>Valgus cue fires on every faulty rep of 6</li>
+          <li>0 frames with knee flexion exactly 0°</li>
+          <li>Thresholds identical after 4 sets</li>
+        </ul>
+        <div class="gain">Simulator: moving knee error 14.3° → ~4.3°</div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="phase-letter">B</div>
+      <div class="phase-body">
+        <h3>Rebuild the front end</h3>
+        <p>Make the 3D input trustworthy before any smoothing is tuned.</p>
+        <ul>
+          <li>Tracked person crop, bootstrapped by one full-frame pass</li>
+          <li>Sequenced sync policy (≥2 cameras within 20 ms; skip processed references)</li>
+          <li>Best-subset triangulation, previous-frame tie-break, swap test</li>
+          <li>Metric per-joint uncertainty; world-coordinate output, centre at IK boundary</li>
+          <li>Parabola sub-pixel decode</li>
+        </ul>
+      </div>
+      <div class="exit">
+        <span class="eyebrow">Exit check</span>
+        <ul>
+          <li>Real video mirror disagreement ≤ 1.5 px</li>
+          <li>Simulator p95 joint error ≤ 25 mm under outliers</li>
+          <li>≥ 25 Hz processed with 3 cameras</li>
+        </ul>
+        <div class="gain">Expected: joints ~60 mm → ~7 mm</div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="phase-letter">C</div>
+      <div class="phase-body">
+        <h3>Replace the temporal filters</h3>
+        <p>One smoother, one stream, one chain definition.</p>
+        <ul>
+          <li>Fix rep-counter bottom detection first (sign-aware, uses Kalman velocity)</li>
+          <li>Fixed-lag Kalman with gate replaces blend, clamp and One Euro</li>
+          <li>Remove angle filter and predictor from the analysis path; display uses the undelayed estimate</li>
+          <li>Bottom frame, trajectory and rep signal from the same smoothed stream</li>
+          <li>Per-rep symmetry evaluation</li>
+          <li><code>build_preik_chain(config)</code> with an inspector tap; per-set resets clear temporal state only</li>
+        </ul>
+      </div>
+      <div class="exit">
+        <span class="eyebrow">Exit check</span>
+        <ul>
+          <li>Depth bias within ±1°</li>
+          <li>Short knee cave loses &lt; 25%</li>
+          <li>6/6 reps counted, no-pause tempo</li>
+          <li>≤ 2 false symmetry events per set</li>
+        </ul>
+        <div class="gain">Simulator: knee RMS moving 14.5° → 1.3°</div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="phase-letter">D</div>
+      <div class="phase-body">
+        <h3>Body measurements and feet</h3>
+        <p>Replace the two clamps with estimators that report the body instead of forcing it.</p>
+        <ul>
+          <li>Session segment-length estimator (rigid segments, whole assessment, robust median)</li>
+          <li>Per-foot contact model producing <code>FootState</code>: heel rise, stance width, toe-out, hip height above floor</li>
+          <li>New three-tier heel-rise fault rule</li>
+          <li>Floor normal as gravity reference for lean and depth</li>
+        </ul>
+      </div>
+      <div class="exit">
+        <span class="eyebrow">Exit check</span>
+        <ul>
+          <li>Pelvic list and stance change kept ≥ 0.9×</li>
+          <li>Heel rise kept ≥ 85%</li>
+          <li>Femur/tibia length within 5 mm</li>
+        </ul>
+        <div class="gain">Simulator: ankle 2.8 → 0.5 cm</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Your call</span>
+    <h2>Decisions before code changes</h2>
+  </div>
+  <div class="decisions">
+    <div class="decision">
+      <h3>Start Phase A now?</h3>
+      <p>These are bugs that break sessions today, independent of the filter redesign.</p>
+      <p class="rec"><b>Recommend:</b> yes, immediately.</p>
+    </div>
+    <div class="decision">
+      <h3>Extend scope past "pre-IK"?</h3>
+      <p>Phase C removes the post-IK angle filter and predictor and fixes the rep counter and symmetry rule. That's where the measured depth error lives.</p>
+      <p class="rec"><b>Recommend:</b> approve.</p>
+    </div>
+    <div class="decision">
+      <h3>Accept 66 ms analysis delay?</h3>
+      <p>Cues play between reps and rule cooldowns are 1–5 s. The live avatar would draw the undelayed estimate.</p>
+      <p class="rec"><b>Recommend:</b> accept.</p>
+    </div>
+    <div class="decision">
+      <h3>Single-camera MediaPipe path</h3>
+      <p>Most fixes apply to both paths, but world-frame foot contact and triangulation only exist with 3 cameras. Supporting both doubles the tuning.</p>
+      <p class="rec"><b>Recommend:</b> keep it working, stop tuning for it.</p>
+    </div>
+    <div class="decision">
+      <h3>Record real 3-camera sessions</h3>
+      <p>No 3-camera recordings exist, so thresholds (gate radius, reprojection cutoff, Kalman noise) are set from simulation. Needed: 5+ sessions with deliberate valgus, heel rise, hip shift and forward lean, logging raw per-view 2D and calibration.</p>
+      <p class="rec"><b>Needs you:</b> before Phase C thresholds are final.</p>
+    </div>
+    <div class="decision">
+      <h3>Height for T-pose calibration</h3>
+      <p>3-camera calibration uses a hardcoded 1.885 m and is never reloaded. A 1.65 m user gets every length inflated 14%.</p>
+      <p class="rec"><b>Recommend:</b> read the user's profile height; persist calibration per rig (Phase B).</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <span class="eyebrow">Confidence in these numbers</span>
+    <h2>Caveats and evidence</h2>
+  </div>
+  <div class="two-col">
+    <ul class="plain-list">
+      <li><strong>Most accuracy numbers are synthetic.</strong> Real RTMPose noise, confidence and outlier rates were measured on 4 real videos. The per-view bias, occlusion and swap rates are assumptions.</li>
+      <li><strong>Crop, confidence and foot-snapping are real.</strong> Foot keypoints jumped more than 10 cm at the bottom in 56–78% of reps across 5 real single-camera recordings.</li>
+      <li><strong>The zeroed-knee rate depends on noise:</strong> 10% mild, 25% realistic, 61% harsh. The bug exists at every level.</li>
+      <li><strong>Timings are Python on a Mac.</strong> Expect 3–5× slower on an Orin Nano; the proposed chain stays under a few ms per frame.</li>
+    </ul>
+    <div class="files">
+      <span>wiring/</span><span>calibration flow, frame index, resets, chain copies</span>
+      <span>triangulation_frontend/</span><span>crop, score, sync, view rejection, heels</span>
+      <span>smoothing/</span><span>Kalman design, angle filter, predictor, rep counter</span>
+      <span>velocity_clamp/</span><span>clocks, duplicates, innovation gate</span>
+      <span>confidence_blend/</span><span>confidence semantics, keypoint gate</span>
+      <span>bone_constraints/</span><span>projection cascade, segment estimator, scaling</span>
+      <span>ground_clamp/</span><span>foot contact model, real-video foot drift</span>
+      <span>harness/</span><span>ground-truth simulator + baseline</span>
+      <span>research/</span><span>Pose2Sim, OpenCap, anipose practice</span>
+    </div>
+  </div>
+</section>
+
+<footer>All reports live in <span class="mono">.claude/preik-audit/&lt;topic&gt;/REPORT.md</span> in the NowvaLiveKit repo. No source files have been modified.</footer>
+
+</div>

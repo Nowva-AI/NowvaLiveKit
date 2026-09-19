@@ -1,9 +1,9 @@
-"""Benchmark: DerivativeTracker, JointAngleFilter, SquatProfile.get_rep_signal."""
+"""Benchmark: DerivativeTracker (standalone module, not in the squat path) and
+SquatProfile.get_rep_signal."""
 
 from __future__ import annotations
 
 from biomechanics.utils.derivatives import DerivativeTracker
-from biomechanics.utils.filters import JointAngleFilter
 from biomechanics.kinematics.analytical_ik import AnalyticalIKSolver
 from biomechanics.profiles.squat import SquatProfile
 from biomechanics.utils.timing import PipelineProfiler
@@ -20,19 +20,15 @@ def run(iterations: int = 100, warmup: int = 10) -> BenchmarkResult:
     profile = SquatProfile()
 
     tracker = DerivativeTracker()
-    angle_filter = JointAngleFilter()
 
     tracker_name = "biomechanics.derivatives.tracker"
-    filter_name = "biomechanics.derivatives.angle_filter"
     signal_name = "biomechanics.derivatives.rep_signal"
 
     p_tracker = PipelineProfiler(window_size=iterations)
-    p_filter = PipelineProfiler(window_size=iterations)
     p_signal = PipelineProfiler(window_size=iterations)
 
     for _ in range(warmup):
         tracker.update(angles)
-        angle_filter.filter_angles(angles)
 
     with ResourceProfiler() as rp:
         for i in range(iterations):
@@ -42,14 +38,10 @@ def run(iterations: int = 100, warmup: int = 10) -> BenchmarkResult:
             with p_tracker.time_layer(tracker_name):
                 tracker.update(a)
 
-            with p_filter.time_layer(filter_name):
-                angle_filter.filter_angles(a)
-
             with p_signal.time_layer(signal_name):
                 profile.get_rep_signal(frame, a)
 
     stats_t = stats_from_profiler(p_tracker.get_stats(tracker_name))
-    stats_f = stats_from_profiler(p_filter.get_stats(filter_name))
     stats_s = stats_from_profiler(p_signal.get_stats(signal_name))
 
     return BenchmarkResult(
@@ -63,14 +55,6 @@ def run(iterations: int = 100, warmup: int = 10) -> BenchmarkResult:
         status=evaluate_status(stats_t.p95, tracker_name),
         threshold_ms=0.5,
         sub_results=[
-            BenchmarkResult(
-                component_name=filter_name,
-                latency=stats_f,
-                iterations=iterations,
-                warmup=warmup,
-                status=evaluate_status(stats_f.p95, filter_name),
-                threshold_ms=0.5,
-            ),
             BenchmarkResult(
                 component_name=signal_name,
                 latency=stats_s,

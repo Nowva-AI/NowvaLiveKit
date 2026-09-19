@@ -90,6 +90,7 @@ FAULT_TO_CUE_MAP: Dict[str, str] = {
     "depth": "deeper",
     "bilateral_asymmetry": "even_it_out",
     "back_rounding": "chest_up",
+    "heel_rise": "heels_down",
 }
 
 POSITIVE_CUE_KEYS = frozenset({"good_rep", "great_depth", "strong", "clean", "perfect"})
@@ -102,9 +103,10 @@ POSITIVE_CUE_KEYS = frozenset({"good_rep", "great_depth", "strong", "clean", "pe
 FAULT_CUE_PRIORITY: Dict[str, int] = {
     "forward_lean": 0,
     "knee_valgus": 1,
-    "bilateral_asymmetry": 2,
+    "heel_rise": 2,
+    "bilateral_asymmetry": 3,
 }
-DEFAULT_FAULT_CUE_PRIORITY = 3
+DEFAULT_FAULT_CUE_PRIORITY = 4
 
 # A higher-priority fault may jump the cue gap, but must still wait out
 # a fraction of it to avoid back-to-back audio. The floor differs by

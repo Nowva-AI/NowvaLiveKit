@@ -32,7 +32,6 @@ from biomechanics.diagnosis.engine import HypothesisEngine
 from biomechanics.diagnosis.rep_scoring import score_set
 from biomechanics.diagnosis.types import SetFeatures
 from biomechanics.pipeline import BiomechanicsPipeline
-from biomechanics.utils.types import CocoKeypoints as CK
 from biomechanics.viz import draw_skeleton, draw_fps, FPSCounter, precreate_window, animate_window_fullscreen
 from biomechanics.viz.demo_renderer import (
     MORPH_IN_SECONDS,
@@ -47,32 +46,9 @@ from biomechanics.diagnosis.bridge import build_frame_from_live_pipeline, build_
 
 
 BASELINE_STUB = {"peakDorsi": 35.0, "peakKneeFlex": 120.0}
-
-
-def _extract_athlete_params(pipeline: BiomechanicsPipeline) -> dict | None:
-    if not (
-        pipeline._bone_constraints.is_calibrated
-        and pipeline._bone_constraints.body_proportions is not None
-    ):
-        return None
-    proportions = pipeline._bone_constraints.body_proportions
-    shoulder_width = pipeline._bone_constraints._calibrated_lengths.get(
-        (CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER), 0.40,
-    )
-    foot_l = pipeline._bone_constraints._calibrated_lengths.get(
-        (CK.LEFT_ANKLE, CK.LEFT_FOOT_INDEX), 0.26,
-    )
-    foot_r = pipeline._bone_constraints._calibrated_lengths.get(
-        (CK.RIGHT_ANKLE, CK.RIGHT_FOOT_INDEX), 0.26,
-    )
-    return {
-        "shoulder_width_m": shoulder_width,
-        "femur_avg_m": proportions.femur_length_avg,
-        "torso_avg_m": proportions.torso_length_avg,
-        "hip_width_m": proportions.hip_width,
-        "tibia_avg_m": proportions.tibia_length_avg,
-        "foot_avg_m": (foot_l + foot_r) / 2.0,
-    }
+# After the last assessment rep, how long to keep running the pipeline for the
+# session-scoped body measurement to complete before giving up.
+MEASUREMENT_WAIT_S = 5.0
 
 
 def _play_demo(demo, cycles_per_cue: int = 2) -> None:
@@ -170,10 +146,11 @@ def run_live(camera_id: int, target_reps: int) -> None:
     precreate_window(window_name)
     animated = False
 
-    # Phase 1: wait for readiness gate + bone constraint calibration
-    print("\n  Waiting for readiness gate + bone constraints...")
+    # Phase 1: wait for the readiness gate. Body measurement accumulates inside
+    # the pipeline during the assessment reps, not here.
+    print("\n  Waiting for readiness gate...")
     try:
-        while not (pipeline.is_ready and pipeline._bone_constraints.is_calibrated):
+        while not pipeline.is_ready:
             result = pipeline.process_frame()
             frame = pipeline.last_frame
             if frame is not None:
@@ -206,52 +183,37 @@ def run_live(camera_id: int, target_reps: int) -> None:
         pipeline.release()
         return
 
-    athlete_params = _extract_athlete_params(pipeline)
-    if athlete_params is None:
-        print("  ERROR: Bone constraints never calibrated")
-        cv2.destroyAllWindows()
-        pipeline.release()
-        return
-
-    print(
-        f"  Athlete params: shoulder={athlete_params['shoulder_width_m']:.3f}m "
-        f"femur={athlete_params['femur_avg_m']:.3f}m "
-        f"tibia={athlete_params['tibia_avg_m']:.3f}m"
-    )
-
-    # Phase 2: collect assessment reps
-    anthro = build_anthro_dict(athlete_params)
-    rom = build_rom_dict(athlete_params, BASELINE_STUB)
-
-    rep_kinematics = []
-    bottom_frames = []
+    # Phase 2: collect assessment reps. Bottom frames wait until the body
+    # measurement completes, then get their kinematic summaries.
+    athlete_params = None
+    bottom_frame_dicts: list[tuple[int, dict]] = []
     reps_done = 0
+    last_rep_time = time.time()
     pipeline.rep_counter.reset()
 
     print(f"\n  Collecting {target_reps} rep(s)... do your squats!")
 
     try:
-        while reps_done < target_reps:
+        while True:
             result = pipeline.process_frame()
 
-            if pipeline.is_ready and result.rep_data is not None:
-                bottom_kpts = None
-                bottom_angles = None
-                if hasattr(pipeline, 'consume_bottom_frame'):
-                    bottom_kpts, bottom_angles = pipeline.consume_bottom_frame()
+            if athlete_params is None:
+                athlete_params = pipeline.body_calibration.to_athlete_params()
 
+            if pipeline.is_ready and result.rep_data is not None:
+                bottom_kpts, bottom_angles = pipeline.consume_bottom_frame()
                 reps_done += 1
+                last_rep_time = time.time()
                 depth = result.rep_data.max_depth_angle
                 print(f"  Rep {reps_done}/{target_reps}  depth={depth:.1f}°")
-
                 if bottom_kpts is not None and bottom_angles is not None:
-                    frame_dict = build_frame_from_live_pipeline(bottom_kpts, bottom_angles)
-                    summary = build_rep_kinematic_summary(frame_dict, athlete_params, reps_done)
-                    rep_kinematics.append(summary)
-                    bottom_frames.append({
-                        "rep_number": reps_done,
-                        "kpts": frame_dict["kpts"],
-                    })
+                    bottom_frame_dicts.append(
+                        (reps_done, build_frame_from_live_pipeline(bottom_kpts, bottom_angles))
+                    )
+
+            measurement_overdue = time.time() - last_rep_time > MEASUREMENT_WAIT_S
+            if reps_done >= target_reps and (athlete_params is not None or measurement_overdue):
+                break
 
             frame = pipeline.last_frame
             if frame is not None:
@@ -261,7 +223,11 @@ def run_live(camera_id: int, target_reps: int) -> None:
                 fps_counter.update()
                 draw_fps(display, fps_counter.fps)
 
-                text = f"ASSESSMENT  Rep {reps_done}/{target_reps}"
+                if pipeline.body_calibration.is_complete:
+                    text = f"ASSESSMENT  Rep {reps_done}/{target_reps}"
+                else:
+                    measured, required = pipeline.body_calibration.progress
+                    text = f"MEASURING BODY {measured}/{required}  Rep {reps_done}/{target_reps}"
                 h, w = display.shape[:2]
                 ts = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
                 x = w - ts[0] - 15
@@ -277,6 +243,24 @@ def run_live(camera_id: int, target_reps: int) -> None:
 
     cv2.destroyAllWindows()
     pipeline.release()
+
+    if athlete_params is None:
+        print("  ERROR: Body measurement never completed")
+        return
+
+    print(
+        f"  Athlete params: shoulder={athlete_params['shoulder_width_m']:.3f}m "
+        f"femur={athlete_params['femur_avg_m']:.3f}m "
+        f"tibia={athlete_params['tibia_avg_m']:.3f}m"
+    )
+    anthro = build_anthro_dict(athlete_params)
+    rom = build_rom_dict(athlete_params, BASELINE_STUB)
+
+    rep_kinematics = []
+    bottom_frames = []
+    for rep_number, frame_dict in bottom_frame_dicts:
+        rep_kinematics.append(build_rep_kinematic_summary(frame_dict, athlete_params, rep_number))
+        bottom_frames.append({"rep_number": rep_number, "kpts": frame_dict["kpts"]})
 
     if not rep_kinematics:
         print("  No reps collected — nothing to diagnose")

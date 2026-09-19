@@ -5,6 +5,7 @@ Tests the AnalyticalIKSolver with various poses and validates
 that computed angles are physically plausible.
 """
 
+import math
 import sys
 from pathlib import Path
 
@@ -160,11 +161,41 @@ class TestCoordinateFrame:
         assert result.hip_adduction_r < 0
 
     def test_forward_lean_reduces_trunk_flexion(self, ik_solver, standing_skeleton):
+        """+Z is the subject's BACK (triangulated and MediaPipe world frames
+        agree), so a forward lean moves the shoulders toward -Z."""
+        leaned = _shift(standing_skeleton, 5, axis=2, delta=-0.25)
+        leaned = _shift(leaned, 6, axis=2, delta=-0.25)
+        result = ik_solver.solve(leaned)
+        assert result.trunk_flexion < 170.0
+        assert result.pelvis_tilt > 5.0
+
+    def test_backward_lean_gives_negative_pelvis_tilt(self, ik_solver, standing_skeleton):
         leaned = _shift(standing_skeleton, 5, axis=2, delta=0.25)
         leaned = _shift(leaned, 6, axis=2, delta=0.25)
         result = ik_solver.solve(leaned)
         assert result.trunk_flexion < 170.0
-        assert result.pelvis_tilt > 5.0
+        assert result.pelvis_tilt < -5.0
+
+    def test_wrist_in_front_of_shoulder_reads_positive_x(self, ik_solver, standing_skeleton):
+        forward = _shift(standing_skeleton, 9, axis=2, delta=-0.30)
+        forward = _shift(forward, 10, axis=2, delta=-0.30)
+        result = ik_solver.solve(forward)
+        assert result.wrist_x_l > 20.0
+        assert result.wrist_x_r > 20.0
+
+    def test_trunk_rotated_left_reads_positive(self, ik_solver, standing_skeleton):
+        """Turning to the left moves the left shoulder back (+Z) and the
+        right shoulder forward (-Z)."""
+        rotated = _shift(standing_skeleton, 5, axis=2, delta=0.10)
+        rotated = _shift(rotated, 6, axis=2, delta=-0.10)
+        result = ik_solver.solve(rotated)
+        assert result.trunk_rotation > 10.0
+
+    def test_pelvis_rotated_left_reads_positive(self, ik_solver, standing_skeleton):
+        rotated = _shift(standing_skeleton, 11, axis=2, delta=0.06)
+        rotated = _shift(rotated, 12, axis=2, delta=-0.06)
+        result = ik_solver.solve(rotated)
+        assert result.pelvis_rotation > 10.0
 
 
 # =============================================================================
@@ -179,6 +210,11 @@ class TestAnalyticalIKSolverBasic:
         solver = AnalyticalIKSolver()
         assert solver is not None
         assert solver.is_initialized
+
+    def test_body_proportions_hook_is_gone(self):
+        """Pelvis tilt coupling is a constant; the solver no longer depends on
+        BodyProportions (C8/F7)."""
+        assert not hasattr(AnalyticalIKSolver(), "set_body_proportions")
 
     def test_solve_returns_joint_angles(self, ik_solver, standing_skeleton):
         """solve() should return a JointAngles object."""
@@ -376,8 +412,8 @@ class TestMissingData:
         result = ik_solver.solve(skeleton)
         assert isinstance(result, JointAngles)
 
-    def test_returns_zero_for_missing_keypoints(self, ik_solver):
-        """Missing keypoints should result in 0.0 for affected angles."""
+    def test_returns_nan_for_missing_keypoints(self, ik_solver):
+        """Missing keypoints must result in NaN for affected angles (C9)."""
         # Create skeleton with missing hip keypoints
         keypoints = [
             Point3D(x=0.0, y=-0.70, z=0.0, confidence=1.0),
@@ -402,9 +438,57 @@ class TestMissingData:
 
         result = ik_solver.solve(skeleton)
 
-        # Hip-related angles should be 0 due to missing hips
-        assert result.hip_flexion_l == 0.0
-        assert result.hip_flexion_r == 0.0
+        # Every angle that needs a hip is undefined, never a silent 0.0
+        assert math.isnan(result.hip_flexion_l)
+        assert math.isnan(result.hip_flexion_r)
+        assert math.isnan(result.knee_flexion_l)
+        assert math.isnan(result.knee_flexion_r)
+        assert math.isnan(result.hip_adduction_l)
+        assert math.isnan(result.trunk_flexion)
+        assert math.isnan(result.pelvis_tilt)
+        assert math.isnan(result.pelvis_list)
+        assert math.isnan(result.pelvis_rotation)
+        assert math.isnan(result.shoulder_flexion_l)
+        # Angles that do not need a hip are still computed
+        assert not math.isnan(result.elbow_flexion_l)
+        assert not math.isnan(result.ankle_dorsiflexion_l)
+        assert not math.isnan(result.trunk_rotation)
+        assert not math.isnan(result.wrist_y_l)
+
+    def test_missing_ankle_gives_nan_knee_flexion_mid_squat(self, ik_solver, symmetric_squat_skeleton):
+        """The largest measured pipeline error: a knee at 0.0 mid-squat because
+        the ankle dropped below the confidence floor."""
+        points = symmetric_squat_skeleton.to_numpy()
+        confidences = np.ones(len(points))
+        confidences[15] = 0.05
+        skeleton = Skeleton3D.from_numpy(points, confidences=confidences)
+        result = ik_solver.solve(skeleton)
+        assert math.isnan(result.knee_flexion_l)
+        assert math.isnan(result.ankle_dorsiflexion_l)
+        assert result.knee_flexion_r > 30.0
+        assert result.hip_flexion_l > 10.0
+
+    def test_missing_wrist_gives_nan_wrist_position(self, ik_solver, standing_skeleton):
+        points = standing_skeleton.to_numpy()
+        confidences = np.ones(len(points))
+        confidences[9] = 0.0
+        result = ik_solver.solve(Skeleton3D.from_numpy(points, confidences=confidences))
+        assert math.isnan(result.wrist_x_l)
+        assert math.isnan(result.wrist_y_l)
+        assert math.isnan(result.elbow_flexion_l)
+        assert not math.isnan(result.wrist_x_r)
+
+    def test_no_angle_is_ever_zero_for_a_missing_keypoint(self, ik_solver):
+        """A skeleton with every keypoint below the confidence floor must
+        return NaN for every angle."""
+        empty = Skeleton3D.from_numpy(np.zeros((17, 3)), confidences=np.zeros(17))
+        result = ik_solver.solve(empty)
+        for name, value in result.as_dict().items():
+            if name.startswith("foot_confidence") or name == "knee_ankle_sep_ratio":
+                continue
+            if name.startswith("knee_valgus") or name.startswith("hip_rotation"):
+                continue
+            assert math.isnan(value), f"{name} was {value} for a fully missing skeleton"
 
 
 # =============================================================================

@@ -7,7 +7,7 @@ import time
 from biomechanics.utils.timing import PipelineProfiler
 
 from benchmarks.config import BenchmarkResult, evaluate_status, stats_from_profiler
-from benchmarks.fixtures.data import generate_synthetic_image
+from benchmarks.fixtures.data import load_video_frames
 from benchmarks.profiler import ResourceProfiler
 
 
@@ -17,13 +17,18 @@ def _bench_backend(
     iterations: int,
     warmup: int,
 ) -> BenchmarkResult:
-    image = generate_synthetic_image()
+    # A frame with a real person: MediaPipe fast-paths empty scenes,
+    # under-reporting its cost ~6x on synthetic images.
+    frames = load_video_frames(10)
+    image = frames[len(frames) // 2]
     profiler = PipelineProfiler(window_size=iterations)
 
     if backend == "mediapipe":
+        from biomechanics.config import load_pipeline_config
         from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator
+        model_complexity = load_pipeline_config().pose.model_complexity
         t0 = time.perf_counter()
-        estimator = MediaPipePoseEstimator()
+        estimator = MediaPipePoseEstimator(model_complexity=model_complexity)
         model_load_ms = (time.perf_counter() - t0) * 1000
     else:
         from biomechanics.pose.rtmpose import RTMPoseEstimator

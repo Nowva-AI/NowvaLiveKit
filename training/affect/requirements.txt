@@ -1,0 +1,26 @@
+# Affect training environment (separate from the runtime venv).
+# Python 3.11 or 3.12, CUDA 12.x, NVIDIA GPU with >= 12 GB (24 GB recommended).
+#   python3.11 -m venv .venv-train && source .venv-train/bin/activate
+#   pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.6.0 torchaudio==2.6.0
+#   pip install -r training/affect/requirements.txt
+torch>=2.6.0
+torchaudio>=2.6.0
+transformers>=4.51,<5.0        # WavLM/HuBERT/Whisper; pin below 5 until the export path is re-validated there
+safetensors>=0.5.0
+onnx>=1.17.0
+onnxscript>=0.2.0
+onnxruntime-gpu>=1.20.0        # CPU-only machines: replace with onnxruntime
+onnxconverter-common>=1.14.0   # FP16 variant
+huggingface_hub>=0.30.0
+soundfile>=0.13.0
+soxr>=0.5.0
+numpy>=1.26,<3
+pydantic>=2.7
+pyyaml>=6.0
+typer>=0.12
+tensorboard>=2.17
+scikit-learn>=1.5
+pyarrow>=17.0
+livekit>=1.0.0                 # rtc.AudioProcessingModule for train-serve parity augmentation
+funasr>=1.2.0                  # emotion2vec+ teacher (optional; comment out if unused)
+modelscope>=1.20               # funasr model hub client

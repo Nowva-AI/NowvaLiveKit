@@ -1,0 +1,44 @@
+# Smoke test: tiny random WavLM config, two steps on CPU. Used by tests/test_training_affect.
+name: smoke
+seed: 0
+model:
+  encoder:
+    name: wavlm
+    pretrained: __random_tiny__     # replaced by the smoke test with a tiny local config
+    freeze_feature_extractor: true
+    freeze_bottom_layers: 0
+  pooling:
+    layer_select: weighted
+    pooling: mean_std
+  categorical: true
+  avd: true
+  exertion: true
+  head_hidden: 16
+  dropout: 0.0
+data:
+  train: []
+  dev: []
+  sample_rate: 16000
+  crop_seconds: 2.0
+  min_seconds: 0.5
+  augment:
+    enabled: false
+  num_workers: 0
+loss:
+  w_cat: 1.5
+  w_avd: 0.4
+  mixup_prob: 0.5
+optim:
+  encoder_lr: 1.0e-4
+  head_lr: 1.0e-3
+  warmup_steps: 1
+  epochs_stage1: 1
+  epochs_stage2: 1
+  batch_size: 4
+  grad_accum: 1
+  bf16: false
+  early_stop_patience: 3
+  select_metric: dev/avg_ccc
+output_dir: experiments
+log_every: 1
+max_train_steps: 2

@@ -22,6 +22,7 @@ from biomechanics.diagnosis.demo_builder import build_demo_data
 from biomechanics.diagnosis.types import DiagnosisResult, HypothesizedCause
 from biomechanics.viz.demo_renderer import DemoChoreographer
 
+NUM_KEYPOINTS = 21  # COCO-17 + toes + heels
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 SECONDS_PER_CUE = 5.0
@@ -29,7 +30,7 @@ START_DELAY_SECONDS = 1.5
 
 
 def _squat_bottom_pose() -> list[list[float]]:
-    pose = np.zeros((19, 3))
+    pose = np.zeros((NUM_KEYPOINTS, 3))
     pose[0] = [0.0, 1.25, 0.0]
     pose[5] = [0.05, 1.0, -0.18]
     pose[6] = [0.05, 1.0, 0.18]
@@ -45,6 +46,8 @@ def _squat_bottom_pose() -> list[list[float]]:
     pose[16] = [0.05, 0.0, 0.14]
     pose[17] = [0.30, 0.0, -0.14]
     pose[18] = [0.30, 0.0, 0.14]
+    pose[19] = [-0.02, 0.0, -0.14]
+    pose[20] = [-0.02, 0.0, 0.14]
     return pose.tolist()
 
 

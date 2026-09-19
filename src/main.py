@@ -458,6 +458,11 @@ class NowvaApp:
             cmd.append("--calibration-mode")
         if preload:
             cmd.append("--preload")
+        # Multi-camera T-pose calibration scales every 3D length by the
+        # user's height; without it the subprocess falls back to an env default.
+        user_height_cm = self.state.get("user.height_cm")
+        if user_height_cm:
+            cmd.extend(["--user-height-cm", str(float(user_height_cm))])
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -569,6 +574,7 @@ class NowvaApp:
         ("[PREWARM] Silero VAD", "Calibrating voice activity sensors", 0.46),
         ("[PREWARM] Audio cues pre-loaded", "Loading coaching audio matrix", 0.55),
         ("[PREWARM] WakeWordModel pre-loaded", "Arming wake-word sentinel", 0.63),
+        ("[PREWARM] Affect engine pre-loaded", "Tuning affect perception", 0.66),
         ("[NOVA] Initializing cascade pipeline", "Synthesizing speech cortex", 0.74),
         ("[NOVA] Agent session created", "Linking conversational reasoning engine", 0.88),
         ("Nova voice agent started in room", "All systems nominal — Nova online", 1.0),

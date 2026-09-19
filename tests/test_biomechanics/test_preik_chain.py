@@ -1,10 +1,9 @@
-"""Integration tests for the pre-IK filter chain.
+"""Integration tests for the pre-IK chain (C10).
 
-Drives the real chain, in production order, over synthetic frames in the
-production Y-down coordinate frame. Every filter here passed its own unit
-tests while the assembled chain destroyed the skeleton and left both
-calibrators permanently uncalibrated, so these tests assert on the chain's
-end-to-end outcome rather than any single stage.
+Drives the real chain over a synthetic world-frame squat with capture-clock
+timestamps and asserts on the chain's end-to-end contract: lagged hip-centred
+analysis, undelayed display, foot contact in multi-camera mode, bounded
+prediction through dropouts, and per-set reset scope.
 """
 
 from __future__ import annotations
@@ -12,224 +11,198 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from biomechanics.utils.bone_constraints import BoneLengthConstraints
-from biomechanics.utils.confidence_blend import ConfidenceBlender
-from biomechanics.utils.ground_clamp import GroundClamp
-from biomechanics.utils.position_filter import KeypointPositionSmoother
-from biomechanics.utils.preik_chain import apply_preik_filters
-from biomechanics.utils.standing_gate import StandingPoseGate
-from biomechanics.utils.types import Skeleton3D, CocoKeypoints as CK
-from biomechanics.utils.velocity_clamp import VelocityClamp
+from biomechanics.config import BiomechanicsConfig
+from biomechanics.utils.preik_chain import PreIKChain, PreIKResult, build_preik_chain
+from biomechanics.utils.types import CocoKeypoints as CK
+from biomechanics.utils.types import Skeleton3D
+from conftest import SYNTHETIC_FPS, SYNTHETIC_NUM_KEYPOINTS, squat_depth_profile, world_squat_points
 
-# Production frame is Y-down: a keypoint that is physically higher has a
-# smaller y. Hips at the origin, feet below at positive y.
-HIP_Y = 0.0
-KNEE_Y = 0.45
-ANKLE_Y = 0.90
-SHOULDER_Y = -0.50
-
-FEMUR_LENGTH_M = KNEE_Y - HIP_Y
-TIBIA_LENGTH_M = ANKLE_Y - KNEE_Y
-TORSO_LENGTH_M = HIP_Y - SHOULDER_Y
-
-POSITION_TOL_M = 0.02
-BONE_TOL_M = 0.01
+CLOCK_START_S = 1.7e9
+DEFAULT_CONFIDENCE = 0.9
+LAG_FRAMES = 2
+MAX_PREDICTED_FRAMES = 5
+WARM_UP_FRAMES = 60
+POSITION_TOL_M = 0.01
+HIP_CENTRE_TOL_M = 1e-9
 
 
-def _standing_points_y_down() -> np.ndarray:
-    points = np.zeros((19, 3))
-    points[CK.NOSE] = [0.0, -0.70, 0.0]
-    points[CK.LEFT_EYE] = [0.03, -0.72, -0.02]
-    points[CK.RIGHT_EYE] = [-0.03, -0.72, -0.02]
-    points[CK.LEFT_EAR] = [0.07, -0.70, 0.0]
-    points[CK.RIGHT_EAR] = [-0.07, -0.70, 0.0]
-    points[CK.LEFT_SHOULDER] = [0.20, SHOULDER_Y, 0.0]
-    points[CK.RIGHT_SHOULDER] = [-0.20, SHOULDER_Y, 0.0]
-    points[CK.LEFT_ELBOW] = [0.25, -0.25, 0.0]
-    points[CK.RIGHT_ELBOW] = [-0.25, -0.25, 0.0]
-    points[CK.LEFT_WRIST] = [0.25, 0.0, 0.0]
-    points[CK.RIGHT_WRIST] = [-0.25, 0.0, 0.0]
-    points[CK.LEFT_HIP] = [0.12, HIP_Y, 0.0]
-    points[CK.RIGHT_HIP] = [-0.12, HIP_Y, 0.0]
-    points[CK.LEFT_KNEE] = [0.12, KNEE_Y, 0.0]
-    points[CK.RIGHT_KNEE] = [-0.12, KNEE_Y, 0.0]
-    points[CK.LEFT_ANKLE] = [0.12, ANKLE_Y, 0.0]
-    points[CK.RIGHT_ANKLE] = [-0.12, ANKLE_Y, 0.0]
-    points[CK.LEFT_FOOT_INDEX] = [0.12, ANKLE_Y + 0.02, 0.12]
-    points[CK.RIGHT_FOOT_INDEX] = [-0.12, ANKLE_Y + 0.02, 0.12]
-    return points
+def _timestamp(frame_index: int) -> float:
+    return CLOCK_START_S + frame_index / SYNTHETIC_FPS
 
 
-def _make_skeleton(points: np.ndarray, frame_index: int) -> Skeleton3D:
+def _make_skeleton(
+    points: np.ndarray, frame_index: int, confidences: np.ndarray | None = None,
+) -> Skeleton3D:
+    if confidences is None:
+        confidences = np.full(len(points), DEFAULT_CONFIDENCE)
     return Skeleton3D.from_numpy(
-        points,
-        confidences=np.ones(len(points)),
-        timestamp=frame_index / 30.0,
-        frame_index=frame_index,
+        points, confidences=confidences,
+        timestamp=_timestamp(frame_index), frame_index=frame_index,
     )
 
 
-def _build_chain(
-    bone_calibration_frames: int = 30,
-    ground_calibration_frames: int = 30,
-    required_standing_frames: int = 5,
-) -> dict:
-    gate = StandingPoseGate(
-        min_confidence=0.5,
-        required_consecutive_frames=required_standing_frames,
-    )
-    return {
-        "gate": gate,
-        "filters": {
-            "confidence_blender": ConfidenceBlender(
-                min_confidence=0.1, max_confidence=0.9,
-            ),
-            "velocity_clamp": VelocityClamp(
-                max_velocity_m_per_s=2.5, target_fps=30,
-            ),
-            "bone_constraints": BoneLengthConstraints(
-                calibration_frames=bone_calibration_frames,
-                tolerance=0.0,
-                standing_gate=gate,
-            ),
-            "ground_clamp": GroundClamp(
-                calibration_frames=ground_calibration_frames,
-                standing_gate=gate,
-            ),
-            "position_smoother": KeypointPositionSmoother(
-                min_cutoff=0.8, beta=4.0, d_cutoff=1.0,
-            ),
-        },
-    }
+def _centred(points: np.ndarray) -> np.ndarray:
+    return points - (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
 
 
-def _run_standing_frames(chain: dict, frame_count: int) -> Skeleton3D:
-    """Feed still standing frames through the chain the way the pipeline does."""
-    points = _standing_points_y_down()
-    skeleton = _make_skeleton(points, frame_index=0)
-    for frame_index in range(frame_count):
-        skeleton = _make_skeleton(points, frame_index=frame_index)
-        chain["gate"].check(skeleton)
-        skeleton = apply_preik_filters(skeleton, **chain["filters"])
-    return skeleton
+def _hip_midpoint(skeleton: Skeleton3D) -> np.ndarray:
+    points = skeleton.to_numpy()
+    return (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
 
 
-class TestCalibrationCompletes:
-
-    def test_standing_gate_latches(self):
-        chain = _build_chain()
-        _run_standing_frames(chain, 10)
-        assert chain["gate"].is_ready
-
-    def test_gate_latches_at_exactly_required_frames(self):
-        """The chain must not advance the gate — only the caller does."""
-        chain = _build_chain(required_standing_frames=5)
-        _run_standing_frames(chain, 4)
-        assert not chain["gate"].is_ready
-        assert chain["gate"].progress == (4, 5)
-
-        _run_standing_frames(chain, 1)
-        assert chain["gate"].is_ready
-
-    @pytest.mark.skip(reason="pre-IK filters temporarily bypassed in preik_chain")
-    def test_bone_calibration_completes(self):
-        chain = _build_chain(bone_calibration_frames=30, required_standing_frames=5)
-        _run_standing_frames(chain, 100)
-        bone_constraints = chain["filters"]["bone_constraints"]
-        assert bone_constraints.is_calibrated
-        assert bone_constraints.body_proportions is not None
-
-    @pytest.mark.skip(reason="pre-IK filters temporarily bypassed in preik_chain")
-    def test_ground_calibration_completes(self):
-        chain = _build_chain(ground_calibration_frames=30, required_standing_frames=5)
-        _run_standing_frames(chain, 100)
-        assert chain["filters"]["ground_clamp"].is_calibrated
-
-    @pytest.mark.skip(reason="pre-IK filters temporarily bypassed in preik_chain")
-    def test_calibrated_bone_lengths_match_input(self):
-        chain = _build_chain()
-        _run_standing_frames(chain, 100)
-        proportions = chain["filters"]["bone_constraints"].body_proportions
-        assert proportions.femur_length_avg == pytest.approx(
-            FEMUR_LENGTH_M, abs=BONE_TOL_M,
-        )
-        assert proportions.tibia_length_avg == pytest.approx(
-            TIBIA_LENGTH_M, abs=BONE_TOL_M,
-        )
-        assert proportions.torso_length_avg == pytest.approx(
-            TORSO_LENGTH_M, abs=BONE_TOL_M,
-        )
+def _multi_camera_chain() -> PreIKChain:
+    return build_preik_chain(BiomechanicsConfig(), multi_camera=True)
 
 
-class TestSkeletonIsNotCorrupted:
-
-    def test_still_standing_pose_survives_the_chain(self):
-        """A still, anatomically perfect pose must come out ~unchanged."""
-        chain = _build_chain()
-        original = _standing_points_y_down()
-        filtered = _run_standing_frames(chain, 100).to_numpy()
-
-        for name, keypoint in (
-            ("left_hip", CK.LEFT_HIP), ("right_hip", CK.RIGHT_HIP),
-            ("left_knee", CK.LEFT_KNEE), ("right_knee", CK.RIGHT_KNEE),
-            ("left_ankle", CK.LEFT_ANKLE), ("right_ankle", CK.RIGHT_ANKLE),
-            ("left_shoulder", CK.LEFT_SHOULDER), ("right_shoulder", CK.RIGHT_SHOULDER),
-        ):
-            moved = float(np.linalg.norm(filtered[keypoint] - original[keypoint]))
-            assert moved < POSITION_TOL_M, (
-                f"{name} moved {moved * 100:.1f} cm through the chain"
-            )
-
-    def test_ankles_stay_below_knees(self):
-        """The fold signature: ankles driven up to or above knee height."""
-        chain = _build_chain()
-        filtered = _run_standing_frames(chain, 100).to_numpy()
-        for knee, ankle in (
-            (CK.LEFT_KNEE, CK.LEFT_ANKLE),
-            (CK.RIGHT_KNEE, CK.RIGHT_ANKLE),
-        ):
-            # Y-down: below means a larger y.
-            assert filtered[ankle][1] > filtered[knee][1]
-
-    def test_legs_do_not_cross(self):
-        chain = _build_chain()
-        filtered = _run_standing_frames(chain, 100).to_numpy()
-        assert filtered[CK.LEFT_ANKLE][0] > filtered[CK.RIGHT_ANKLE][0]
-
-    def test_bone_lengths_preserved(self):
-        chain = _build_chain()
-        filtered = _run_standing_frames(chain, 100).to_numpy()
-
-        for proximal, distal, expected in (
-            (CK.LEFT_HIP, CK.LEFT_KNEE, FEMUR_LENGTH_M),
-            (CK.RIGHT_HIP, CK.RIGHT_KNEE, FEMUR_LENGTH_M),
-            (CK.LEFT_KNEE, CK.LEFT_ANKLE, TIBIA_LENGTH_M),
-            (CK.RIGHT_KNEE, CK.RIGHT_ANKLE, TIBIA_LENGTH_M),
-        ):
-            length = float(np.linalg.norm(filtered[distal] - filtered[proximal]))
-            assert length == pytest.approx(expected, abs=BONE_TOL_M)
-
-    def test_leg_extension_preserved(self):
-        """Hip-to-ankle vertical span must stay near full leg length."""
-        chain = _build_chain()
-        filtered = _run_standing_frames(chain, 100).to_numpy()
-        hip_mid_y = (filtered[CK.LEFT_HIP][1] + filtered[CK.RIGHT_HIP][1]) / 2.0
-        leg_length = FEMUR_LENGTH_M + TIBIA_LENGTH_M
-
-        for ankle in (CK.LEFT_ANKLE, CK.RIGHT_ANKLE):
-            span = abs(float(filtered[ankle][1]) - hip_mid_y)
-            assert span / leg_length > 0.9
+def _single_camera_chain() -> PreIKChain:
+    return build_preik_chain(BiomechanicsConfig(), multi_camera=False)
 
 
-class TestPipelineWiring:
+def _run_squat(chain: PreIKChain, hip_centred_input: bool = False) -> tuple[list[np.ndarray], list[PreIKResult | None]]:
+    """Feed standing warm-up then one rep; return the input points and chain outputs per frame."""
+    inputs: list[np.ndarray] = []
+    outputs: list[PreIKResult | None] = []
+    depths = [0.0] * WARM_UP_FRAMES + squat_depth_profile()
+    for frame_index, depth in enumerate(depths):
+        points = world_squat_points(depth)
+        if hip_centred_input:
+            points = _centred(points)
+        inputs.append(points)
+        outputs.append(chain.run(_make_skeleton(points, frame_index)))
+    return inputs, outputs
 
-    def test_rom_clamp_is_not_in_the_chain(self):
-        """ROMClamp folded the legs on every frame. It stays out until it has
-        per-user calibrated ROM and its own tests."""
-        import inspect
 
-        from biomechanics import pipeline
-        from biomechanics.utils import preik_chain
+class TestMultiCameraChain:
 
-        assert "rom_clamp" not in inspect.getsource(preik_chain).lower()
-        assert "romclamp" not in inspect.getsource(pipeline).lower()
+    def test_stage_names(self):
+        assert _multi_camera_chain().stage_names == ("raw", "kalman", "foot_contact", "recentre")
+
+    def test_analysis_is_hip_centred(self):
+        _, outputs = _run_squat(_multi_camera_chain())
+        for result in outputs[LAG_FRAMES:]:
+            assert result is not None
+            assert np.linalg.norm(_hip_midpoint(result.analysis)) < HIP_CENTRE_TOL_M
+
+    def test_analysis_lags_two_frames(self):
+        inputs, outputs = _run_squat(_multi_camera_chain())
+        for frame_index in range(WARM_UP_FRAMES, len(inputs)):
+            result = outputs[frame_index]
+            assert result.analysis.timestamp == pytest.approx(_timestamp(frame_index - LAG_FRAMES))
+            assert result.analysis.frame_index == frame_index - LAG_FRAMES
+            expected = _centred(inputs[frame_index - LAG_FRAMES])
+            deviation = np.linalg.norm(result.analysis.to_numpy() - expected, axis=1).max()
+            assert deviation < POSITION_TOL_M
+
+    def test_display_is_undelayed(self):
+        inputs, outputs = _run_squat(_multi_camera_chain())
+        for frame_index in range(WARM_UP_FRAMES, len(inputs)):
+            result = outputs[frame_index]
+            assert result.display is not None
+            assert result.display.timestamp == pytest.approx(_timestamp(frame_index))
+            assert result.display.frame_index == frame_index
+            deviation = np.linalg.norm(result.display.to_numpy() - _centred(inputs[frame_index]), axis=1).max()
+            assert deviation < POSITION_TOL_M
+
+    def test_analysis_world_keeps_the_floor(self):
+        _, outputs = _run_squat(_multi_camera_chain())
+        world = outputs[-1].analysis_world
+        assert world is not None
+        assert world.to_numpy()[CK.LEFT_ANKLE][1] == pytest.approx(0.0, abs=POSITION_TOL_M)
+
+    def test_foot_state_valid_after_warm_up(self):
+        _, outputs = _run_squat(_multi_camera_chain())
+        foot_state = outputs[WARM_UP_FRAMES - 1].foot_state
+        assert foot_state is not None
+        assert foot_state.valid
+        assert foot_state.planted_l and foot_state.planted_r
+        assert foot_state.heel_rise_l_cm == pytest.approx(0.0)
+
+    def test_velocities_match_frame_count(self):
+        _, outputs = _run_squat(_multi_camera_chain())
+        assert outputs[-1].velocities.shape == (SYNTHETIC_NUM_KEYPOINTS, 3)
+
+    def test_predict_missing_continues_then_stops(self):
+        chain = _multi_camera_chain()
+        _, outputs = _run_squat(chain)
+        next_index = len(outputs)
+
+        predicted: list[PreIKResult | None] = []
+        for offset in range(MAX_PREDICTED_FRAMES + LAG_FRAMES + 2):
+            predicted.append(chain.predict_missing(_timestamp(next_index + offset)))
+
+        for result in predicted[:MAX_PREDICTED_FRAMES]:
+            assert result is not None
+            assert np.linalg.norm(_hip_midpoint(result.analysis)) < HIP_CENTRE_TOL_M
+        assert predicted[-1] is None
+
+    def test_predict_missing_before_any_measurement_is_none(self):
+        assert _multi_camera_chain().predict_missing(_timestamp(0)) is None
+
+    def test_hips_missing_on_first_frame_is_none(self):
+        chain = _multi_camera_chain()
+        confidences = np.full(SYNTHETIC_NUM_KEYPOINTS, DEFAULT_CONFIDENCE)
+        confidences[CK.LEFT_HIP] = 0.0
+        assert chain.run(_make_skeleton(world_squat_points(0.0), 0, confidences)) is None
+
+    def test_reset_clears_kalman_but_keeps_foot_anchors(self):
+        chain = _multi_camera_chain()
+        _, outputs = _run_squat(chain)
+        assert outputs[-1].foot_state.valid
+
+        chain.reset()
+        next_index = len(outputs)
+        result = chain.run(_make_skeleton(world_squat_points(0.0), next_index))
+
+        assert result is not None
+        # No history after the reset: the lagged output IS the current frame.
+        assert result.analysis.timestamp == pytest.approx(_timestamp(next_index))
+        assert result.analysis.frame_index == next_index
+        # Foot contact is session-scoped: a fresh chain would still be warming up.
+        assert result.foot_state.valid
+
+    def test_tap_receives_every_stage(self):
+        chain = _multi_camera_chain()
+        seen: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+        chain.set_tap(lambda stage, points, confidences: seen.append((stage, points.shape, confidences.shape)))
+
+        chain.run(_make_skeleton(world_squat_points(0.0), 0))
+
+        assert [stage for stage, _, _ in seen] == list(chain.stage_names)
+        assert all(shape == (SYNTHETIC_NUM_KEYPOINTS, 3) for _, shape, _ in seen)
+        assert all(shape == (SYNTHETIC_NUM_KEYPOINTS,) for _, _, shape in seen)
+
+    def test_tap_can_be_removed(self):
+        chain = _multi_camera_chain()
+        seen: list[str] = []
+        chain.set_tap(lambda stage, points, confidences: seen.append(stage))
+        chain.set_tap(None)
+
+        chain.run(_make_skeleton(world_squat_points(0.0), 0))
+
+        assert seen == []
+
+
+class TestSingleCameraChain:
+
+    def test_stage_names(self):
+        assert _single_camera_chain().stage_names == ("raw", "kalman")
+
+    def test_no_foot_state_and_no_world_view(self):
+        _, outputs = _run_squat(_single_camera_chain(), hip_centred_input=True)
+        assert outputs[-1].foot_state is None
+        assert outputs[-1].analysis_world is None
+
+    def test_hip_centred_input_stays_hip_centred_and_lagged(self):
+        inputs, outputs = _run_squat(_single_camera_chain(), hip_centred_input=True)
+        for frame_index in range(WARM_UP_FRAMES, len(inputs)):
+            result = outputs[frame_index]
+            assert np.linalg.norm(_hip_midpoint(result.analysis)) < POSITION_TOL_M
+            assert result.analysis.timestamp == pytest.approx(_timestamp(frame_index - LAG_FRAMES))
+            deviation = np.linalg.norm(result.analysis.to_numpy() - inputs[frame_index - LAG_FRAMES], axis=1).max()
+            assert deviation < POSITION_TOL_M
+
+    def test_hips_missing_on_first_frame_is_none(self):
+        chain = _single_camera_chain()
+        confidences = np.full(SYNTHETIC_NUM_KEYPOINTS, DEFAULT_CONFIDENCE)
+        confidences[CK.RIGHT_HIP] = 0.0
+        assert chain.run(_make_skeleton(_centred(world_squat_points(0.0)), 0, confidences)) is None

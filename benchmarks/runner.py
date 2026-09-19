@@ -47,6 +47,7 @@ _BENCH_MODULES = [
     ("benchmarks.components.bench_compaction", False),
     ("benchmarks.components.bench_audio_cues", False),
     ("benchmarks.components.bench_vad", False),
+    ("benchmarks.components.bench_affect", False),
     ("benchmarks.components.bench_llm", True),
     ("benchmarks.components.bench_tts", True),
     ("benchmarks.components.bench_stt", True),

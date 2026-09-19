@@ -112,8 +112,8 @@ tar --exclude='*.pyc' \
     --exclude='calibrated_test_visualizer/outputs/*' \
     -czf "$ARCHIVE" \
     src/ \
-    scripts/visualize_video_squats.py \
-    scripts/download_models.py \
+    scripts/demos/visualize_video_squats.py \
+    scripts/tools/download_models.py \
     calibrated_test_visualizer/ \
     config/ \
     models/ 2>/dev/null || true
@@ -135,10 +135,10 @@ echo -e "${GREEN}  Files synced.${NC}"
 echo -e "${BLUE}[5/7] Checking RTMPose model...${NC}"
 ssh "$SSH_TARGET" "
     cd $REMOTE_DIR && source venv/bin/activate
-    MODEL_PATH='src/biomechanics/pose/models/rtmpose-m-256x192.onnx'
+    MODEL_PATH='src/biomechanics/pose/models/rtmpose-m-halpe26-256x192.onnx'
     if [ ! -f \$MODEL_PATH ]; then
-        echo 'Downloading RTMPose model...'
-        python3 scripts/download_models.py
+        echo 'Downloading RTMPose halpe26 model...'
+        python3 scripts/tools/download_models.py --model rtmpose-m-halpe26
     else
         echo 'RTMPose model OK'
     fi
@@ -153,7 +153,7 @@ echo ""
 
 ssh -t "$SSH_TARGET" "
     cd $REMOTE_DIR && source venv/bin/activate
-    export PYTHONPATH=$REMOTE_DIR/src:$REMOTE_DIR/scripts
+    export PYTHONPATH=$REMOTE_DIR/src:$REMOTE_DIR/scripts/demos
     python3 calibrated_test_visualizer/visualize_triangulated.py \
         --height $ATHLETE_HEIGHT_CM \
         --output-dir calibrated_test_visualizer/outputs \

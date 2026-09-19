@@ -43,15 +43,41 @@
 
 ## Project Status
 
-**Current Focus:** Voice agent coaching integration — wake word detection, boot progress UI, and session-aware context formatting.
+**Current Focus:** Squat diagnosis accuracy on the 3-camera rig (rebuilt pre-IK signal path, lifter-based camera calibration) and on-device speech affect perception so Nova adapts to how the athlete sounds.
+
+### Recent Changes (September 2026)
+
+#### Speech Affect Perception V1 (Session 2026-09-17)
+- **Edge-only perception path:** `src/affect/` runs an ONNX speech-emotion model (arousal / valence / dominance + prosody) on every utterance via onnxruntime, with per-speaker neutral baselines and hysteresis. No cloud call enters the path; the deployed graph lives in `models/affect/current/` and targets Jetson Orin Nano Super.
+- **Two-field LLM interface:** the agent sees at most `[athlete: effort=… affect=…]`, sized for a 2B local model. `AffectNodesMixin` injects it in `llm_node` with a ≤40 ms wait budget (zero added latency on coaching replies) and applies TTS style in `tts_node`; the LLM never writes voice tags.
+- **Coaching gates:** humor off when the athlete sounds frustrated or strained, calmer motivation near limit, athlete-state line in the post-set recap. Rep ascent time feeds the effort state. `FAULT_CUE` priority and the cached cue path are untouched.
+- **Training + tooling:** `training/affect/` (train / eval / export / report CLI, TensorRT build script), `benchmarks` affect component, replay and TTS-probe tools, profiler `affect` category, ContextViewer and display pill. V1a model is the audEERING wav2vec2 export; MSP-Podcast training is pending the data agreement. Start at `docs/affect/HANDOFF.md`.
+
+#### Pre-IK Signal Path Rebuild + Camera Calibration (Sessions 2026-09-16/18)
+- **Pre-IK rebuild:** a nine-agent audit against a ground-truth 3-camera squat simulator showed every legacy pre-IK filter except the velocity clamp made accuracy worse. Replaced with a fixed-lag Kalman smoother per keypoint (lagged analysis stream + undelayed display stream), world-frame foot contact (heel rise, stance width, toe-out → new `HeelRiseRule`) and session-scoped segment-length measurement. Reports in `.claude/preik-audit/`.
+- **Camera calibration:** intrinsics + factory extrinsics from a ChArUco board (`scripts/tools/calibrate_cameras.py`); field extrinsics from the lifter via sparse bundle adjustment with the barbell as metric scale — within 0.3 mm of perfect calibration on the simulator. Drift refines are validated on held-out frames and rejected if they move metric scale by more than 1 %.
+
+#### Website
+- Landing page tightened: removed the One Set section, moved the "Fully Local Intelligence" card from the Manifesto up into the RackShowcase, rewrote the Coach and Flywheel copy.
+
+**Verification:** 1478 tests passing. Known pre-existing failures outside this work: program-generator suites (`test_v6_verification.py`, `test_phase3_v5.py`, `test_phase4_v5.py`, `test_program_generator_suite.py`) and `test_audio_cue_service.py` (imports a removed constant).
 
 ### Recent Changes (August 2026)
+
+#### Biomechanics Speed & Benchmarking (Session 2026-08-18/19)
+- **GPU-Batched Multi-Camera Pose Estimation:** RTMPoseEstimator now batches all camera views in one ONNX inference pass. Constant-shape padding via `_run_padded()` ensures CoreML MLProgram format compiles stably (fails on dynamic batch sizes). All 3 cameras processed in ~3ms vs ~9ms serially; full pipeline throughput ~14ms/frame (~71 FPS capacity on dev Mac).
+- **CoreML MLProgram Provider Option:** Replaced legacy NeuralNetwork format with MLProgram in initialization — ~30% faster (batch-3 inference: 15.2ms → 10.4ms) with exact keypoint-argmax parity to CPU. Production path now uses this acceleration transparently.
+- **Preprocess Rewrite:** Refactored to resize first, fold BGR→RGB into CHW transpose while uint8, fused in-place per-channel normalization (3D array broadcast over CHW planes is 7x faster than HWC). Output stable to 5e-7 vs old implementation. Time: 3.0ms → 0.7ms for 3 frames.
+- **Vectorized DLT Triangulator:** Keypoints grouped by camera-visibility sets, one `cv2.triangulatePoints()` per 2-view group, one stacked numpy SVD per 3+ views. Vectorized reprojection error. Time: 0.64ms → 0.18ms; 3D points and confidence bit-identical to old code within 5e-15.
+- **Benchmark Suite Fixes:** `bench_pose` used synthetic person-free image (MediaPipe fast-path, ~12ms vs real ~65ms) and default model_complexity=1 instead of production 2 — now uses real squat video frames normalized to 1280x720 + production config. `bench_pipeline` called `process_frame()` with no args (TypeError swallowed) — now uses `load_pipeline_config()`, `defer_capture=True`, frame injection via capture lock. `bench_bilstm` lacked required model_path — now uses config's model path/device. All now measure real end-to-end performance.
+- **New Tests:** `tests/test_biomechanics/test_rtmpose.py` — 9 tests for `estimate_batch()` with fake ONNX session, batch padding, alignment, low-confidence None, error cases. All 589 tests passing.
+
+**Validated Results:** Old single-camera MediaPipe path: 69.9ms/frame (14.7 FPS, fails 33.3ms threshold). New multi-camera GPU-batched path: ~14ms/frame (~71 FPS, large headroom for 30 FPS cameras). **5x speedup** while adding true 3-camera triangulation.
+
+#### Prior Changes (Earlier August 2026)
 - **Wake Word Detection System:** Added ONNX-based local wake word detection (`livekit-wakeword`, `pvporcupine`) to voice agent for hands-free activation without cloud STT. 16kHz audio processing with 80ms stride, multi-frame confirmation scoring to reject false positives.
 - **Display Server & Boot Progress UI:** New persistent display server (browser at http://localhost:5000) that opens on startup, shows boot progress milestones (neural cores → voice activity sensors → coaching audio → wake word sentinel → speech engine → conversational reasoning), and publishes live coaching state + biomechanics frames during workouts.
 - **Progress Context Formatting:** Pure text formatters (`progress_context.py`) turn persisted session data into natural language (e.g., "last session 2 days ago, 45 reps, form score 82/100") for the coaching LLM to cite verbatim in greetings and post-set recaps. Trend analysis over 3-4 recent sets.
-- **Enhanced Rep Scoring:** Refactored scoring logic to track temporal consistency, depth variability, and rep quality metrics. Detailed evidence tracking for each rep (depth achieved, trunk control, asymmetry). New `SessionTracker` for multi-set aggregation with phase-aware state management.
-- **Coaching Orchestrator Overhaul:** Unified priority queue (fault cues > rep counts > progress > LLM) with audio ducking — LLM pauses while cached cues play. Centralized routing between biomechanics pipeline IPC and voice agent.
-- **Voice Agent Coaching Loop:** WorkoutAgent now manages active session state, integrates progress context into LLM prompts, and sequences intra-set cues (pre-cached TTS) with post-set LLM summaries. Setup assessment captures stance/toe angle before first rep.
 - **Agent Persona Overhaul:** Refactored all agent prompts (onboarding, main menu, workout, schedule, program creation, coaching) from prescriptive, scripted instructions to natural, conversational guidance. Nova identity and spoken-output rules now centralized (`base_prompt.py`). Added TTS normalizer (`tts_normalizer.py`) to strip markdown, emoji, and symbols from agent speech before audio synthesis. All agents now encouraged to vary responses, avoid repetition, and sound like a real person — not a script.
 
 ### YC Application Readiness
@@ -302,13 +328,46 @@ Both backends output `Skeleton2D` (pixel coordinates) and `Skeleton3D` (world co
 
 ### 2. Multi-Camera Triangulation
 
-**Files:** `src/biomechanics/triangulation/calibration.py`, `src/biomechanics/triangulation/triangulator.py`, `src/biomechanics/triangulation/multi_capture.py`
+**Files:** `src/biomechanics/triangulation/calibration.py`, `src/biomechanics/triangulation/person_calibration.py`, `src/biomechanics/triangulation/charuco.py`, `src/biomechanics/triangulation/triangulator.py`, `src/biomechanics/triangulation/multi_capture.py`, `src/biomechanics/pose/multi_camera.py`, `scripts/tools/calibrate_cameras.py`
 
 Optional stereo/multi-camera mode for true 3D reconstruction (disabled by default — single camera uses MediaPipe's built-in depth estimation).
 
-#### T-Pose Calibration
+#### Camera Calibration
 
-Calibration uses a canonical T-pose model scaled to the user's height (188.5cm default) with anthropometric segment-to-height ratios:
+Calibration has two halves. **Intrinsics** (focal length, principal point, lens distortion) are a property of each camera and are measured once with a ChArUco board. **Extrinsics** (where the cameras sit) are solved from the lifter: nothing but the person squatting is needed, with the barbell as an optional metric ruler. Everything lives in `~/.nowva/` and runs on the edge device — no cloud step.
+
+| File in `~/.nowva/` | Written by | Meaning |
+|---|---|---|
+| `intrinsics_<camera_key>.json` | `calibrate_cameras.py intrinsics` | Real K + distortion for one camera at one resolution |
+| `rig_calibration_cams_<ids>.json` | first session (person calibration or T-pose), or `calibrate_cameras.py extrinsics` at the factory | The rig calibration; never overwritten by refines |
+| `rig_calibration_cams_<ids>_refined.json` | board re-anchor and drift refines | Field refinement; loaded instead of the file above when its `source_timestamp` matches that file's `timestamp` |
+
+**1. Intrinsics, once per camera (recommended):**
+
+```bash
+venv/bin/python scripts/tools/calibrate_cameras.py board --out board.png        # print it, measure the squares
+venv/bin/python scripts/tools/calibrate_cameras.py intrinsics --camera 0          # repeat for each device id
+```
+
+The pipeline looks intrinsics up at the resolution each camera **actually opened at** (a webcam that refuses 1280×720 is handled). A camera without a file falls back to the guessed pinhole (`f = 0.8 × width`, centred, no distortion) and the log prints one warning with the exact command to run. `camera_calibration.camera_keys` maps a device id to a named file (`{1: usb_left}` → `intrinsics_usb_left.json`).
+
+**2. Session flow (`CameraCalibrationSession` in `pipeline_process.py`):**
+
+1. Load order: `_refined` file if it descends from the factory / previous file → that file → none. `triangulation.calibration_file`, when set, replaces the `~/.nowva` rig file as the factory file. A file for a different camera set, or calibrated at a resolution a camera did not open at, is ignored with a warning and the rig recalibrates.
+2. No file: the HUD shows **CALIBRATING CAMERAS - STEP IN AND DO TWO SLOW SQUATS** with a `FRAMES n/240  SQUATS n/2` counter. Pose estimation runs 2D-only, the provider buffers frames seen by ≥ 2 cameras, and once both targets are met `PersonCalibrator.calibrate` runs in a worker thread (HUD: *SOLVING, ONE MOMENT*; ~1–3 s on an M2). The result is saved to `rig_calibration_cams_<ids>.json` and installed, and the session continues into the normal assessment. Scale comes from the barbell when a detector is available (`barbell_tracking.enabled` or `camera_calibration.use_bar_scale`), else from the user's height.
+3. No two squats within `capture_timeout_s`, or the solve fails: fall back to the T-pose calibration below after a 5 s on-screen countdown (up to 3 attempts when the pose is not held; stalled cameras fail the session with a clear error instead of hanging).
+4. A factory calibration (`world_anchor: "board"`) is refined once on the assessment reps (or at the first rest for returning users) to move the world frame onto the lifter, and saved as `_refined`.
+5. **Drift monitor:** at every rest start the reprojection health of the set's last `drift_check_frames` frames is compared with the RMS stored in the calibration. Above `drift_ratio` × stored, a refine (`keep_world_frame=True`, scale kept) runs in a thread during the rest on the frames *before* the check window and installs before the readiness gate re-arms — never mid-set. It is accepted only if the held-out health drops to the stored limit or by more than `drift_ratio`; otherwise the observed level becomes the new baseline. Any refine (drift or board re-anchor) that changes the triangulated femur + tibia length by more than 1 % against the session's measured body is rejected with a "camera moved along the baseline — recalibrate" message, since reprojection health cannot see a scale change.
+
+Installing a calibration calls `pipeline.on_calibration_changed(world_frame_changed)`: the Kalman state, triangulator history, foot contact anchors and floor restart (even a kept world frame shifts ~1 cm, which the planted-foot model would otherwise carry as a heel-rise bias). Body measurements are never reset. To recalibrate after moving cameras, delete `~/.nowva/rig_calibration_cams_*`.
+
+Config (`camera_calibration:` in `config/biomechanics.yaml`): `camera_keys`, `calibration_buffer_frames` (450), `use_bar_scale` (false), `bar_detection_stride` (3), `min_calibration_frames` (240), `min_squat_excursions` (2), `capture_timeout_s` (90), `drift_ratio` (1.5), `drift_check_frames` (150).
+
+`venv/bin/python scripts/tools/calibrate_cameras.py check --cameras 0,1,2` prints the current reprojection health on live frames.
+
+#### T-Pose Calibration (fallback)
+
+The fallback uses a canonical T-pose model scaled to the user's height (188.5cm default) with anthropometric segment-to-height ratios:
 
 | Segment | Ratio |
 |---------|-------|
@@ -329,7 +388,7 @@ Calibration uses a canonical T-pose model scaled to the user's height (188.5cm d
 5. Compute projection matrix `P = K @ [R|t]` per camera
 6. Validate with reprojection error (warns if >10px)
 
-Intrinsic matrix: `focal_length = 0.8 × resolution_width`, no lens distortion.
+Intrinsics come from `~/.nowva/intrinsics_<camera_key>.json` when present; otherwise `focal_length = 0.8 × resolution_width`, no lens distortion.
 
 #### DLT Triangulation
 
@@ -355,33 +414,19 @@ Each camera runs in a dedicated thread with a ring buffer. Primary camera (devic
 
 ---
 
-### 3. Pre-IK Skeleton Filtering
+### 3. Pre-IK Chain
 
-**Files:** `src/biomechanics/utils/confidence_blend.py`, `src/biomechanics/utils/velocity_clamp.py`, `src/biomechanics/utils/bone_constraints.py`, `src/biomechanics/utils/predictive_state.py`
+**Files:** `src/biomechanics/utils/preik_chain.py`, `src/biomechanics/utils/keypoint_kalman.py`, `src/biomechanics/utils/foot_contact.py`, `src/biomechanics/utils/segment_lengths.py`
 
-Four sequential stages that clean noisy pose estimates before inverse kinematics:
+One chain definition (`build_preik_chain(config, multi_camera)`) runs between pose estimation and the IK solver, on numpy arrays, converting `Skeleton3D` exactly once at entry and exit:
 
-| Stage | Method | Parameters | Purpose |
-|-------|--------|------------|---------|
-| **Confidence Blend** | Weighted interpolation between current and previous keypoint positions | Range: 0.1-0.9 | Suppress low-confidence keypoints; lower confidence → heavier interpolation with previous frame |
-| **Velocity Clamp** | Physical velocity limit enforcement | Max: 2.5 m/s | Prevent teleporting joints; if displacement/dt exceeds limit, clamp to max velocity in that direction |
-| **Bone Constraints** | Calibrated bone length enforcement | 12 pairs, ±15% tolerance, 30-frame calibration | Enforce anatomical consistency; proximal→distal cascade correction |
-| **Predictive State** | Lookahead extrapolation from velocity | 0.2s horizon, max 15° extrapolation | Pre-cue faults before they fully manifest; enables faster coaching response |
+| Stage | Mode | Purpose |
+|-------|------|---------|
+| **Fixed-lag Kalman** (`kalman:`) | both | Constant-velocity smoother per keypoint; measurement noise from the triangulator's metric confidence; innovation gate with re-acquisition; predicts through dropouts for up to `max_predicted_frames`. Emits a 2-frame-lagged **analysis** stream (IK, rules, buffers) and an undelayed **display** stream (HUD/avatar). |
+| **Foot contact** (`foot_contact:`) | multi-camera | World-frame planted-foot anchors; heel rise, stance width, toe-out, floor roll (`FootState` → `HeelRiseRule`). |
+| **Hip re-centring** | multi-camera | Analysis and display skeletons are hip-centred; `analysis_world` keeps the floor for body measurement and foot metrics. |
 
-#### Bone Constraints: Deep Dive
-
-The bone constraint system has two phases:
-
-**Calibration (first 30 frames):**
-1. Measure distances for 14 COCO bone pairs (torso, limbs, feet)
-2. Only use frames where both keypoints have confidence ≥ 0.1
-3. Waits for StandingPoseGate to confirm upright pose
-4. Store median length for each pair
-
-**Enforcement (after calibration):**
-1. For each bone pair, compute: `deviation = |current_len - target_len| / target_len`
-2. If deviation > 15%: project the distal keypoint back along the bone direction to target length
-3. Corrections are applied **proximal → distal** so parent joint corrections don't get invalidated by child corrections
+The Kalman state resets per set (`reset_readiness_gate()`); foot contact anchors and body measurements (`pipeline.body_calibration`, a `SegmentLengthEstimator`) are session-scoped. Proportion scaling of fault thresholds is applied once when the measurement completes (or via `pipeline.apply_athlete_params()` for returning users). `PipelineFrame.skeleton_3d` is always the analysis skeleton; `skeleton_3d_display` / `skeleton_3d_raw` serve display.
 
 **Body Proportions Derivation:**
 
@@ -1172,7 +1217,6 @@ Optional:
 | `LLM_MODEL` | `gemini-3.1-flash-lite` | Console agent LLM |
 | `PROGRAM_CREATION_MODEL` | `gpt-5.2` | Program generator LLM |
 | `COMPACTION_MODEL` | `gpt-4.1-mini` | Context compaction LLM |
-| `ENABLE_PREIK_FILTERS` | `true` | Enable pre-IK filtering pipeline |
 | `USE_RAG` | `true` | Enable RAG for coaching |
 | `ALLOWED_ORIGINS` | — | CORS origins (comma-separated) |
 

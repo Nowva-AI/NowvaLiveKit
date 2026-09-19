@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 
+from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import PipelineFrame, Skeleton3D, CocoKeypoints, FaultEvent
 from biomechanics.utils.geometry import (
     WORLD_UP,
@@ -459,13 +460,13 @@ def _finalize_reps(frames_data, plot_export, seg_result, set_dir):
         metrics = {**rep, "fault_events": rep_faults}
         metrics_path = str(Path(rep_dir) / "metrics.json")
         with open(metrics_path, "w") as f:
-            json.dump(metrics, f, indent=2)
+            json.dump(nan_to_none(metrics), f, indent=2)
         print(f"  Saved: {metrics_path}")
 
         rep_export = {"rep_number": rep_number, "frames": frames_data[s:e]}
         data_path = str(Path(rep_dir) / "data.json")
         with open(data_path, "w") as f:
-            json.dump(rep_export, f, indent=2, default=str)
+            json.dump(nan_to_none(rep_export), f, indent=2, default=str)
         print(f"  Saved: {data_path}")
 
 
@@ -551,7 +552,7 @@ def finalize_set(
     }
     data_path = str(Path(set_dir) / "data.json")
     with open(data_path, "w") as f:
-        json.dump(set_export, f, indent=2, default=str)
+        json.dump(nan_to_none(set_export), f, indent=2, default=str)
     print(f"  Saved: {data_path}")
 
     # Save smoothed plot data
@@ -581,7 +582,7 @@ def finalize_set(
     }
     plot_path = str(Path(set_dir) / "plot_data.json")
     with open(plot_path, "w") as f:
-        json.dump(plot_export, f, indent=2)
+        json.dump(nan_to_none(plot_export), f, indent=2)
     print(f"  Saved: {plot_path}")
 
     # Rep segmentation analysis, plot, and report

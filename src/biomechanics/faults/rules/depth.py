@@ -5,11 +5,14 @@ Evaluates squat depth based on knee flexion angle.
 Categories: quarter (<60°), half (60-90°), parallel (90-100°), below parallel (>100°)
 """
 
+from __future__ import annotations
+
+import math
 from collections import deque
 from typing import Optional
 
 from biomechanics.utils.types import JointAngles, FaultEvent, FaultSeverity
-from biomechanics.faults.fault_types import FaultRule, FaultType, DEFAULT_THRESHOLDS, FAULT_MESSAGES
+from biomechanics.faults.fault_types import FaultRule, FaultType, FAULT_MESSAGES
 
 
 class DepthCategory:
@@ -35,8 +38,11 @@ class DepthRule(FaultRule):
     """
     Rule for evaluating squat depth.
 
-    This rule fires at the end of a rep (when depth can be fully assessed)
-    and reports the achieved depth category.
+    Depth is reported once per rep, at rep completion, through the rule
+    engine's rep-complete paths (evaluate_max_depth from the rep counter's
+    measured max, or evaluate_depth_class from the BiLSTM class). The
+    per-frame evaluate() never emits, so one rep can never produce the same
+    depth fault twice (S17).
 
     Thresholds:
     - Quarter: < 60° knee flexion
@@ -58,18 +64,9 @@ class DepthRule(FaultRule):
         self.half_threshold = half_threshold
         self.parallel_threshold = parallel_threshold
 
-        # Track maximum depth seen in current rep
-        self._max_depth_in_rep: float = 0.0
-        self._depth_evaluated_for_rep: int = -1
-
     @property
     def fault_type(self) -> FaultType:
         return FaultType.DEPTH
-
-    def reset(self) -> None:
-        """Reset tracking for new rep."""
-        self._max_depth_in_rep = 0.0
-        self._depth_evaluated_for_rep = -1
 
     def get_depth_category(self, knee_flexion: float) -> str:
         """Categorize depth based on knee flexion angle."""
@@ -89,54 +86,7 @@ class DepthRule(FaultRule):
         in_rep: bool = False,
         rep_number: int = 0,
     ) -> Optional[FaultEvent]:
-        """
-        Evaluate depth during a rep.
-
-        Only fires at rep completion (when in_rep transitions to False)
-        or when explicitly evaluating at max depth.
-        """
-        avg_knee = angles.avg_knee_flexion
-
-        # Track max depth during rep
-        if in_rep:
-            if avg_knee > self._max_depth_in_rep:
-                self._max_depth_in_rep = avg_knee
-            return None
-
-        # Rep ended or not in rep - evaluate if we have tracked depth
-        if self._max_depth_in_rep > 0 and self._depth_evaluated_for_rep != rep_number:
-            self._depth_evaluated_for_rep = rep_number
-            max_depth = self._max_depth_in_rep
-            self._max_depth_in_rep = 0.0  # Reset for next rep
-
-            category = self.get_depth_category(max_depth)
-
-            # Only report as fault for insufficient depth
-            if category == DepthCategory.QUARTER:
-                return self._create_fault_event(
-                    severity=FaultSeverity.MODERATE,
-                    severity_score=2.0,
-                    message=FAULT_MESSAGES[FaultType.DEPTH]["quarter"],
-                    angles=angles,
-                    rep_number=rep_number,
-                    details={
-                        "max_knee_flexion": max_depth,
-                        "category": category,
-                    },
-                )
-            elif category == DepthCategory.HALF:
-                return self._create_fault_event(
-                    severity=FaultSeverity.MILD,
-                    severity_score=1.0,
-                    message=FAULT_MESSAGES[FaultType.DEPTH]["half"],
-                    angles=angles,
-                    rep_number=rep_number,
-                    details={
-                        "max_knee_flexion": max_depth,
-                        "category": category,
-                    },
-                )
-
+        """Per-frame evaluation is a no-op: depth is judged at rep completion."""
         return None
 
     def evaluate_depth_class(
@@ -185,8 +135,12 @@ class DepthRule(FaultRule):
         """
         Directly evaluate depth from known max flexion.
 
-        Used when rep completes and max depth is already known.
+        Used when rep completes and max depth is already known. A NaN max
+        (no valid knee angle during the rep) produces no fault.
         """
+        if math.isnan(max_knee_flexion):
+            return None
+
         category = self.get_depth_category(max_knee_flexion)
 
         if category == DepthCategory.QUARTER:

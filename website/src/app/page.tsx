@@ -7,7 +7,6 @@ import { Hero } from "@/components/sections/Hero";
 import { Mission } from "@/components/sections/Mission";
 import { RackShowcase } from "@/components/sections/RackShowcase";
 import { Coach } from "@/components/sections/Coach";
-import { OneSet } from "@/components/sections/OneSet";
 import { Flywheel } from "@/components/sections/Flywheel";
 import { CtaBand } from "@/components/sections/CtaBand";
 import { Manifesto } from "@/components/sections/Manifesto";
@@ -38,7 +37,6 @@ export default function Home() {
           <Mission />
           <RackShowcase />
           <Coach />
-          <OneSet />
           <Flywheel />
           <Manifesto />
           <Pricing />

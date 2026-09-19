@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from biomechanics.utils.json_safe import nan_to_none
+
 
 # ------------------------------------------------------------------
 # Data models
@@ -366,4 +368,4 @@ class AssessmentLogger:
 
     @staticmethod
     def _write_json(path: Path, data: Any) -> None:
-        path.write_text(json.dumps(data, indent=2, default=str))
+        path.write_text(json.dumps(nan_to_none(data), indent=2, default=str))

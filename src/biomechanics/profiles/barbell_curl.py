@@ -80,9 +80,6 @@ class BarbellCurlProfile(ExerciseProfile):
             min_depth_cm=80.0,
             standing_return_cm=10.0,
             min_rep_duration_frames=15,
-            position_min_cutoff=1.5,
-            position_beta=0.01,
-            velocity_ema_alpha=0.3,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:

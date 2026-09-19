@@ -16,6 +16,18 @@ pose:
 
 triangulation:
   enabled: true
+  max_sync_delta_ms: 20.0
+
+camera_calibration:               # person-based camera calibration (multi-camera only)
+  # camera_keys: {0: macbook, 1: usb_left, 2: usb_right}   # device id -> ~/.nowva/intrinsics_<key>.json
+  calibration_buffer_frames: 450  # ring buffer of 2D views seen by >= 2 cameras (~15 s)
+  use_bar_scale: false            # barbell as metric ruler while a capture window is open
+  bar_detection_stride: 3         # bar detection on every Nth captured frame
+  min_calibration_frames: 240     # no calibration file: capture this many frames...
+  min_squat_excursions: 2         # ...and this many slow squats before solving
+  capture_timeout_s: 90.0         # then fall back to the T-pose calibration
+  drift_ratio: 1.5                # refine between sets when reprojection RMS > ratio x stored
+  drift_check_frames: 150
 
 kinematics:
   backend: analytical           # analytical | opensim
@@ -36,6 +48,12 @@ faults:
     mild: 12.0
     moderate: 17.0
     severe: 24.0
+  heel_rise:                      # ankle rise above its planted floor (multi-camera only)
+    mild_cm: 1.5
+    moderate_cm: 3.0
+    severe_cm: 5.0
+    cooldown_s: 2.0
+    min_rise_duration_s: 0.23
 
 rep_detection:
   entry_threshold: 30.0
@@ -50,12 +68,19 @@ ipc:
   frame_send_interval: 10       # Send frame data every N frames
   fault_cooldown_seconds: 3.0
 
-velocity_clamp:
-  max_velocity_m_per_s: 2.5
+kalman:                           # fixed-lag Kalman smoother — the only temporal filter before IK
+  lag_frames: 2                   # analysis lags 2 frames (~66 ms at 30 fps); display is undelayed
+  process_noise: 10.0
+  measurement_std_floor_m: 0.003
+  single_camera_measurement_std_floor_m: 0.01
+  measurement_std_ceiling_m: 0.08
+  gate_sigma: 4.0
+  gate_min_radius_m: 0.08
+  max_predicted_frames: 5         # analysis continues this many frames without a pose
+  min_output_confidence: 0.15
 
-bone_constraints:
-  calibration_frames: 30
-  tolerance: 0.0
+foot_contact:
+  enabled: true                   # world-frame planted-foot model (multi-camera only)
 
 standing_gate:
   min_confidence: 0.25
@@ -64,14 +89,6 @@ standing_gate:
   min_torso_length_m: 0.25
   max_torso_length_m: 0.80
   required_consecutive_frames: 5
-
-confidence_blend:
-  min_confidence: 0.1
-  max_confidence: 0.9
-
-predictive_state:
-  horizon_seconds: 0.2
-  max_extrapolation_deg: 15.0
 
 bilstm:
   enabled: true
@@ -92,6 +109,3 @@ hip_counter:
   min_frames_bottom: 2
   min_frames_ascending: 3
   min_rep_duration_frames: 15
-  position_min_cutoff: 1.5        # One Euro filter smoothing
-  position_beta: 0.01
-  velocity_ema_alpha: 0.3
