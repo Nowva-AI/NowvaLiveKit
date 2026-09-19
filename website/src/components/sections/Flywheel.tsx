@@ -37,8 +37,8 @@ export function Flywheel() {
           eyebrow="The Flywheel"
           title={
             <>
-              A coach that{" "}
-              <span className="gradient-text">grades itself.</span>
+              That{" "}
+              <span className="gradient-text">self-improves.</span>
             </>
           }
           lead="Most fitness tech guesses whether its advice worked. Nova measures it — rep by rep, cue by cue — and every rack learns from the answer."

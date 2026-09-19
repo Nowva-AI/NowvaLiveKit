@@ -1,4 +1,4 @@
-import { AudioLines, Gem, ScanEye, Sparkles } from "lucide-react";
+import { AudioLines, Gem, ScanEye, ShieldCheck, Sparkles } from "lucide-react";
 import { Reveal } from "@/components/ui/Reveal";
 import { SectionHeading } from "@/components/ui/SectionHeading";
 import { RackExplorer } from "@/components/rack/RackExplorer";
@@ -83,6 +83,30 @@ export function RackShowcase() {
             </Reveal>
           ))}
         </div>
+
+        <Reveal className="mt-14">
+          <div className="gradient-border aurora-bg grid items-center gap-8 rounded-2xl p-8 md:grid-cols-[auto_1fr] md:p-10">
+            <ShieldCheck
+              className="size-12 text-accent-ink md:size-14"
+              strokeWidth={1.4}
+              aria-hidden
+            />
+            <div>
+              <h3 className="font-display text-2xl font-bold tracking-tight text-fg">
+                Fully Local Intelligence.
+              </h3>
+              <p className="mt-3 max-w-2xl leading-relaxed text-fg-2">
+                The biomechanics engine runs in our lab today, processing
+                every frame before the next one arrives. Every rack ships
+                with a single embedded computer that runs the entire stack —
+                multi-camera 3D reconstruction, inverse kinematics, real-time
+                fault detection, and Nova&apos;s voice. No server, no cloud,
+                no round-trip latency. Your footage never leaves the machine
+                it was captured on.
+              </p>
+            </div>
+          </div>
+        </Reveal>
 
         <Reveal className="mt-12">
           <a
