@@ -39,6 +39,10 @@ class TurnBuilder:
     llm_tokens_per_second: float | None = None
     tts_duration_s: float | None = None
     tts_audio_duration_s: float | None = None
+    tts_ttfb_s: float | None = None
+    eou_delay_s: float | None = None
+    transcription_delay_s: float | None = None
+    on_user_turn_completed_delay_s: float | None = None
     ttfa_s: float | None = None
     e2e_s: float | None = None
     affect_wait_ms: float | None = None
@@ -189,13 +193,33 @@ class SessionProfiler:
                     self._elapsed() - self._current_turn.user_speech_end_s, 3
                 )
 
-    def record_tts_metrics(self, duration: float, audio_duration: float) -> None:
+    def record_tts_metrics(
+        self, duration: float, audio_duration: float, ttfb: float | None = None
+    ) -> None:
         if not _is_enabled() or not self._started:
             return
         with self._lock:
             if self._current_turn:
                 self._current_turn.tts_duration_s = round(duration, 4)
                 self._current_turn.tts_audio_duration_s = round(audio_duration, 4)
+                if ttfb is not None:
+                    self._current_turn.tts_ttfb_s = round(ttfb, 4)
+
+    def record_eou_metrics(
+        self,
+        end_of_utterance_delay: float,
+        transcription_delay: float,
+        on_user_turn_completed_delay: float,
+    ) -> None:
+        if not _is_enabled() or not self._started:
+            return
+        with self._lock:
+            if self._current_turn:
+                self._current_turn.eou_delay_s = round(end_of_utterance_delay, 4)
+                self._current_turn.transcription_delay_s = round(transcription_delay, 4)
+                self._current_turn.on_user_turn_completed_delay_s = round(
+                    on_user_turn_completed_delay, 4
+                )
 
     def record_affect_wait(self, wait_ms: float, fresh: bool) -> None:
         if not _is_enabled() or not self._started:

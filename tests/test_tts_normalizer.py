@@ -65,9 +65,65 @@ class TestEmojiStripping:
         assert normalize_tts_text("Great job :) keep going") == "Great job keep going"
 
 
+class TestBracketedAsides:
+    def test_model_aside_removed(self) -> None:
+        assert (
+            normalize_tts_text("Are you sore?[no further response]") == "Are you sore?"
+        )
+
+    def test_stage_direction_removed(self) -> None:
+        assert normalize_tts_text("Nice. [pauses] Reset.") == "Nice. Reset."
+
+    def test_unclosed_bracket_left_alone(self) -> None:
+        assert normalize_tts_text("Set 1 [of 3") == "Set 1 [of 3"
+
+
+def _stream_through_normalizer(chunks: list[str]) -> list[str]:
+    async def source():
+        for chunk in chunks:
+            yield chunk
+
+    async def collect() -> list[str]:
+        return [chunk async for chunk in normalize_stream(source())]
+
+    return asyncio.run(collect())
+
+
+class TestMarkupSplitAcrossChunks:
+    """LLM tokens split markup, so no single chunk ever holds a whole tag."""
+
+    def test_tokenized_aside_removed(self) -> None:
+        chunks = ["Are", " you", " sore", "?", "[", "no", " further", " response", "]"]
+        assert "".join(_stream_through_normalizer(chunks)) == "Are you sore?"
+
+    def test_tokenized_laughter_arrives_whole(self) -> None:
+        out = _stream_through_normalizer(["Ha", " [", "laughter", "]", " fair", "."])
+        assert "[laughter]" in out
+        assert "".join(out) == "Ha [laughter] fair."
+
+    def test_tokenized_break_tag_arrives_whole(self) -> None:
+        out = _stream_through_normalizer(["Ready?", "<break", " time=", '"400ms"', "/>", " Go."])
+        assert '<break time="400ms"/>' in out
+
+    def test_plain_text_is_not_held_back(self) -> None:
+        assert _stream_through_normalizer(["Chest", " up", "."]) == ["Chest", " up", "."]
+
+    def test_unclosed_bracket_is_flushed_at_stream_end(self) -> None:
+        assert "".join(_stream_through_normalizer(["Set 1 ", "[of 3"])) == "Set 1 [of 3"
+
+    def test_runaway_bracket_stops_being_held(self) -> None:
+        long_tail = "x" * 100
+        out = _stream_through_normalizer(["Go [", long_tail, " still talking"])
+        assert "".join(out) == f"Go [{long_tail} still talking"
+        assert len(out) > 1
+
+
 class TestInlineTagsPreserved:
     def test_laughter_tag_preserved(self) -> None:
         assert normalize_tts_text("[laughter] Noted.") == "[laughter] Noted."
+
+    def test_laughs_tag_preserved(self) -> None:
+        assert normalize_tts_text("Okay [laughs] fine.") == "Okay [laughs] fine."
 
     def test_break_tag_preserved(self) -> None:
         text = 'Ready?<break time="400ms"/> Go.'

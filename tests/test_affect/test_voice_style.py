@@ -6,7 +6,18 @@ import pytest
 
 from affect.config import StyleConfig
 from affect.state import AthleteState
-from affect.voice_style import NEUTRAL_STYLE, VoiceStyle, qwen3_instruct, style_for, to_cartesia
+from affect.voice_style import (
+    ELEVENLABS_DEFAULT_SPEED,
+    ELEVENLABS_DEFAULT_STABILITY,
+    ELEVENLABS_STABILITY_MAX,
+    ELEVENLABS_STABILITY_MIN,
+    NEUTRAL_STYLE,
+    VoiceStyle,
+    qwen3_instruct,
+    style_for,
+    to_cartesia,
+    to_elevenlabs,
+)
 
 
 class TestPolicy:
@@ -45,6 +56,36 @@ class TestCartesiaMapping:
         assert to_cartesia(VoiceStyle(energy=-1, pace=-1, warmth=1), config).emotion == "Sympathetic"
         assert to_cartesia(VoiceStyle(energy=-1, pace=0, warmth=0), config).emotion == "Calm"
         assert to_cartesia(VoiceStyle(energy=1, pace=0, warmth=0), config).emotion == "Enthusiastic"
+
+
+class TestElevenLabsMapping:
+    def test_neutral_style_is_the_voice_baseline(self) -> None:
+        controls = to_elevenlabs(NEUTRAL_STYLE, StyleConfig())
+        assert controls.stability == pytest.approx(ELEVENLABS_DEFAULT_STABILITY)
+        assert controls.speed == pytest.approx(ELEVENLABS_DEFAULT_SPEED)
+
+    def test_low_energy_is_steadier_high_energy_more_dynamic(self) -> None:
+        calm = to_elevenlabs(VoiceStyle(energy=-1), StyleConfig())
+        driven = to_elevenlabs(VoiceStyle(energy=1), StyleConfig())
+        assert calm.stability > ELEVENLABS_DEFAULT_STABILITY > driven.stability
+
+    def test_pace_moves_speed_within_config_bounds(self) -> None:
+        config = StyleConfig()
+        assert to_elevenlabs(VoiceStyle(pace=-1), config).speed == pytest.approx(config.speed_min)
+        assert to_elevenlabs(VoiceStyle(pace=1), config).speed == pytest.approx(config.speed_max)
+
+    def test_shifts_from_a_custom_voice_baseline(self) -> None:
+        controls = to_elevenlabs(VoiceStyle(energy=-1), StyleConfig(), base_stability=0.4)
+        assert controls.stability == pytest.approx(0.55)
+
+    def test_stability_is_clamped(self) -> None:
+        high = to_elevenlabs(VoiceStyle(energy=-1), StyleConfig(), base_stability=0.95)
+        low = to_elevenlabs(VoiceStyle(energy=1), StyleConfig(), base_stability=0.05)
+        assert high.stability == pytest.approx(ELEVENLABS_STABILITY_MAX)
+        assert low.stability == pytest.approx(ELEVENLABS_STABILITY_MIN)
+
+    def test_warmth_alone_changes_nothing(self) -> None:
+        assert to_elevenlabs(VoiceStyle(warmth=1), StyleConfig()) == to_elevenlabs(NEUTRAL_STYLE, StyleConfig())
 
 
 class TestQwen3:
