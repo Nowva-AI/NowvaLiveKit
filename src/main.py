@@ -34,6 +34,16 @@ load_dotenv()
 
 from profiler.collector import SessionProfiler
 
+# Pipeline → voice agent message types relayed over the coaching IPC. A type
+# the coaching service handles but this set omits is dropped silently — which
+# is how depth-rejected reps ("shallow_rep") once never reached the athlete.
+COACHING_FORWARD_TYPES = frozenset({
+    'cache_cues', 'fault', 'rep_complete', 'shallow_rep', 'rest_complete', 'frame_data',
+    'calibration_rep', 'calibration_complete', 'diagnosis_complete', 'rep_diagnosis',
+    'assessment_ready', 'assessment_result', 'assessment_rep', 'demo_abort', 'demo_started',
+    'last_rep_snapshot', 'demo_data_ready',
+})
+
 # Suppress SQLAlchemy INFO logs
 logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
@@ -1032,7 +1042,7 @@ class NowvaApp:
                             # Forward coaching-relevant messages to voice agent.
                             # Snapshot the reference — this runs on the pose IPC
                             # thread while the main loop can nil self.coaching_ipc
-                            if msg_type in ('cache_cues', 'fault', 'rep_complete', 'rest_complete', 'frame_data', 'calibration_rep', 'calibration_complete', 'diagnosis_complete', 'assessment_result', 'assessment_rep', 'demo_abort', 'demo_started', 'last_rep_snapshot', 'demo_data_ready'):
+                            if msg_type in COACHING_FORWARD_TYPES:
                                 coaching = self.coaching_ipc
                                 if coaching and coaching.client_socket:
                                     try:
