@@ -11,8 +11,8 @@ rep end. It silently does nothing when no barbell is detected, so it's safe
 to register unconditionally for all squat variants — bodyweight squats
 simply never see a detection and never fire.
 
-Runs alongside ``SymmetryRule`` (pose-based). The rule engine already
-deduplicates consecutive same-type faults within 15 frames.
+For squat it is the only source of BILATERAL_ASYMMETRY: pose-based knee-angle
+asymmetry is dominated by monocular depth error, and hip shift is its own fault.
 """
 
 from __future__ import annotations
@@ -55,7 +55,6 @@ class BarTiltAsymmetryRule(FaultRule):
         self._signed_diff_sum: float = 0.0  # used to pick heavier side
         self._samples: int = 0
         self._in_rep_prev: bool = False
-        self._evaluated_rep: int = -1
 
     @property
     def fault_type(self) -> FaultType:
@@ -100,50 +99,60 @@ class BarTiltAsymmetryRule(FaultRule):
                     self._signed_diff_sum += height_diff_cm
                     self._samples += 1
             self._in_rep_prev = True
+        return None
+
+    def finish_rep(self, angles: JointAngles, rep_number: int) -> Optional[FaultEvent]:
+        """Judge the rep that just completed, on that rep's own number.
+
+        The verdict used to be emitted on the first frame after the rep, tagged
+        with the next rep's number, so it never landed in the rep's own faults.
+        """
+        if not self._in_rep_prev:
+            return None
+        self._in_rep_prev = False
+        peak_tilt = self._max_abs_tilt_deg
+        peak_diff = self._max_abs_height_diff_cm
+        signed_sum = self._signed_diff_sum
+        samples = self._samples
+        self._rep_metrics_reset()
+
+        # No detection ever this rep → a bodyweight squat; stay quiet.
+        if samples == 0:
             return None
 
-        # Rep just ended
-        if self._in_rep_prev and self._evaluated_rep != rep_number:
-            self._in_rep_prev = False
-            self._evaluated_rep = rep_number
+        severity, score = self._combined_severity(peak_tilt, peak_diff)
+        if severity == FaultSeverity.NONE:
+            return None
 
-            peak_tilt = self._max_abs_tilt_deg
-            peak_diff = self._max_abs_height_diff_cm
-            signed_sum = self._signed_diff_sum
-            samples = self._samples
-            self._rep_metrics_reset()
+        # Whichever side was most often lower (higher y in image coords) bore more load.
+        heavier_side = "right" if signed_sum > 0 else "left"
 
-            # No detection ever this rep → stay quiet, SymmetryRule covers the pose case.
-            if samples == 0:
-                return None
+        message = FAULT_MESSAGES[FaultType.BILATERAL_ASYMMETRY].get(
+            severity.value, "Uneven weight distribution"
+        )
 
-            severity, score = self._combined_severity(peak_tilt, peak_diff)
-            if severity == FaultSeverity.NONE:
-                return None
+        return self._create_fault_event(
+            severity=severity,
+            severity_score=score,
+            message=message,
+            angles=angles,
+            rep_number=rep_number,
+            details={
+                "side": heavier_side,
+                "phase": None,
+                "is_drift": False,
+                "value": peak_tilt,
+                "unit": "deg",
+                "source": "barbell_tilt",
+                "peak_tilt_deg": peak_tilt,
+                "peak_height_diff_cm": peak_diff,
+                "heavier_side": heavier_side,
+            },
+        )
 
-            # Whichever side was most often lower (higher y in image coords) bore more load.
-            heavier_side = "right" if signed_sum > 0 else "left"
-
-            message_key = severity.value
-            message = FAULT_MESSAGES[FaultType.BILATERAL_ASYMMETRY].get(
-                message_key, "Uneven weight distribution"
-            )
-
-            return self._create_fault_event(
-                severity=severity,
-                severity_score=score,
-                message=message,
-                angles=angles,
-                rep_number=rep_number,
-                details={
-                    "source": "barbell_tilt",
-                    "peak_tilt_deg": peak_tilt,
-                    "peak_height_diff_cm": peak_diff,
-                    "heavier_side": heavier_side,
-                },
-            )
-
-        return None
+    def discard_rep(self) -> None:
+        self._in_rep_prev = False
+        self._rep_metrics_reset()
 
     def _combined_severity(self, peak_tilt: float, peak_diff: float) -> tuple:
         """Take the worst of (tilt, height-diff); return (FaultSeverity, score 0-3).

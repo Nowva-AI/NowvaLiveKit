@@ -28,11 +28,6 @@ def _unit(value: int, unit: str) -> str:
     return unit if value == 1 else f"{unit}s"
 
 
-def expected_trunk_lean_geometric(anthro: dict) -> float:
-    femur_torso_ratio = anthro.get("femur_torso_ratio", 1.0)
-    return 30.0 + (femur_torso_ratio - 1.0) * 120.0
-
-
 def dorsi_driven_targets(
     dorsiflexion_capacity: float, anthro: dict
 ) -> tuple[float, float]:
@@ -110,14 +105,19 @@ def delta_widen_stance(
             0.0, 0.0, width_increase_per_side,
         ],
         "__target_stance_ratio": target_ratio,
+        "__width_increase_per_side_m": width_increase_per_side,
     }
 
 
 def magnitude_widen_stance(parameter_delta: dict) -> str | None:
-    ratio = parameter_delta.get("__target_stance_ratio")
-    if ratio is None or float(ratio) <= 0:
+    # Athletes think in how far to move each foot, not in stance ratios.
+    per_side_m = parameter_delta.get("__width_increase_per_side_m")
+    if per_side_m is None:
         return None
-    return f"about {float(ratio):.1f} times shoulder width"
+    per_side_cm = round(float(per_side_m) * 100.0)
+    if per_side_cm <= 0:
+        return None
+    return f"each foot about {per_side_cm} {_unit(per_side_cm, 'centimeter')} wider"
 
 
 def delta_widen_foot_angle(
@@ -126,6 +126,8 @@ def delta_widen_foot_angle(
     avg_current = (
         features.foot_direction_angle_l + features.foot_direction_angle_r
     ) / 2.0
+    if not math.isfinite(avg_current):
+        avg_current = 0.0
 
     target_angle = foot_angle_target_deg(anthro, rom)
     delta_degrees = max(0.0, min(target_angle - avg_current, 50.0))
@@ -150,11 +152,14 @@ def magnitude_widen_foot_angle(parameter_delta: dict) -> str | None:
 def delta_brace_trunk(
     features: RepKinematicSummary, anthro: dict, rom: dict
 ) -> dict[str, float]:
-    expected_lean = expected_trunk_lean_geometric(anthro)
+    # Only the lean the athlete's own build and ankles do not explain is
+    # correctable by bracing (diagnosis.lean_model).
+    expected_lean = features.expected_pitch_with_ankles
+    if not math.isfinite(expected_lean):
+        expected_lean = features.expected_pitch_athlete
     excess_lean = features.trunk_pitch_at_bottom - expected_lean
-    # Proportional to the measured excess only. A 3° floor used to apply a
-    # correction to athletes whose lean was already at or below what their
-    # own proportions predict.
+    if not math.isfinite(excess_lean):
+        excess_lean = 0.0
     correction_degrees = _clamp(excess_lean * 0.4, 0.0, 8.0)
 
     return {
@@ -165,7 +170,9 @@ def delta_brace_trunk(
 def delta_knees_out(
     features: RepKinematicSummary, anthro: dict, rom: dict
 ) -> dict[str, float]:
-    max_valgus = max(features.knee_valgus_l, features.knee_valgus_r)
+    # The worse knee that was measured; a NaN side must not decide the max.
+    measured = [v for v in (features.knee_valgus_l, features.knee_valgus_r) if math.isfinite(v)]
+    max_valgus = max(measured) if measured else 0.0
     # Proportional to the measured valgus only. A 4° floor used to push the
     # knees out by 4° (about 3 cm per side) for a rep with 4.1° of valgus —
     # a correction as large as the fault it was correcting.
@@ -191,8 +198,11 @@ def magnitude_knees_out(parameter_delta: dict) -> str | None:
 def delta_center_weight(
     features: RepKinematicSummary, anthro: dict, rom: dict
 ) -> dict[str, float]:
-    hip_diff = features.hip_y_l_at_bottom - features.hip_y_r_at_bottom
-    shift_meters = -hip_diff / 100.0 * 0.5
+    # Undo the measured hip shift (fraction of ankle separation), toward the
+    # midline. Ankle separation ~ stance ratio x biacromial width.
+    shift_ratio = features.hip_shift_ratio if math.isfinite(features.hip_shift_ratio) else 0.0
+    stance_m = features.stance_width_ratio * anthro.get("shoulder_width", 0.40) / 0.80
+    shift_meters = -shift_ratio * stance_m
     shift_meters = max(-0.04, min(0.04, shift_meters))
 
     return {

@@ -94,6 +94,12 @@ class BiLSTMInference:
     def current_class_probabilities(self) -> np.ndarray:
         return self._counter.smoothed_probabilities
 
+    def set_min_depth_class(self, depth_class: int) -> None:
+        self._counter.set_min_depth_class(depth_class)
+
+    def reject_last_rep(self) -> None:
+        self._counter.reject_last_rep()
+
     def set_assessment_mode(self, enabled: bool) -> None:
         """Delegate to the inner counter so any completed rep counts."""
         self._counter.set_assessment_mode(enabled)

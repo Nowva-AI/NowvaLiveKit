@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import math
+
 from pydantic import BaseModel
 
 
 class RepTrajectorySample(BaseModel):
-    """One frame of a rep, as measured. Positions in cm, angles in degrees.
+    """One frame of a rep, as measured. Heights in cm, angles in degrees.
 
-    These are the raw pipeline values — the scorer never re-grounds or
-    re-centres them, so every metric derived from them must be a within-frame
-    difference or an angle.
+    Heights are Y-up (larger = higher), measured above the ankle midpoint of
+    the same frame. Every metric derived from them is a within-frame
+    difference or an angle, so the scorer never re-grounds them. Fields past
+    the first seven default to NaN for samples recorded before they existed.
     """
     trunk_pitch: float
     knee_valgus_l: float
@@ -17,6 +20,23 @@ class RepTrajectorySample(BaseModel):
     hip_y_r: float
     knee_y_l: float
     knee_y_r: float
+    timestamp: float = 0.0
+    phase: str = ""
+    hip_height_cm: float = math.nan
+    shoulder_height_cm: float = math.nan
+    depth_ratio: float = math.nan
+    hip_lateral_ratio: float = math.nan
+    balance_ratio: float = math.nan
+    heel_rise_l_cm: float = math.nan
+    heel_rise_r_cm: float = math.nan
+    knee_flexion_l: float = math.nan
+    knee_flexion_r: float = math.nan
+    hip_flexion_l: float = math.nan
+    hip_flexion_r: float = math.nan
+    dorsiflexion_l: float = math.nan
+    dorsiflexion_r: float = math.nan
+    neck_flexion_deg: float = math.nan
+    bar_detected: bool = False
 
 
 class RepTrajectory(BaseModel):
@@ -44,6 +64,30 @@ class RepKinematicSummary(BaseModel):
     knee_y_r_at_top: float = 0.0
     descent_time_s: float = 0.0
     ascent_time_s: float = 0.0
+    # Whole-rep features (analysis.rep_features) — the same numbers the
+    # intra-set fault rules judged, so cue and recap cannot disagree.
+    depth_ratio: float = math.nan
+    depth_cm_above_parallel: float = math.nan
+    hip_shoot_deg: float = math.nan
+    hip_shift_ratio: float = math.nan
+    balance_ratio: float = math.nan
+    heel_rise_max_cm: float = math.nan
+    concentric_velocity_mps: float = math.nan
+    velocity_loss_pct: float = math.nan
+    initiation_ratio: float = math.nan
+    neck_flexion_deg: float = math.nan
+    lockout_deficit_ratio: float = math.nan
+    stagger_ratio: float = math.nan
+    hip_flexion_l_max: float = math.nan
+    hip_flexion_r_max: float = math.nan
+    bar_detected: bool = False
+    # Trunk pitch (deg from vertical) that puts the load over midfoot at this
+    # rep's depth, from the sagittal balance model (diagnosis.lean_model):
+    # reference proportions with unrestricted ankles; the athlete's own
+    # segments with unrestricted ankles; the athlete's segments and ankles.
+    expected_pitch_reference: float = math.nan
+    expected_pitch_athlete: float = math.nan
+    expected_pitch_with_ankles: float = math.nan
 
 
 class SetFeatures(BaseModel):
@@ -53,12 +97,16 @@ class SetFeatures(BaseModel):
     per_rep_kinematics: list[RepKinematicSummary]
     anthropometry: dict[str, float]
     rom: dict[str, float]
+    # "single_camera" or "triangulated" — decides which symptoms are
+    # observable (diagnosis.observability).
+    capture_mode: str = "single_camera"
 
 
 class DetectedSymptom(BaseModel):
     symptom_id: str
     severity: float
     contributing_reps: list[int]
+    observability: str = "observable"
 
 
 class HypothesizedCause(BaseModel):
@@ -70,6 +118,7 @@ class HypothesizedCause(BaseModel):
     implicated_by: list[str]
     parameter_delta: dict | None
     explanation: str
+    observability: str = "observable"
 
 
 class RepScore(BaseModel):

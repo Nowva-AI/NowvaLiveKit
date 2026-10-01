@@ -111,10 +111,10 @@ class TestCalibrationCompleteMessage:
         assert message["athlete_params"] == ATHLETE_PARAMS
         assert message["baseline"] == BASELINE
 
-    def test_defaults_are_stripped_from_thresholds(self) -> None:
+    def test_profile_is_sent_as_is(self) -> None:
         message = _build_calibration_complete_message("squat", {}, CAL_PROFILE, None, BASELINE)
 
-        assert message["thresholds"] == {"knee_valgus": CAL_PROFILE["knee_valgus"]}
+        assert message["thresholds"] == CAL_PROFILE
 
 
 class TestResolveUserHeight:

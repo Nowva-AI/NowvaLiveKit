@@ -1,96 +1,183 @@
 # Tiers:
-#   0 = contextual (structural, informational only)
+#   0 = contextual (structural, informational only — said once, reassuringly)
 #   1 = immediate (cue-correctable within the same session)
 #   2 = session-level (programming adjustment across sessions)
-#   3 = long-term (mobility/strength work over weeks)
+#   3 = long-term (mobility/strength work over weeks — said once per session)
+#
+# Templates are spoken by the coach: plain words, external-focus cues, no
+# jargon. Every {placeholder} must be filled by engine._fill_template.
 
 anthropometric_femur_torso_ratio:
   description: "Long femurs relative to torso biomechanically require more trunk lean"
   tier: 0
   evidence_test_fn: test_femur_torso_ratio
   parameter_delta_fn: null
-  explanation_template: "Your femur-to-torso ratio ({ratio:.2f}) naturally requires ~{expected_lean:.0f}° of trunk lean — this is structural, not a fault."
+  explanation_template: "Your thighs are long for your torso (ratio {ratio:.2f}), so keeping the bar over your midfoot takes about {athlete_lean:.0f}° of forward lean. That's your build, not a fault."
+
+hip_anatomy:
+  description: "Hip sockets that reach end range before parallel even with good ankles"
+  tier: 0
+  evidence_test_fn: test_hip_anatomy
+  parameter_delta_fn: null
+  explanation_template: "Your hips reach the end of their range before parallel even though your ankles move well — some hip sockets simply stop earlier. Own the depth you have; a slightly wider stance with toes turned out can buy a little more room."
 
 narrow_stance:
-  description: "Stance width is too narrow for the athlete's hip structure"
+  description: "Stance width is too narrow for the athlete's proportions and ankles"
   tier: 1
   evidence_test_fn: test_narrow_stance
   parameter_delta_fn: delta_widen_stance
-  explanation_template: "Stance width ratio is {current_ratio:.2f} — try widening to ~{recommended_ratio:.2f}× shoulder width."
+  explanation_template: "Your stance is about {current_ratio:.1f} times shoulder width — try each foot about {width_cm:.0f} cm wider."
 
 narrow_foot_angle:
-  description: "Feet are not turned out enough for the athlete's hip anatomy"
+  description: "Feet are not turned out enough to give the hips room at depth"
   tier: 1
   evidence_test_fn: test_narrow_foot_angle
   parameter_delta_fn: delta_widen_foot_angle
-  explanation_template: "Foot direction is {current_angle:.0f}° — try turning out to ~{recommended_angle:.0f}°."
+  explanation_template: "Your toes point out about {current_angle:.0f}° — try about {recommended_angle:.0f}°."
+
+stance_toe_mismatch:
+  description: "Wide stance with toes pointing forward, so the knees track inside the feet"
+  tier: 1
+  evidence_test_fn: test_stance_toe_mismatch
+  parameter_delta_fn: delta_widen_foot_angle
+  explanation_template: "Your stance is wide but your toes point forward, so your knees have nowhere to go but in. Turn your toes out to about {recommended_angle:.0f}° and let your knees follow them."
 
 bracing_failure:
-  description: "Insufficient intra-abdominal pressure / core bracing during the lift"
+  description: "Trunk collapses forward beyond what balance needs — insufficient brace"
   tier: 1
   evidence_test_fn: test_bracing_failure
   parameter_delta_fn: delta_brace_trunk
-  explanation_template: "Trunk collapses under load — brace harder before descent (big breath, push belly out)."
+  explanation_template: "Your chest drops more than your build needs. Take a big breath into your belly and brace before every descent, and hold it until you're standing."
 
 knee_track_cue:
-  description: "Knees not actively pushed out to track over foot direction"
+  description: "Knees not actively pushed out to track over the feet"
   tier: 1
   evidence_test_fn: test_knee_track_cue
   parameter_delta_fn: delta_knees_out
-  explanation_template: "Cue: push your knees out toward your pinky toes throughout the lift."
+  explanation_template: "Push your knees out over your little toes the whole way down and up — think spread the floor."
 
 weight_shift_cue:
-  description: "Weight shifts to one side during descent"
+  description: "Hips drift to one side during the rep"
   tier: 1
   evidence_test_fn: test_weight_shift
   parameter_delta_fn: delta_center_weight
-  explanation_template: "Weight is shifting toward your {heavier_side} side — focus on even pressure through both feet."
+  explanation_template: "Your hips drift to the {shift_side} — sit straight down between your heels and push evenly through both feet."
 
 depth_cue_unfamiliar:
-  description: "Athlete is unfamiliar or hesitant at deeper positions"
+  description: "Athlete has the range for more depth but is not using it"
   tier: 1
   evidence_test_fn: test_depth_unfamiliarity
   parameter_delta_fn: delta_increase_depth
-  explanation_template: "You have the mobility for deeper squats — the ghost shows your target depth. Practice paused reps at parallel to build confidence."
+  explanation_template: "You have the range to sit deeper than you're going — the ghost shows your target. A few paused reps at that depth will make it feel normal."
+
+heel_elevation:
+  description: "Restricted ankles worked around today by raising the heels"
+  tier: 1
+  evidence_test_fn: test_heel_elevation
+  parameter_delta_fn: null
+  explanation_template: "Your ankles are limiting how far your knees can travel forward. Put small plates or wedges under your heels, or squat in lifting shoes — you'll sit deeper and stay more upright today."
+
+foot_placement_asymmetry:
+  description: "Feet set up staggered or flared unevenly"
+  tier: 1
+  evidence_test_fn: test_foot_placement_asymmetry
+  parameter_delta_fn: null
+  explanation_template: "Your feet aren't even — your {setup_side} foot is {setup_issue}. Line them up before each set."
+
+knee_dominant_initiation:
+  description: "Descent starts with the knees, tipping weight onto the toes"
+  tier: 1
+  evidence_test_fn: test_knee_dominant_initiation
+  parameter_delta_fn: null
+  explanation_template: "You start each rep by pushing your knees forward first, which tips you onto your toes. Break at the hips and knees together."
+
+hip_dominant_initiation:
+  description: "Descent starts with the hips, folding the chest over"
+  tier: 1
+  evidence_test_fn: test_hip_dominant_initiation
+  parameter_delta_fn: null
+  explanation_template: "You start each rep by sending your hips back first, which folds your chest over. Break at the hips and knees together and sit down between your heels."
+
+weight_forward_cue:
+  description: "Weight drifts onto the toes"
+  tier: 1
+  evidence_test_fn: test_weight_forward
+  parameter_delta_fn: null
+  explanation_template: "Your weight drifts onto your toes. Keep your whole foot planted — feel your heel and big toe through the whole rep."
+
+lockout_cue:
+  description: "Reps not finished standing tall"
+  tier: 1
+  evidence_test_fn: test_lockout_cue
+  parameter_delta_fn: null
+  explanation_template: "Finish every rep standing tall — squeeze your glutes at the top before you start the next one."
+
+eccentric_control_cue:
+  description: "Descent not controlled"
+  tier: 1
+  evidence_test_fn: test_eccentric_control
+  parameter_delta_fn: null
+  explanation_template: "You're dropping into the bottom. Take about two seconds on the way down and stay tight."
+
+gaze_cue:
+  description: "Neck cranked into extension by looking up"
+  tier: 1
+  evidence_test_fn: test_gaze
+  parameter_delta_fn: null
+  explanation_template: "You're looking up at the ceiling. Fix your eyes on a spot on the floor a couple of meters ahead to keep your neck neutral."
 
 weight_too_heavy:
-  description: "Load exceeds the athlete's ability to maintain form across the set"
+  description: "Load exceeds what the athlete can move well across the set"
   tier: 2
   evidence_test_fn: test_progressive_degradation
   parameter_delta_fn: null
-  explanation_template: "Form degrades from rep {first_bad_rep} onward — consider reducing load by ~{reduction_pct:.0f}%."
+  explanation_template: "Your speed or form fell off from rep {first_bad_rep} — that set was close to your limit. {load_advice}"
 
 limited_ankle_df:
-  description: "Restricted ankle dorsiflexion range limiting squat mechanics"
+  description: "Restricted ankle dorsiflexion limiting forward knee travel"
   tier: 3
   evidence_test_fn: test_limited_ankle_df
   parameter_delta_fn: null
-  explanation_template: "Ankle dorsiflexion is {current_df:.0f}° (need >{expected_df:.0f}°). Work on calf mobility or use heeled shoes."
+  explanation_template: "Your ankles bend about {current_df:.0f}°; a free squat needs about {expected_df:.0f}°. Do knee-to-wall rocks and slow calf stretches daily, and raise your heels in the meantime."
+
+unilateral_ankle_df:
+  description: "One ankle markedly stiffer than the other"
+  tier: 3
+  evidence_test_fn: test_unilateral_ankle_df
+  parameter_delta_fn: null
+  explanation_template: "Your {stiffer_ankle_side} ankle bends about {ankle_gap:.0f}° less than the other, which pushes you off center. Give that ankle extra knee-to-wall work."
 
 limited_hip_flexion:
-  description: "Restricted hip flexion mobility limiting depth and forcing trunk lean"
+  description: "Hips run out of flexion range before the knees do"
   tier: 3
   evidence_test_fn: test_limited_hip_flexion
   parameter_delta_fn: null
-  explanation_template: "Hip flexion mobility is limiting your depth. Add 90-90 stretches and hip flexor work."
-
-weak_hip_abductors:
-  description: "Hip abductors unable to resist the valgus moment under load"
-  tier: 3
-  evidence_test_fn: test_weak_hip_abductors
-  parameter_delta_fn: null
-  explanation_template: "Knee cave suggests weak glute medius — add banded clamshells, lateral walks, and Copenhagen planks."
-
-foot_collapse_arch:
-  description: "Medial arch collapse driving knee valgus from the ground up"
-  tier: 3
-  evidence_test_fn: test_foot_arch_collapse
-  parameter_delta_fn: null
-  explanation_template: "Foot collapse is contributing to knee cave. Cue 'spread the floor' or switch to firmer-soled shoes."
+  explanation_template: "Your hips run out of range before your knees do. It's the back of the hip, not tight hip flexors — do rock-backs, adductor rock-backs, and goblet-squat holds where you pry your knees apart."
 
 unilateral_hip_mobility_limit:
-  description: "One hip has significantly less mobility than the other"
+  description: "One hip has markedly less flexion range than the other"
   tier: 3
   evidence_test_fn: test_unilateral_hip
   parameter_delta_fn: null
-  explanation_template: "Your {tighter_side} hip is more restricted — add unilateral pigeon stretches and 90-90 holds on that side."
+  explanation_template: "Your {tighter_side} hip is more restricted than the other. Add rock-backs and 90-90 switches, with extra time on that side."
+
+weak_hip_abductors:
+  description: "Hip abductors unable to hold the knees out under load"
+  tier: 3
+  evidence_test_fn: test_weak_hip_abductors
+  parameter_delta_fn: null
+  explanation_template: "Your knees cave even with a good stance and good ankles, which usually means the side glutes aren't holding them out. Add side-lying leg raises, banded side walks and single-leg step-downs."
+
+quad_strength_limit:
+  description: "Quads give out before the hips out of the hole"
+  tier: 3
+  evidence_test_fn: test_quad_strength_limit
+  parameter_delta_fn: null
+  explanation_template: "Your hips shoot up out of the bottom, which usually means your quads give out before your hips do. Build them with paused squats, front squats and slow-tempo squats."
+
+strength_asymmetry:
+  description: "Side-to-side shift with no mobility or setup explanation"
+  tier: 3
+  evidence_test_fn: test_strength_asymmetry
+  parameter_delta_fn: null
+  explanation_template: "You shift to one side and I can't see a mobility or setup reason for it. Any old injury, or a leg that feels weaker? Tell me — single-leg work like split squats will help even it out."

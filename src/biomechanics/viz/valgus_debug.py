@@ -21,10 +21,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-from biomechanics.faults.rules.knee_valgus import (
-    FOOT_CONFIDENCE_THRESHOLD,
-    KneeValgusRule,
-)
+from biomechanics.faults.fault_types import FaultType
+from biomechanics.faults.rules.knee_valgus import FOOT_CONFIDENCE_THRESHOLD
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import FaultEvent, PipelineFrame
 
@@ -47,8 +45,6 @@ MIN_RETIME_FPS = 1.0
 MAX_RETIME_FPS = 120.0
 # Substrings that mark an IPC message as carrying knee data.
 KNEE_TOKENS = ("valgus", "knee", "adduction")
-# The rule reports at most one fault per this many frames (KneeValgusRule).
-FAULT_COOLDOWN_FRAMES = 30
 
 _SERIES_KEYS = (
     "t", "fi", "vl", "vr", "al", "ar", "fcl", "fcr",
@@ -57,19 +53,18 @@ _SERIES_KEYS = (
 
 
 def _read_valgus_thresholds(rule_engine: Any) -> dict[str, dict[str, float]] | None:
-    """Live primary + fallback valgus thresholds, post anthropometric scaling."""
+    """Live knee valgus thresholds, post anthropometric scaling.
+
+    Whichever rule reports knee_valgus: the squat's KneeTrackingRule (once per
+    rep) or the lunge's KneeValgusRule (per frame at the bottom).
+    """
     for rule in rule_engine.rules:
-        if isinstance(rule, KneeValgusRule):
+        if rule.fault_type == FaultType.KNEE_VALGUS:
             return {
                 "primary": {
                     "mild": round(float(rule.mild_threshold), 3),
                     "moderate": round(float(rule.moderate_threshold), 3),
                     "severe": round(float(rule.severe_threshold), 3),
-                },
-                "fallback": {
-                    "mild": round(float(rule.fallback_mild_threshold), 3),
-                    "moderate": round(float(rule.fallback_moderate_threshold), 3),
-                    "severe": round(float(rule.fallback_severe_threshold), 3),
                 },
             }
     return None
@@ -81,6 +76,11 @@ def _is_knee_related(message: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
     return any(token in blob for token in KNEE_TOKENS)
+
+
+def _is_number(value: Any) -> bool:
+    # bool is an int subclass; flags like is_drift must stay booleans.
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _round(value: float | None, digits: int = 2) -> float | None:
@@ -208,7 +208,7 @@ class ValgusDebugRecorder:
             "rep": int(fault.rep_number),
             "frame_index": int(fault.frame_index),
             "details": {
-                key: (_round(value) if isinstance(value, (int, float)) else value)
+                key: (_round(value) if _is_number(value) else value)
                 for key, value in fault.details.items()
             },
         })
@@ -341,8 +341,8 @@ class ValgusDebugRecorder:
             "session": self._started_at.strftime("%Y%m%d_%H%M%S"),
             "recorded_at": self._started_at.isoformat(timespec="seconds"),
             "exercise": exercise_name,
-            "mode": "3D abduction (triangulated)" if self._multi_camera
-                    else "2D FPPA (single camera)",
+            "mode": "3D knees-over-toes (triangulated)" if self._multi_camera
+                    else "2D knees-over-toes (single camera)",
             "multi_camera": self._multi_camera,
             "n_frames": self.frame_count,
             "video_fps": round(video_fps, 3),
@@ -350,7 +350,6 @@ class ValgusDebugRecorder:
             "duration_s": round(self._series["t"][-1], 2),
             "has_video": self._video_path.exists() and not self._encode_failed,
             "foot_confidence_threshold": FOOT_CONFIDENCE_THRESHOLD,
-            "fault_cooldown_frames": FAULT_COOLDOWN_FRAMES,
             "series": self._series,
             "faults": self._faults,
             "reps": self._rep_events,

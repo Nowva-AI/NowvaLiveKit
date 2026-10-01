@@ -406,17 +406,6 @@ class FaultEvent(BaseModel):
         return self.severity in (FaultSeverity.MILD, FaultSeverity.MODERATE, FaultSeverity.SEVERE)
 
 
-class FaultType:
-    """Known fault type constants."""
-    KNEE_VALGUS = "knee_valgus"
-    KNEE_VARUS = "knee_varus"
-    FORWARD_LEAN = "forward_lean"
-    DEPTH = "depth"
-    BILATERAL_ASYMMETRY = "bilateral_asymmetry"
-    BACK_ROUNDING = "back_rounding"
-    HIP_SHIFT = "hip_shift"
-
-
 # =============================================================================
 # REP AND SESSION TRACKING
 # =============================================================================
@@ -492,6 +481,11 @@ class RepData(BaseModel):
     depth_class: Optional[int] = None
     depth_class_name: Optional[str] = None
     max_depth_class: Optional[int] = None
+
+    # Whole-rep features (analysis.rep_features.RepFeatures as a dict) and
+    # whether the rep reached the athlete's depth target.
+    features: Dict[str, Any] = Field(default_factory=dict)
+    depth_target_met: bool = True
 
     @property
     def duration(self) -> float:

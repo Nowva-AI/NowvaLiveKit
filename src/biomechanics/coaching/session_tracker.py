@@ -29,6 +29,7 @@ from biomechanics.diagnosis.types import (
     RepTrajectory,
     SetFeatures,
 )
+from biomechanics.faults.observability import capture_mode_from_env
 from biomechanics.utils.types import RepData
 
 
@@ -77,6 +78,10 @@ class SessionTracker:
         # Assessment mode: per-rep rolling-window diagnosis
         self._assessment_mode: bool = False
 
+        # Best composite rep score this set, for "best rep so far" highlights.
+        self._set_best_score: float = -1.0
+        self.capture_mode: str = capture_mode_from_env()
+
         # Last-rep snapshot for on-demand replay
         self._last_rep_bottom_kpts: list | None = None
         self._last_rep_standing_kpts: list | None = None
@@ -119,6 +124,7 @@ class SessionTracker:
             self.current_set_number += 1
             self.current_set_reps = []
             self.set_active = True
+            self._set_best_score = -1.0
 
         self.current_set_reps.append(rep)
 
@@ -137,6 +143,7 @@ class SessionTracker:
                     rep.rep_number,
                     descent_time_s=rep.descent_time,
                     ascent_time_s=rep.ascent_time,
+                    features=rep.features,
                 )
                 trajectory = build_rep_trajectory(trajectory_samples)
                 self._rep_kinematic_buffer.append(summary)
@@ -154,6 +161,7 @@ class SessionTracker:
             standing_kpts=standing_kpts,
             rep_kinematic_summary=summary,
             set_number=self.current_set_number,
+            highlights=self._rep_highlights(rep, summary, trajectory),
         )
 
         # Store last-rep snapshot for on-demand replay
@@ -170,6 +178,28 @@ class SessionTracker:
         self.total_reps += 1
         self.all_reps.append(rep)
 
+    def _rep_highlights(
+        self,
+        rep: RepData,
+        summary: RepKinematicSummary | None,
+        trajectory: RepTrajectory | None,
+    ) -> list[str]:
+        """What went right this rep, for positive reinforcement."""
+        highlights: list[str] = []
+        if rep.depth_target_met:
+            highlights.append("depth_target_met")
+        if rep.is_clean:
+            highlights.append("clean")
+        if summary is not None and self._athlete_params is not None:
+            anthro = build_anthro_dict(self._athlete_params)
+            rom = build_rom_dict(self._athlete_params, self._baseline or {})
+            score = score_rep(summary, anthro, rom, trajectory).composite_score
+            if score > self._set_best_score:
+                if len(self.current_set_reps) > 1:
+                    highlights.append("best_rep_so_far")
+                self._set_best_score = score
+        return highlights
+
     def _run_assessment_diagnosis(self, rep_number: int) -> None:
         if not self._rep_kinematic_buffer or self._athlete_params is None:
             return
@@ -183,6 +213,7 @@ class SessionTracker:
             per_rep_kinematics=list(window),
             anthropometry=anthro,
             rom=rom,
+            capture_mode=self.capture_mode,
         )
         diagnosis_result = HypothesisEngine().diagnose(set_features)
         latest_kin = self._rep_kinematic_buffer[-1]
@@ -234,6 +265,7 @@ class SessionTracker:
                 per_rep_kinematics=list(self._rep_kinematic_buffer),
                 anthropometry=anthro,
                 rom=rom,
+                capture_mode=self.capture_mode,
             )
             diagnosis_result = HypothesisEngine().diagnose(set_features)
             score_summary = score_set(
@@ -330,6 +362,7 @@ class SessionTracker:
                 per_rep_kinematics=list(self._rep_kinematic_buffer),
                 anthropometry=anthro,
                 rom=rom,
+                capture_mode=self.capture_mode,
             )
             diagnosis = HypothesisEngine().diagnose(set_features)
         else:

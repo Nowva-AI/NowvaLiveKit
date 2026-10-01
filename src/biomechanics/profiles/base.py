@@ -101,20 +101,6 @@ class ExerciseProfile:
         """
         return depth_category(angle)
 
-    def record_calibration_frame(self, angles: JointAngles, state: Dict) -> None:
-        """Track peak values into the state dict during calibration reps.
-
-        Called per-frame while calibration is active. Default: no-op.
-        """
-        pass
-
-    def apply_baseline(self, rules: List[FaultRule], state: Dict) -> None:
-        """Adjust rule thresholds after calibration using tracked peaks.
-
-        Called once after calibration completes. Default: no-op.
-        """
-        pass
-
     def get_readiness_check(self) -> Optional[Callable[[Skeleton3D, JointAngles], bool]]:
         """Return a predicate for setup-position validation.
 

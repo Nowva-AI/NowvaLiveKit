@@ -11,11 +11,41 @@ import math
 
 import numpy as np
 
+from biomechanics.faults.rules.depth import PARALLEL_LABEL_TOLERANCE_RATIO
+
+from .lean_model import expected_pitches
 from .types import (
     RepKinematicSummary,
     RepTrajectory,
     RepTrajectorySample,
     SetFeatures,
+)
+
+# Shoulder keypoints are joint centres; coaching's "shoulder width" is the
+# biacromial breadth, about this much wider.
+KEYPOINT_TO_BIACROMIAL_RATIO = 0.80
+DEFAULT_FEMUR_M = 0.42
+# Ankle-to-toe-tip length assumed when the feet were never measured — the
+# span the balance model places midfoot on.
+DEFAULT_ANKLE_TO_TOE_M = 0.20
+# Geometric depth class (hip height above the knee, femur lengths), in the same
+# 1-4 vocabulary as the BiLSTM depth classes; 0 = unmeasurable.
+_QUARTER_SQUAT_RATIO = 0.5
+_BELOW_PARALLEL_RATIO = -0.05
+
+# RepFeatures keys copied onto the kinematic summary under the same name.
+_SUMMARY_FEATURE_KEYS = (
+    "depth_ratio",
+    "depth_cm_above_parallel",
+    "hip_shoot_deg",
+    "hip_shift_ratio",
+    "balance_ratio",
+    "concentric_velocity_mps",
+    "velocity_loss_pct",
+    "initiation_ratio",
+    "lockout_deficit_ratio",
+    "stagger_ratio",
+    "bar_detected",
 )
 
 
@@ -76,64 +106,82 @@ def build_frame_from_live_pipeline(
     return result
 
 
-def find_bottom_frame(rep_frames: list[dict]) -> dict | None:
-    """Return the frame with maximum knee flexion (deepest squat position).
+def _depth_ratio_from_kpts(kpts: list[list[float]], femur_m: float) -> float:
+    """Hip height above the knee in femur lengths, from viewer (Y-up) keypoints."""
+    hip_y = (kpts[11][1] + kpts[12][1]) / 2.0
+    knee_y = (kpts[13][1] + kpts[14][1]) / 2.0
+    if femur_m < 1e-6:
+        return math.nan
+    return max(-1.0, min(1.0, (hip_y - knee_y) / femur_m))
+
+
+def find_bottom_frame(rep_frames: list[dict], femur_m: float = DEFAULT_FEMUR_M) -> dict | None:
+    """Return the frame where the hip sits lowest relative to the knees.
 
     Returns None if the rep contains no valid frames.
     """
     best_frame = None
-    best_knee_flex = -1.0
+    best_ratio = math.inf
     for frame in rep_frames:
         if frame is None:
             continue
-        knee_flex = frame["angles"].get("knee_flex", 0.0)
-        if math.isnan(knee_flex):
+        ratio = _depth_ratio_from_kpts(frame["kpts"], femur_m)
+        if math.isnan(ratio):
             continue
-        if knee_flex > best_knee_flex:
-            best_knee_flex = knee_flex
+        if ratio < best_ratio:
+            best_ratio = ratio
             best_frame = frame
     return best_frame
 
 
 def compute_foot_direction_angle(kpts: list[list[float]], ankle_idx: int, foot_idx: int) -> float:
-    """Compute foot direction angle in degrees from keypoints.
+    """Signed toe-out of one foot in degrees, from viewer-coords keypoints.
 
-    Uses the ankle→foot_index vector projected onto the ground plane (XZ).
-    Forward direction is [-1, 0] in viewer coords (vis_x = mp_z, pointing
-    away from camera = backward, so forward = -x).
-    Returns degrees of external rotation from straight ahead.
+    Measured on the ground plane (XZ) against the athlete's own forward axis
+    (perpendicular to the hip line), so a turned body is not read as toe-out.
+    Positive = toes turned away from the midline, negative = toed in; NaN when
+    the foot or hips are not measurable. Left side is ankle index 15.
     """
     ankle = kpts[ankle_idx]
     foot = kpts[foot_idx]
     vec_xz = np.array([foot[0] - ankle[0], foot[2] - ankle[2]])
-    norm = np.linalg.norm(vec_xz)
-    if norm < 1e-6:
-        return 0.0
-    forward = np.array([-1.0, 0.0])
-    cos_angle = np.clip(np.dot(vec_xz, forward) / norm, -1.0, 1.0)
-    return float(np.degrees(np.arccos(cos_angle)))
+    lateral = np.array([kpts[12][0] - kpts[11][0], kpts[12][2] - kpts[11][2]])
+    foot_norm = float(np.linalg.norm(vec_xz))
+    lateral_norm = float(np.linalg.norm(lateral))
+    if foot_norm < 1e-6 or lateral_norm < 1e-6:
+        return math.nan
+    lateral /= lateral_norm
+    forward = np.array([-lateral[1], lateral[0]])
+    if np.dot(forward, vec_xz) < 0.0:
+        forward = -forward
+    outward = -lateral if ankle_idx == 15 else lateral
+    return float(np.degrees(np.arctan2(np.dot(vec_xz, outward), np.dot(vec_xz, forward))))
 
 
-def classify_depth(knee_flex_degrees: float) -> int:
-    """Classify squat depth from knee flexion angle.
+def classify_depth(depth_ratio: float) -> int:
+    """Depth class from hip height above the knee (femur lengths).
 
-    Returns: 0=quarter (<45), 1=half (45-70), 2=above-parallel (70-90),
-             3=parallel (90-105), 4=below-parallel (>105)
+    Returns 1=quarter, 2=half, 3=parallel, 4=below parallel — the BiLSTM's
+    vocabulary — and 0 when depth was not measured. Never the deepest class
+    for a missing value.
     """
-    if knee_flex_degrees < 45.0:
+    if math.isnan(depth_ratio):
         return 0
-    elif knee_flex_degrees < 70.0:
-        return 1
-    elif knee_flex_degrees < 90.0:
-        return 2
-    elif knee_flex_degrees < 105.0:
-        return 3
-    else:
+    if depth_ratio < _BELOW_PARALLEL_RATIO:
         return 4
+    if depth_ratio <= PARALLEL_LABEL_TOLERANCE_RATIO:
+        return 3
+    if depth_ratio <= _QUARTER_SQUAT_RATIO:
+        return 2
+    return 1
 
 
 def compute_stance_width_ratio(kpts: list[list[float]], shoulder_width: float) -> float:
-    """Compute stance width as ankle XZ distance normalized by shoulder width."""
+    """Ankle separation over biacromial shoulder width (coaching's "shoulder width").
+
+    ``shoulder_width`` is the keypoint (joint-centre) distance; it is widened to
+    biacromial breadth so a ratio of 1.0 means feet under the shoulders.
+    """
     l_ankle = kpts[15]
     r_ankle = kpts[16]
     dx = l_ankle[0] - r_ankle[0]
@@ -141,15 +189,33 @@ def compute_stance_width_ratio(kpts: list[list[float]], shoulder_width: float) -
     ankle_xz_dist = math.sqrt(dx * dx + dz * dz)
     if shoulder_width < 1e-6:
         return 1.0
-    return ankle_xz_dist / shoulder_width
+    return ankle_xz_dist / (shoulder_width / KEYPOINT_TO_BIACROMIAL_RATIO)
 
 
-def build_rep_trajectory(samples: list[dict] | None) -> RepTrajectory | None:
-    """Wrap raw per-frame pipeline samples for the scorer, unmodified."""
+def _nanmax(first: float, second: float) -> float:
+    finite = [value for value in (first, second) if math.isfinite(value)]
+    return max(finite) if finite else math.nan
+
+
+def _finite_or(value: float | None, fallback: float) -> float:
+    return value if value is not None and math.isfinite(value) else fallback
+
+
+def build_rep_trajectory(
+    samples: list[RepTrajectorySample | dict] | None,
+) -> RepTrajectory | None:
+    """Wrap per-frame samples for the scorer, unmodified.
+
+    The live pipeline hands over RepTrajectorySample objects; recorded
+    sessions store them as dicts.
+    """
     if not samples:
         return None
     return RepTrajectory(
-        samples=[RepTrajectorySample(**sample) for sample in samples]
+        samples=[
+            sample if isinstance(sample, RepTrajectorySample) else RepTrajectorySample(**sample)
+            for sample in samples
+        ]
     )
 
 
@@ -159,18 +225,51 @@ def build_rep_kinematic_summary(
     rep_number: int,
     descent_time_s: float = 0.0,
     ascent_time_s: float = 0.0,
+    features: dict | None = None,
 ) -> RepKinematicSummary:
-    """Map a single bottom-of-rep frame + athlete params to engine input."""
+    """Map a rep's bottom frame + its whole-rep features + athlete params to engine input.
+
+    ``features`` (analysis.rep_features.RepFeatures as a dict) are the numbers
+    the intra-set fault rules judged; they take precedence over single-frame
+    values so the set diagnosis reads the same rep the cues did.
+    """
     angles = frame["angles"]
     kpts = frame["kpts"]
+    features = features or {}
 
-    trunk_pitch = 180.0 - angles["trunk_flexion"]
+    trunk_pitch = _finite_or(features.get("trunk_pitch_bottom"), 180.0 - angles["trunk_flexion"])
 
     foot_angle_l = compute_foot_direction_angle(kpts, ankle_idx=15, foot_idx=17)
     foot_angle_r = compute_foot_direction_angle(kpts, ankle_idx=16, foot_idx=18)
 
-    knee_flex = angles.get("knee_flex", 0.0)
-    depth_class = classify_depth(knee_flex)
+    femur_m = athlete_params.get("femur_avg_m", DEFAULT_FEMUR_M)
+    depth_ratio = _finite_or(features.get("depth_ratio"), _depth_ratio_from_kpts(kpts, femur_m))
+    depth_class = classify_depth(depth_ratio)
+
+    dorsi_l = _finite_or(features.get("dorsiflexion_max_l"), angles.get("dorsi_l", math.nan))
+    dorsi_r = _finite_or(features.get("dorsiflexion_max_r"), angles.get("dorsi_r", math.nan))
+    shank_deg = float(np.nanmean([dorsi_l, dorsi_r])) if math.isfinite(_nanmax(dorsi_l, dorsi_r)) else math.nan
+    reference_pitch, athlete_pitch, ankle_pitch = expected_pitches(
+        build_anthro_dict(athlete_params), depth_ratio, shank_deg,
+    )
+
+    feature_kwargs = {
+        key: features[key]
+        for key in _SUMMARY_FEATURE_KEYS
+        if key in features and features[key] is not None
+    }
+    feature_kwargs["depth_ratio"] = depth_ratio
+    feature_kwargs["heel_rise_max_cm"] = _nanmax(
+        _finite_or(features.get("heel_rise_max_cm_l"), math.nan),
+        _finite_or(features.get("heel_rise_max_cm_r"), math.nan),
+    )
+    feature_kwargs["neck_flexion_deg"] = _finite_or(features.get("neck_flexion_bottom"), math.nan)
+    feature_kwargs["hip_flexion_l_max"] = _finite_or(features.get("hip_flexion_max_l"), math.nan)
+    feature_kwargs["hip_flexion_r_max"] = _finite_or(features.get("hip_flexion_max_r"), math.nan)
+    if descent_time_s <= 0.0:
+        descent_time_s = _finite_or(features.get("descent_time_s"), 0.0)
+    if ascent_time_s <= 0.0:
+        ascent_time_s = _finite_or(features.get("ascent_time_s"), 0.0)
 
     shoulder_width = athlete_params.get("shoulder_width_m", 0.40)
     stance_ratio = compute_stance_width_ratio(kpts, shoulder_width)
@@ -188,10 +287,10 @@ def build_rep_kinematic_summary(
     return RepKinematicSummary(
         rep_number=rep_number,
         trunk_pitch_at_bottom=trunk_pitch,
-        knee_valgus_l=angles.get("knee_valgus_l", 0.0),
-        knee_valgus_r=angles.get("knee_valgus_r", 0.0),
-        ankle_df_l_max=angles.get("dorsi_l", 0.0),
-        ankle_df_r_max=angles.get("dorsi_r", 0.0),
+        knee_valgus_l=_finite_or(features.get("valgus_l"), angles.get("knee_valgus_l", math.nan)),
+        knee_valgus_r=_finite_or(features.get("valgus_r"), angles.get("knee_valgus_r", math.nan)),
+        ankle_df_l_max=dorsi_l,
+        ankle_df_r_max=dorsi_r,
         hip_y_l_at_bottom=kpts[11][1] * 100.0,
         hip_y_r_at_bottom=kpts[12][1] * 100.0,
         knee_y_l_at_bottom=kpts[13][1] * 100.0,
@@ -202,6 +301,10 @@ def build_rep_kinematic_summary(
         depth_class_int=depth_class,
         descent_time_s=descent_time_s,
         ascent_time_s=ascent_time_s,
+        expected_pitch_reference=reference_pitch,
+        expected_pitch_athlete=athlete_pitch,
+        expected_pitch_with_ankles=ankle_pitch,
+        **feature_kwargs,
         **top_kwargs,
     )
 
@@ -217,16 +320,29 @@ def build_anthro_dict(athlete_params: dict) -> dict[str, float]:
         "femur_length_avg": femur_avg,
         "tibia_length_avg": athlete_params.get("tibia_avg_m", 0.43),
         "torso_length": torso_avg,
-        "foot_length": athlete_params.get("foot_avg_m", 0.26),
+        "foot_length": athlete_params.get("foot_avg_m", DEFAULT_ANKLE_TO_TOE_M),
     }
 
 
 def build_rom_dict(athlete_params: dict, baseline: dict) -> dict[str, float]:
-    """Build ROM dict from baseline peak values."""
-    return {
+    """Build ROM dict from the athlete's calibrated capacities.
+
+    peak_dorsiflexion and peak_hip_flexion are the median calibration rep's
+    95th percentile at the bottom; avg_depth is knee flexion, kept for display
+    only — it is not a hip measure.
+    """
+    rom = {
         "peak_dorsiflexion": baseline.get("peakDorsi", 35.0),
+        "peak_hip_flexion": baseline.get("peakHipFlex", 120.0),
         "avg_depth": baseline.get("peakKneeFlex", 120.0),
     }
+    for rom_key, baseline_key in (
+        ("depth_capacity_ratio", "depthCapacityRatio"),
+        ("depth_target_ratio", "depthTargetRatio"),
+    ):
+        if baseline.get(baseline_key) is not None:
+            rom[rom_key] = baseline[baseline_key]
+    return rom
 
 
 def build_set_features(
@@ -240,7 +356,7 @@ def build_set_features(
 
     per_rep_kinematics = []
     for rep_idx, rep_frames in enumerate(replay_reps):
-        bottom_frame = find_bottom_frame(rep_frames)
+        bottom_frame = find_bottom_frame(rep_frames, athlete_params.get("femur_avg_m", DEFAULT_FEMUR_M))
         if bottom_frame is None:
             continue
         first_frame = next(f for f in rep_frames if f is not None)

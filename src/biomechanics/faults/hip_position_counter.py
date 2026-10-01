@@ -317,6 +317,10 @@ class SignalRepCounter:
 
         return completed_rep, feedback
 
+    def reject_last_rep(self) -> None:
+        """Un-count the rep just returned: a caller judged it too shallow."""
+        self.rep_count = max(0, self.rep_count - 1)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

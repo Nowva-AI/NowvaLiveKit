@@ -36,7 +36,7 @@ from biomechanics.calibration import (
     extract_thresholds_from_rule_engine,
     get_movement_pattern,
 )
-from biomechanics.coaching.ipc_bridge import IPCBridge
+from biomechanics.coaching.ipc_bridge import IPCBridge, per_dimension_means, serialize_diagnosis
 from biomechanics.coaching.session_tracker import SessionTracker
 from biomechanics.config import BiomechanicsConfig, load_pipeline_config
 from biomechanics.diagnosis.bridge import build_anthro_dict, build_rom_dict
@@ -86,7 +86,7 @@ DEMO_FINISH_TIMEOUT_S = 6.0
 GATE_PREARM_SECONDS = 3.0
 
 # ROM baseline used until calibration reps measure the real peaks.
-DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0}
+DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0, "peakHipFlex": 120.0}
 
 # Body measurement accumulates during the assessment reps. Reps finished
 # before it completes are held (their bottom frames are kept) so they still
@@ -228,63 +228,36 @@ def _show_status_frame(
     display_sink.show(display)
 
 
+def _format_or_dash(value, fmt: str) -> str:
+    return format(value, fmt) if value is not None else "-"
+
+
 def _save_calibration_report(peaks: dict, profile: dict, cal_reps: int, out_dir: str):
     """Save calibration_profile.json and calibration_profile.md to output dir."""
-    # JSON
     cal_json = {
         "calibration_reps": cal_reps,
         "peaks": peaks,
-        "profile": {k: v for k, v in profile.items() if k != "defaults"},
-        "defaults": profile.get("defaults", {}),
+        "profile": profile,
     }
     json_path = str(Path(out_dir) / "calibration_profile.json")
     with open(json_path, "w") as f:
         json.dump(cal_json, f, indent=2)
     print(f"  Saved: {json_path}")
 
-    # Markdown
-    defaults = profile.get("defaults", {})
-    kv = profile["knee_valgus"]
-    fl = profile["forward_lean"]
-    ba = profile["bilateral_asymmetry"]
-    dp = profile.get("depth", {})
-    d_kv = defaults.get("knee_valgus", {})
-    d_fl = defaults.get("forward_lean", {})
-    d_ba = defaults.get("bilateral_asymmetry", {})
-    d_dp = defaults.get("depth", {})
-
     md_lines = [
         f"# Calibration Profile ({cal_reps} reps)",
         "",
-        "## Observed Peaks",
+        "Capacities are the median rep. Fault thresholds are absolute and are not",
+        "calibrated; only the depth target is per-athlete.",
         "",
-        "| Signal | Value |",
-        "|--------|-------|",
-        f"| Trunk Flexion (peak) | {peaks['trunk_flexion']:.1f}° |",
-        *[f"| Hip Adduction Rep {i+1} | {p:.1f}° |" for i, p in enumerate(peaks.get('hip_adduction_per_rep', []))],
-        f"| **Hip Adduction (avg → band)** | **±{peaks['hip_adduction']:.1f}°** |",
-        f"| Bilateral Asymmetry (peak) | {peaks['asymmetry']:.1f}° |",
-        f"| Peak Dorsiflexion | {peaks['peak_dorsiflexion']:.1f}° |",
-        f"| **Avg Squat Depth** | **{peaks.get('avg_depth', 0):.1f}°** |",
-        *[f"| Squat Depth Rep {i+1} | {d:.1f}° |" for i, d in enumerate(peaks.get('depth_per_rep', []))],
-        "",
-        "## Calibrated Thresholds",
-        "",
-        "### Fault Thresholds (Mild / Moderate / Severe)",
-        "",
-        "| Fault | Calibrated | Default |",
-        "|-------|-----------|---------|",
-        f"| Knee Valgus | {kv['mild']:.1f}° / {kv['moderate']:.1f}° / {kv['severe']:.1f}° | {d_kv.get('mild', '-')}° / {d_kv.get('moderate', '-')}° / {d_kv.get('severe', '-')}° |",
-        f"| Forward Lean | {fl['mild']:.1f}° / {fl['moderate']:.1f}° / {fl['severe']:.1f}° | {d_fl.get('mild', '-')}° / {d_fl.get('moderate', '-')}° / {d_fl.get('severe', '-')}° |",
-        f"| Bilateral Asymmetry | {ba['mild']:.1f}° / {ba['moderate']:.1f}° / {ba['severe']:.1f}° | {d_ba.get('mild', '-')}° / {d_ba.get('moderate', '-')}° / {d_ba.get('severe', '-')}° |",
-        "",
-        "### Depth Thresholds",
-        "",
-        "| Category | Calibrated | Default |",
-        "|----------|-----------|---------|",
-        f"| Deep Squat (below parallel) | {dp.get('parallel_threshold', '-')}° | {d_dp.get('parallel_threshold', '-')}° |",
-        f"| Parallel | {dp.get('half_threshold', '-')}° | {d_dp.get('half_threshold', '-')}° |",
-        f"| Half Squat | {dp.get('quarter_threshold', '-')}° | {d_dp.get('quarter_threshold', '-')}° |",
+        "| Measure | Value |",
+        "|---------|-------|",
+        f"| Ankle dorsiflexion (shin tilt) | {_format_or_dash(peaks.get('peak_dorsiflexion'), '.1f')}° |",
+        f"| Hip flexion | {_format_or_dash(peaks.get('peak_hip_flexion'), '.1f')}° |",
+        f"| Depth reached (femur lengths above parallel) | {_format_or_dash(peaks.get('depth_capacity_ratio'), '.2f')} |",
+        f"| **Depth target** | **{_format_or_dash(profile.get('depth_target_ratio'), '.2f')}** |",
+        f"| Avg knee flexion at bottom | {peaks.get('avg_depth', 0):.1f}° |",
+        *[f"| Depth rep {i+1} | {d:.2f} |" for i, d in enumerate(peaks.get('depth_ratio_per_rep', []))],
         "",
     ]
     md_path = str(Path(out_dir) / "calibration_profile.md")
@@ -333,7 +306,7 @@ def _build_calibration_complete_message(
         "type": "calibration_complete",
         "movement_pattern": movement_pattern,
         "peaks": peaks,
-        "thresholds": {k: v for k, v in cal_profile.items() if k != "defaults"},
+        "thresholds": cal_profile,
     }
     # Omitted, never None, when the body was not measured: the voice agent
     # persists whatever arrives here.
@@ -810,36 +783,10 @@ class CameraCalibrationSession:
 def _serialize_diagnosis(diagnosis_result, score_summary) -> tuple[dict, dict]:
     """Convert diagnosis engine output into JSON-serializable dicts for IPC."""
     per_rep = score_summary.per_rep_scores
-    n = len(per_rep)
-    diagnosis_dict = {
-        "confidence": diagnosis_result.confidence,
-        "detected_symptoms": [
-            {"symptom_id": s.symptom_id, "severity": s.severity, "contributing_reps": s.contributing_reps}
-            for s in diagnosis_result.detected_symptoms
-        ],
-        "immediate_causes": [
-            {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation, "parameter_delta": c.parameter_delta}
-            for c in diagnosis_result.immediate_causes
-        ],
-        "session_causes": [
-            {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation}
-            for c in diagnosis_result.session_causes
-        ],
-        "contextual_notes": [
-            {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation}
-            for c in diagnosis_result.contextual_notes
-        ],
-        "combined_perturbation": diagnosis_result.combined_perturbation,
-    }
+    diagnosis_dict = serialize_diagnosis(diagnosis_result)
     scoring_dict = {
         "mean_score": score_summary.mean_score,
-        "per_dimension": {
-            "depth": round(sum(r.depth_score for r in per_rep) / n, 3) if n else 0,
-            "trunk_control": round(sum(r.trunk_control_score for r in per_rep) / n, 3) if n else 0,
-            "knee_tracking": round(sum(r.knee_tracking_score for r in per_rep) / n, 3) if n else 0,
-            "symmetry": round(sum(r.symmetry_score for r in per_rep) / n, 3) if n else 0,
-            "tempo": round(sum(r.tempo_score for r in per_rep) / n, 3) if n else 0,
-        },
+        "per_dimension": per_dimension_means(per_rep),
         "best_rep": score_summary.best_rep_number,
         "worst_rep": score_summary.worst_rep_number,
         "trend_slope": score_summary.trend_slope,
@@ -1043,6 +990,9 @@ def run_biomechanics_pipeline(
             # proportions; older flat files are just the thresholds.
             cal_profile = stored.get("thresholds", stored)
             apply_calibration_to_rule_engine(pipeline._rule_engine, cal_profile)
+            stored_target = (stored.get("baseline") or {}).get("depthTargetRatio")
+            if cal_profile.get("depth_target_ratio") is None and stored_target is not None:
+                pipeline.set_depth_target(stored_target)
             print(f"[CALIBRATION] Loaded calibration from {calibration_file}")
 
             # This is the only place a returning user's proportions get
@@ -1208,6 +1158,8 @@ def run_biomechanics_pipeline(
                 session_tracker.set_active = False
 
                 print(f"\n  [ASSESSMENT] Round {assessment_round} — collecting {ASSESSMENT_TARGET_REPS} reps")
+                # Every descent counts while the athlete's range is being learned.
+                pipeline.set_depth_target(None)
 
                 # Reps finished before the body is measured wait here with their
                 # bottom frames, so they still get kinematics once it is.
@@ -1313,6 +1265,7 @@ def run_biomechanics_pipeline(
                         per_rep_kinematics=kinematic_buffer,
                         anthropometry=anthro,
                         rom=rom,
+                        capture_mode=session_tracker.capture_mode,
                     )
                     diagnosis_result = HypothesisEngine().diagnose(set_features)
                     score_summary = score_set(
@@ -1428,6 +1381,8 @@ def run_biomechanics_pipeline(
 
         tracker = CalibrationTracker(target_reps=calibration_reps)
         cal_set_collector = SetDataCollector()
+        # Calibration measures how deep the athlete can go, so no target yet.
+        pipeline.set_depth_target(None)
 
         try:
             while not tracker.is_complete:
@@ -1442,7 +1397,7 @@ def run_biomechanics_pipeline(
                     # Count reps but do NOT report faults during calibration
                     if result.rep_data is not None:
                         depth = result.rep_data.max_depth_angle
-                        tracker.on_rep_complete(depth)
+                        tracker.on_rep_complete(depth, result.rep_data.features)
                         print(f"  [CAL REP {tracker.reps_completed}/{calibration_reps}] depth={depth:.1f}°")
 
                         # Notify voice agent of calibration rep
@@ -1490,8 +1445,13 @@ def run_biomechanics_pipeline(
             cal_athlete_params = _extract_athlete_params(pipeline) or athlete_params
             # Build real baseline from calibration peaks
             cal_baseline = {
-                "peakDorsi": peaks["peak_dorsiflexion"],
+                "peakDorsi": peaks["peak_dorsiflexion"] if peaks["peak_dorsiflexion"] is not None
+                else DEFAULT_ROM_BASELINE["peakDorsi"],
                 "peakKneeFlex": peaks["avg_depth"],
+                "peakHipFlex": peaks["peak_hip_flexion"] if peaks["peak_hip_flexion"] is not None
+                else DEFAULT_ROM_BASELINE["peakHipFlex"],
+                "depthCapacityRatio": peaks["depth_capacity_ratio"],
+                "depthTargetRatio": cal_profile["depth_target_ratio"],
             }
             athlete_baseline = cal_baseline
 
@@ -1502,11 +1462,10 @@ def run_biomechanics_pipeline(
 
             print(f"\n{'='*60}")
             print(f"  CALIBRATION COMPLETE ({tracker.reps_completed} reps)")
-            print(f"  Peak trunk flexion: {peaks['trunk_flexion']:.1f}°")
-            print(f"  Avg hip adduction:  {peaks['hip_adduction']:.1f}°")
-            print(f"  Peak asymmetry:     {peaks['asymmetry']:.1f}°")
-            print(f"  Peak dorsiflexion:  {peaks['peak_dorsiflexion']:.1f}°")
-            print(f"  Avg squat depth:    {peaks.get('avg_depth', 0):.1f}°")
+            print(f"  Ankle dorsiflexion: {_format_or_dash(peaks['peak_dorsiflexion'], '.1f')}°")
+            print(f"  Hip flexion:        {_format_or_dash(peaks['peak_hip_flexion'], '.1f')}°")
+            print(f"  Depth reached:      {_format_or_dash(peaks['depth_capacity_ratio'], '.2f')} femur lengths above parallel")
+            print(f"  Depth target:       {cal_profile['depth_target_ratio']:.2f}")
             print(f"{'='*60}\n")
 
             # Save calibration report

@@ -1,9 +1,16 @@
 """Tests for per-rep quality scoring."""
 
+import math
+
 import pytest
 
 from biomechanics.diagnosis.rep_scoring import (
+    DEPTH_DECAY_RATIO,
+    DEPTH_TARGET_TOLERANCE_RATIO,
     LOADED_WINDOW_RATIO,
+    WEIGHT_DEPTH,
+    WEIGHT_KNEES,
+    WEIGHT_TRUNK,
     score_depth,
     score_knee_tracking,
     score_rep,
@@ -21,6 +28,9 @@ from biomechanics.diagnosis.types import (
 # Femur length used across the fixtures, in the units each layer expects.
 FEMUR_M = 0.40
 FEMUR_CM = FEMUR_M * 100.0
+# The trunk pitch the default rep's balance model asks for (diagnosis.lean_model).
+BALANCED_PITCH_DEG = 35.0
+SCORE_TOLERANCE = 0.01
 
 
 def _make_rep(**overrides) -> RepKinematicSummary:
@@ -41,6 +51,9 @@ def _make_rep(**overrides) -> RepKinematicSummary:
         depth_class_int=4,
         descent_time_s=2.0,
         ascent_time_s=1.0,
+        expected_pitch_reference=BALANCED_PITCH_DEG,
+        expected_pitch_athlete=BALANCED_PITCH_DEG,
+        expected_pitch_with_ankles=BALANCED_PITCH_DEG,
     )
     defaults.update(overrides)
     return RepKinematicSummary(**defaults)
@@ -116,13 +129,49 @@ class TestDepthScore:
         assert score_depth(rep, _default_anthro(), _default_rom()) == 1.0
 
     def test_half_femur_above_parallel(self):
-        # hip 20cm above knee on a 40cm femur → ratio 0.5 → score 0.5
+        # hip 20cm above knee on a 40cm femur → ratio 0.5, which is 0.42
+        # past the parallel tolerance → 1 - 0.42/0.75
         rep = _make_rep(
             hip_y_l_at_bottom=65.0, hip_y_r_at_bottom=65.0,
             knee_y_l_at_bottom=45.0, knee_y_r_at_bottom=45.0,
         )
         score = score_depth(rep, _default_anthro(), _default_rom())
-        assert score == pytest.approx(0.5, abs=0.01)
+        expected = 1.0 - (0.5 - DEPTH_TARGET_TOLERANCE_RATIO) / DEPTH_DECAY_RATIO
+        assert score == pytest.approx(expected, abs=SCORE_TOLERANCE)
+
+    def test_just_above_parallel_within_tolerance_scores_one(self):
+        hip_cm = 45.0 + DEPTH_TARGET_TOLERANCE_RATIO * FEMUR_CM
+        rep = _make_rep(hip_y_l_at_bottom=hip_cm, hip_y_r_at_bottom=hip_cm)
+        assert score_depth(rep, _default_anthro(), _default_rom()) == pytest.approx(1.0)
+
+    def test_depth_is_scored_against_the_athletes_target(self):
+        # An athlete whose calibrated target sits 0.2 femurs above parallel
+        # is not penalised for reaching it; the default target is parallel.
+        rep = _make_rep(depth_ratio=0.25)
+        own_target = {**_default_rom(), "depth_target_ratio": 0.2}
+        assert score_depth(rep, _default_anthro(), own_target) == pytest.approx(1.0)
+        expected = 1.0 - (0.25 - DEPTH_TARGET_TOLERANCE_RATIO) / DEPTH_DECAY_RATIO
+        assert score_depth(rep, _default_anthro(), _default_rom()) == pytest.approx(
+            expected, abs=SCORE_TOLERANCE
+        )
+
+    def test_measured_depth_ratio_preferred_over_bottom_heights(self):
+        # The whole-rep depth_ratio is what the fault rules judged; the
+        # single bottom frame's heights (here: standing) must not override it.
+        rep = _make_rep(
+            depth_ratio=-0.1,
+            hip_y_l_at_bottom=45.0 + FEMUR_CM, hip_y_r_at_bottom=45.0 + FEMUR_CM,
+        )
+        assert score_depth(rep, _default_anthro(), _default_rom()) == pytest.approx(1.0)
+
+    def test_sample_depth_ratio_used_directly(self):
+        # Samples carrying a measured depth ratio are scored on it, not on
+        # their (here: parallel-looking) heights.
+        samples = [_make_sample(depth_ratio=0.5) for _ in range(10)]
+        trajectory = RepTrajectory(samples=samples)
+        score = score_depth(_make_rep(), _default_anthro(), _default_rom(), trajectory)
+        expected = 1.0 - (0.5 - DEPTH_TARGET_TOLERANCE_RATIO) / DEPTH_DECAY_RATIO
+        assert score == pytest.approx(expected, abs=SCORE_TOLERANCE)
 
     def test_standing_scores_zero(self):
         # hip a full femur above the knee → thigh vertical → 0.0
@@ -177,39 +226,97 @@ class TestDepthScore:
 
 
 class TestTrunkControlScore:
-    def test_perfect_lean(self):
-        # femur_torso_ratio=1.0 → expected lean 30°
-        rep = _make_rep(trunk_pitch_at_bottom=30.0)
+    """Lean is judged against the pitch the athlete's build and ankles need to
+    keep the shoulders over midfoot, and only leaning past it costs score."""
+
+    def test_balanced_lean_scores_one(self):
+        rep = _make_rep(trunk_pitch_at_bottom=BALANCED_PITCH_DEG)
         assert score_trunk_control(rep, _default_anthro(), _default_rom()) == 1.0
 
     def test_within_tolerance(self):
-        rep = _make_rep(trunk_pitch_at_bottom=33.0)
+        rep = _make_rep(trunk_pitch_at_bottom=BALANCED_PITCH_DEG + 3.0)
         assert score_trunk_control(rep, _default_anthro(), _default_rom()) == 1.0
 
-    def test_moderate_deviation(self):
-        rep = _make_rep(trunk_pitch_at_bottom=43.0)  # 13° off → 1-(13-3)/20 = 0.5
+    def test_moderate_excess(self):
+        # 13° past balance → 1-(13-3)/20 = 0.5
+        rep = _make_rep(trunk_pitch_at_bottom=BALANCED_PITCH_DEG + 13.0)
         score = score_trunk_control(rep, _default_anthro(), _default_rom())
-        assert score == pytest.approx(0.5, abs=0.01)
+        assert score == pytest.approx(0.5, abs=SCORE_TOLERANCE)
 
-    def test_extreme_deviation(self):
+    def test_extreme_excess(self):
         rep = _make_rep(trunk_pitch_at_bottom=60.0)
         assert score_trunk_control(rep, _default_anthro(), _default_rom()) == 0.0
 
-    def test_upright_standing_frames_are_excluded(self):
-        # The standing frames sit at 0° pitch, 30° from the expectation. If they
-        # were scored, a clean rep would read as a severe fault.
-        trajectory = _descent_trajectory(trunk_pitch=30.0)
+    def test_more_upright_than_needed_is_not_penalised(self):
+        # Regression: the trunk score was two-sided and docked a rep for
+        # sitting more upright than expected, which is never a fault.
+        rep = _make_rep(trunk_pitch_at_bottom=BALANCED_PITCH_DEG - 20.0)
+        assert score_trunk_control(rep, _default_anthro(), _default_rom()) == 1.0
+
+    def test_ankle_adjusted_expectation_is_preferred(self):
+        # Stiff ankles need 45°; a 48° rep is within tolerance of that even
+        # though it leans 13° past the free-ankle expectation.
+        rep = _make_rep(
+            trunk_pitch_at_bottom=48.0,
+            expected_pitch_with_ankles=45.0,
+            expected_pitch_athlete=BALANCED_PITCH_DEG,
+            expected_pitch_reference=BALANCED_PITCH_DEG,
+        )
+        assert score_trunk_control(rep, _default_anthro(), _default_rom()) == 1.0
+
+    def test_falls_back_to_athlete_then_reference_expectation(self):
+        athlete_only = _make_rep(
+            trunk_pitch_at_bottom=BALANCED_PITCH_DEG + 13.0,
+            expected_pitch_with_ankles=math.nan,
+        )
+        reference_only = _make_rep(
+            trunk_pitch_at_bottom=BALANCED_PITCH_DEG + 13.0,
+            expected_pitch_with_ankles=math.nan,
+            expected_pitch_athlete=math.nan,
+        )
+        for rep in (athlete_only, reference_only):
+            score = score_trunk_control(rep, _default_anthro(), _default_rom())
+            assert score == pytest.approx(0.5, abs=SCORE_TOLERANCE)
+
+    def test_unknown_expectation_is_not_scored(self):
+        rep = _make_rep(
+            trunk_pitch_at_bottom=60.0,
+            expected_pitch_with_ankles=math.nan,
+            expected_pitch_athlete=math.nan,
+            expected_pitch_reference=math.nan,
+        )
+        assert math.isnan(score_trunk_control(rep, _default_anthro(), _default_rom()))
+
+    def test_hip_shoot_costs_trunk_score(self):
+        # Chest dropping 11° out of the hole → 1-(11-4)/14 = 0.5
+        rep = _make_rep(hip_shoot_deg=11.0)
+        score = score_trunk_control(rep, _default_anthro(), _default_rom())
+        assert score == pytest.approx(0.5, abs=SCORE_TOLERANCE)
+
+    def test_small_hip_shoot_is_tolerated(self):
+        rep = _make_rep(hip_shoot_deg=4.0)
+        assert score_trunk_control(rep, _default_anthro(), _default_rom()) == 1.0
+
+    def test_lean_outside_the_loaded_window_is_excluded(self):
+        # The athlete hinges over at the top (resetting their grip); only the
+        # bottom of the rep is judged against the balance model.
+        standing = [
+            _make_sample(hip_y_l=45.0 + FEMUR_CM, hip_y_r=45.0 + FEMUR_CM, trunk_pitch=70.0)
+            for _ in range(10)
+        ]
+        bottom = [_make_sample(trunk_pitch=BALANCED_PITCH_DEG) for _ in range(10)]
+        trajectory = RepTrajectory(samples=standing + bottom)
         score = score_trunk_control(
             _make_rep(), _default_anthro(), _default_rom(), trajectory
         )
         assert score == 1.0
 
     def test_lean_during_bottom_is_caught(self):
-        trajectory = _descent_trajectory(trunk_pitch=43.0)
+        trajectory = _descent_trajectory(trunk_pitch=BALANCED_PITCH_DEG + 13.0)
         score = score_trunk_control(
             _make_rep(), _default_anthro(), _default_rom(), trajectory
         )
-        assert score == pytest.approx(0.5, abs=0.01)
+        assert score == pytest.approx(0.5, abs=SCORE_TOLERANCE)
 
 
 class TestKneeTrackingScore:
@@ -226,12 +333,19 @@ class TestKneeTrackingScore:
         score = score_knee_tracking(rep, _default_anthro(), _default_rom())
         assert score == pytest.approx(0.75, abs=0.01)
 
-    def test_negative_valgus_same_as_positive(self):
-        rep_positive = _make_rep(knee_valgus_l=8.0, knee_valgus_r=0.0)
-        rep_negative = _make_rep(knee_valgus_l=-8.0, knee_valgus_r=0.0)
-        assert score_knee_tracking(
-            rep_positive, _default_anthro(), _default_rom()
-        ) == score_knee_tracking(rep_negative, _default_anthro(), _default_rom())
+    def test_knees_out_is_not_scored_like_valgus(self):
+        # Regression: abs() penalised knees pushed out — the very correction
+        # the knee cue prescribes — exactly as much as knees caving in.
+        rep_valgus = _make_rep(knee_valgus_l=8.0, knee_valgus_r=0.0)
+        rep_knees_out = _make_rep(knee_valgus_l=-8.0, knee_valgus_r=0.0)
+        assert score_knee_tracking(rep_valgus, _default_anthro(), _default_rom()) < 1.0
+        assert score_knee_tracking(rep_knees_out, _default_anthro(), _default_rom()) == 1.0
+
+    def test_knees_far_out_is_penalised(self):
+        # 21° out is 6° past the 15° lateral tolerance → that knee 0.5
+        rep = _make_rep(knee_valgus_l=-21.0, knee_valgus_r=0.0)
+        score = score_knee_tracking(rep, _default_anthro(), _default_rom())
+        assert score == pytest.approx(0.75, abs=SCORE_TOLERANCE)
 
     def test_both_extreme(self):
         rep = _make_rep(knee_valgus_l=16.0, knee_valgus_r=16.0)
@@ -268,6 +382,27 @@ class TestSymmetryScore:
     def test_extreme_asymmetry(self):
         rep = _make_rep(hip_y_l_at_bottom=45.0, hip_y_r_at_bottom=51.0)
         assert score_symmetry(rep, _default_anthro(), _default_rom()) == 0.0
+
+    def test_hip_shift_within_tolerance(self):
+        rep = _make_rep(hip_shift_ratio=0.03)
+        assert score_symmetry(rep, _default_anthro(), _default_rom()) == 1.0
+
+    def test_hip_shift_moderate(self):
+        # 0.105 is 0.075 past the 0.03 tolerance → 1 - 0.075/0.15 = 0.5
+        rep = _make_rep(hip_shift_ratio=0.105)
+        score = score_symmetry(rep, _default_anthro(), _default_rom())
+        assert score == pytest.approx(0.5, abs=SCORE_TOLERANCE)
+
+    def test_hip_shift_direction_does_not_matter(self):
+        left = score_symmetry(_make_rep(hip_shift_ratio=-0.105), _default_anthro(), _default_rom())
+        right = score_symmetry(_make_rep(hip_shift_ratio=0.105), _default_anthro(), _default_rom())
+        assert left == pytest.approx(right)
+
+    def test_hip_shift_preferred_over_pelvic_level(self):
+        # A measured shift is what coaches watch; a tilted pelvis at the
+        # bottom frame only counts when the shift was not measured.
+        rep = _make_rep(hip_y_l_at_bottom=45.0, hip_y_r_at_bottom=51.0, hip_shift_ratio=0.0)
+        assert score_symmetry(rep, _default_anthro(), _default_rom()) == 1.0
 
     def test_sustained_hip_drop_is_caught(self):
         samples = [
@@ -311,9 +446,22 @@ class TestTempoScore:
         rep = _make_rep(descent_time_s=0.1, ascent_time_s=8.0)
         assert score_tempo(rep, _default_anthro(), _default_rom()) == 0.0
 
-    def test_untimed_rep_is_not_penalised(self):
+    def test_untimed_rep_is_not_scored(self):
+        """Neither penalised nor credited: an unmeasured dimension leaves the composite."""
         rep = _make_rep(descent_time_s=0.0, ascent_time_s=0.0)
-        assert score_tempo(rep, _default_anthro(), _default_rom()) == 1.0
+        assert math.isnan(score_tempo(rep, _default_anthro(), _default_rom()))
+        assert math.isfinite(score_rep(rep, _default_anthro(), _default_rom()).composite_score)
+
+    def test_unmeasured_knees_earn_no_credit(self):
+        """Unmeasured knees used to score 1.0 and hand every rep a free quarter of the composite."""
+        anthro, rom = _default_anthro(), _default_rom()
+        poor_depth = dict(depth_ratio=0.6)
+        measured = score_rep(_make_rep(knee_valgus_l=0.0, knee_valgus_r=0.0, **poor_depth), anthro, rom)
+        unmeasured = score_rep(
+            _make_rep(knee_valgus_l=math.nan, knee_valgus_r=math.nan, **poor_depth), anthro, rom,
+        )
+        assert math.isnan(unmeasured.knee_tracking_score)
+        assert unmeasured.composite_score < measured.composite_score
 
 
 class TestLoadedWindow:
@@ -374,6 +522,17 @@ class TestCompositeScore:
             WEIGHT_DEPTH + WEIGHT_TRUNK + WEIGHT_KNEES + WEIGHT_SYMMETRY + WEIGHT_TEMPO
         )
         assert total == pytest.approx(1.0)
+
+    def test_position_control_outweighs_depth(self):
+        # Regression: depth was 42% of the composite, so a deep rep with knee
+        # cave outscored a controlled rep a few centimeters short of parallel.
+        assert WEIGHT_TRUNK > WEIGHT_DEPTH
+        assert WEIGHT_KNEES > WEIGHT_DEPTH
+        controlled_short = _make_rep(depth_ratio=0.2)
+        deep_with_cave = _make_rep(depth_ratio=-0.2, knee_valgus_l=12.0, knee_valgus_r=12.0)
+        controlled_score = score_rep(controlled_short, _default_anthro(), _default_rom())
+        caving_score = score_rep(deep_with_cave, _default_anthro(), _default_rom())
+        assert controlled_score.composite_score > caving_score.composite_score
 
     def test_tempo_moves_the_composite(self):
         good = _make_rep(descent_time_s=2.0, ascent_time_s=1.0)

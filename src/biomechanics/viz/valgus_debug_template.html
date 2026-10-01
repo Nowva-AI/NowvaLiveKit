@@ -219,8 +219,8 @@ document.getElementById("video-sub").textContent =
   D.has_video ? `— ${D.measured_fps} fps, scrub with the timeline or charts` : "";
 document.getElementById("valgus-sub").textContent =
   D.multi_camera
-    ? "— 3D Grood-Suntay abduction, positive = knee medial (valgus)"
-    : "— 2D frontal-plane projection angle, positive = knee medial (valgus)";
+    ? "— 3D knees-over-toes: femur tilt out of the toe-tracking plane, positive = knee medial (valgus)"
+    : "— 2D knees-over-toes: image deviation from toe tracking as femur tilt, positive = knee medial (valgus)";
 
 // ---- threshold step lookup ----
 // Thresholds are re-read during the run because anthropometric scaling
@@ -236,32 +236,7 @@ function buildThresholdSteps(kind) {
   }
   return out;
 }
-const THRESH_PRIMARY = buildThresholdSteps("primary");
-const THRESH_FALLBACK = buildThresholdSteps("fallback");
-
-// Which metric the rule actually judges on this frame: the primary valgus
-// number, or the hip-adduction fallback when foot confidence is too low.
-function usesFallback(i) {
-  const l = S.fcl[i], r = S.fcr[i];
-  if (l === null || r === null) return null;
-  return Math.min(l, r) < D.foot_confidence_threshold;
-}
-// The rule only evaluates at the bottom of a rep.
-function ruleEligible(i) { return S.phase[i] === "bottom"; }
-
-// After firing, the rule stays silent for a cooldown measured in *pipeline*
-// frame indices, so a high valgus reading can be real yet report nothing.
-function cooldownRemaining(i) {
-  const now = S.fi[i];
-  if (now === null || now === undefined) return 0;
-  let last = null;
-  for (const f of D.faults) {
-    if (!f.knee) continue;
-    if (f.frame_index < now) last = f.frame_index; else break;
-  }
-  if (last === null) return 0;
-  return Math.max(0, D.fault_cooldown_frames - (now - last));
-}
+const THRESH = buildThresholdSteps("primary");
 
 const faultsByFrame = new Map();
 D.faults.forEach((f, idx) => {
@@ -283,7 +258,7 @@ function makeChart(canvas, cfg) {
       for (let i = 0; i < N; i++) { const v = S[s.key][i]; if (v !== null && v !== undefined) vals.push(v); }
     }
     if (cfg.thresholds) {
-      const t = cfg.thresholds === "primary" ? THRESH_PRIMARY : THRESH_FALLBACK;
+      const t = THRESH;
       if (t) for (let i = 0; i < N; i += 20) { vals.push(t[i].severe * 1.1, cfg.mirror ? -t[i].severe * 1.1 : 0); }
     }
     if (cfg.refLines) for (const r of cfg.refLines) vals.push(r.value);
@@ -325,24 +300,6 @@ function makeChart(canvas, cfg) {
     ctx.clearRect(0, 0, W, H);
     ctx.font = "10.5px -apple-system, sans-serif";
 
-    // shaded regions: rule-eligible frames (phase == bottom) and fallback-metric frames
-    if (cfg.shadeEligible) {
-      for (let i = 0; i < N; i++) {
-        if (!ruleEligible(i)) continue;
-        let j = i; while (j < N && ruleEligible(j)) j++;
-        ctx.fillStyle = "rgba(111,191,143,0.09)";
-        ctx.fillRect(fx(i), M.t, Math.max(1, fx(j) - fx(i)), H - M.t - M.b);
-        i = j;
-      }
-      for (let i = 0; i < N; i++) {
-        if (usesFallback(i) !== true) continue;
-        let j = i; while (j < N && usesFallback(j) === true) j++;
-        ctx.fillStyle = "rgba(217,89,38,0.11)";
-        ctx.fillRect(fx(i), M.t, Math.max(1, fx(j) - fx(i)), H - M.t - M.b);
-        i = j;
-      }
-    }
-
     // grid + y labels
     ctx.strokeStyle = COLORS.grid; ctx.fillStyle = COLORS.muted; ctx.lineWidth = 1;
     ctx.textAlign = "right"; ctx.textBaseline = "middle";
@@ -373,7 +330,7 @@ function makeChart(canvas, cfg) {
 
     // threshold step lines
     if (cfg.thresholds) {
-      const t = cfg.thresholds === "primary" ? THRESH_PRIMARY : THRESH_FALLBACK;
+      const t = THRESH;
       if (t) {
         for (const level of ["mild", "moderate", "severe"]) {
           stepLine(t, v => v[level], SEV_COLOR[level]);
@@ -414,7 +371,7 @@ function makeChart(canvas, cfg) {
         for (const f of list) {
           if (cfg.kneeFaultsOnly && !f.knee) continue;
           const x = fx(frame);
-          const v = f.details && f.details.max_valgus;
+          const v = f.details && f.details.value;
           const y = (typeof v === "number" && v >= lo && v <= hi) ? fy(v) : M.t + 8;
           ctx.fillStyle = SEV_COLOR[f.severity] || COLORS.muted;
           ctx.beginPath();
@@ -465,7 +422,7 @@ charts.push(makeChart(document.getElementById("chart-valgus"), {
     { key: "vr", label: "Right valgus", color: COLORS.right, width: 1.9 },
   ],
   thresholds: "primary", mirror: true, showFaults: true, kneeFaultsOnly: true,
-  shadeEligible: true, rightPad: 58, digits: 1,
+  rightPad: 58, digits: 1,
 }));
 
 document.getElementById("main-legend").innerHTML = [
@@ -474,8 +431,6 @@ document.getElementById("main-legend").innerHTML = [
   `<span><span class="dash" style="border-color:${COLORS.mild}"></span>mild</span>`,
   `<span><span class="dash" style="border-color:${COLORS.moderate}"></span>moderate</span>`,
   `<span><span class="dash" style="border-color:${COLORS.severe}"></span>severe</span>`,
-  `<span style="color:${COLORS.kasr}">▨ rule eligible (phase = bottom)</span>`,
-  `<span style="color:${COLORS.moderate}">▨ foot confidence low → hip-adduction fallback</span>`,
   `<span>▼ knee fault fired</span>`,
 ].join("");
 
@@ -490,25 +445,25 @@ const SECONDARY = [
   },
   {
     id: "chart-footconf", title: "Foot confidence",
-    sub: "— below the line the rule switches to the hip-adduction fallback",
+    sub: "— includes the toe; below the line the feet are not seen well enough to judge knee tracking",
     cfg: {
       series: [
         { key: "fcl", label: "Left", color: COLORS.left },
         { key: "fcr", label: "Right", color: COLORS.right },
       ],
-      refLines: [{ value: D.foot_confidence_threshold, color: COLORS.moderate, label: "fallback" }],
+      refLines: [{ value: D.foot_confidence_threshold, color: COLORS.moderate, label: "min" }],
       fixed: [0, 1], digits: 2, rightPad: 52,
     },
   },
   {
-    id: "chart-adduction", title: "Hip adduction (fallback metric)",
-    sub: "— judged against its own always-3D-scale thresholds",
+    id: "chart-adduction", title: "Hip adduction",
+    sub: "— context only, not judged by the knee rule",
     cfg: {
       series: [
         { key: "al", label: "Left", color: COLORS.hipL },
         { key: "ar", label: "Right", color: COLORS.hipR },
       ],
-      thresholds: "fallback", rightPad: 58, digits: 1,
+      digits: 1,
     },
   },
   {
@@ -539,10 +494,9 @@ function fmt(v, digits = 1) {
 }
 function severityOf(value, thresholds) {
   if (value === null || thresholds === null) return null;
-  const a = Math.abs(value);
-  if (a >= thresholds.severe) return "severe";
-  if (a >= thresholds.moderate) return "moderate";
-  if (a >= thresholds.mild) return "mild";
+  if (value >= thresholds.severe) return "severe";
+  if (value >= thresholds.moderate) return "moderate";
+  if (value >= thresholds.mild) return "mild";
   return null;
 }
 function sevChip(sev) {
@@ -551,14 +505,10 @@ function sevChip(sev) {
 }
 
 function updateReadout(i) {
-  const th = THRESH_PRIMARY ? THRESH_PRIMARY[i] : null;
-  const fb = THRESH_FALLBACK ? THRESH_FALLBACK[i] : null;
-  const fallback = usesFallback(i);
-  const judgedL = fallback ? S.al[i] : S.vl[i];
-  const judgedR = fallback ? S.ar[i] : S.vr[i];
-  const judgedTh = fallback ? fb : th;
-  const worst = (judgedL === null || judgedR === null) ? null
-    : (Math.abs(judgedL) >= Math.abs(judgedR) ? judgedL : judgedR);
+  const th = THRESH ? THRESH[i] : null;
+  // The rule judges the more medial knee; varus (negative) is never a fault.
+  const sides = [S.vl[i], S.vr[i]].filter(v => v !== null && v !== undefined);
+  const worst = sides.length ? Math.max(...sides) : null;
 
   const faults = faultsByFrame.get(i) || [];
   const faultHtml = faults.length
@@ -579,16 +529,8 @@ function updateReadout(i) {
     `<dt>Knee flexion L / R</dt><dd class="num">${fmt(S.kfl[i], 0)}° / ${fmt(S.kfr[i], 0)}°</dd>` +
     `<dt>Hip rotation L / R</dt><dd class="num">${fmt(S.hrl[i])}° / ${fmt(S.hrr[i])}°</dd>` +
     `<div class="sep"></div>` +
-    `<dt>Metric in use</dt><dd>${fallback === null ? "—" : fallback
-        ? '<span class="chip warn">hip adduction (fallback)</span>'
-        : '<span class="chip accent">valgus (primary)</span>'}</dd>` +
-    `<dt>Thresholds</dt><dd class="num">${judgedTh ? `${judgedTh.mild} / ${judgedTh.moderate} / ${judgedTh.severe}°` : "—"}</dd>` +
-    `<dt>Worst side now</dt><dd>${sevChip(severityOf(worst, judgedTh))} <span class="num">${fmt(worst)}°</span></dd>` +
-    `<dt>Rule can fire</dt><dd>${!ruleEligible(i)
-        ? `<span class="chip">no — phase is ${S.phase[i]}</span>`
-        : cooldownRemaining(i) > 0
-          ? `<span class="chip warn">no — ${cooldownRemaining(i)} frames of cooldown left</span>`
-          : '<span class="chip good">yes — at bottom, off cooldown</span>'}</dd>` +
+    `<dt>Thresholds</dt><dd class="num">${th ? `${th.mild} / ${th.moderate} / ${th.severe}°` : "—"}</dd>` +
+    `<dt>Worst side now</dt><dd>${sevChip(severityOf(worst, th))} <span class="num">${fmt(worst)}°</span></dd>` +
     `<dt>Fault this frame</dt><dd>${faultHtml}</dd>` +
     `</div>`;
 }
@@ -601,7 +543,8 @@ function updateReadout(i) {
     return;
   }
   let html = `<thead><tr><th>Time</th><th>Frame</th><th>Rep</th><th>Fault</th><th>Severity</th>` +
-    `<th>Score</th><th>Valgus L</th><th>Valgus R</th><th>Max</th><th>Side</th><th>Metric</th><th>Message</th></tr></thead><tbody>`;
+    `<th>Score</th><th>Valgus L</th><th>Valgus R</th><th>Value</th><th>Side</th><th>Phase</th>` +
+    `<th>Observability</th><th>Drift</th><th>Message</th></tr></thead><tbody>`;
   D.faults.forEach((f, idx) => {
     const d = f.details || {};
     html += `<tr data-frame="${f.i}" data-idx="${idx}">` +
@@ -609,8 +552,10 @@ function updateReadout(i) {
       `<td>${f.fault_type}</td><td class="sev-${f.severity}">${f.severity}</td>` +
       `<td class="num">${fmt(f.severity_score, 2)}</td>` +
       `<td class="num">${fmt(d.knee_valgus_l)}</td><td class="num">${fmt(d.knee_valgus_r)}</td>` +
-      `<td class="num">${fmt(d.max_valgus)}</td><td>${d.affected_side ?? "—"}</td>` +
-      `<td>${d.metric_source ?? "—"}</td><td class="msg">${f.message}</td></tr>`;
+      `<td class="num">${fmt(d.value)}</td><td>${d.side ?? "—"}</td><td>${d.phase ?? "—"}</td>` +
+      `<td>${d.observability ?? "—"}</td>` +
+      `<td>${d.is_drift === true ? "yes" : d.is_drift === false ? "no" : "—"}</td>` +
+      `<td class="msg">${f.message}</td></tr>`;
   });
   table.innerHTML = html + `</tbody>`;
   table.addEventListener("click", e => {

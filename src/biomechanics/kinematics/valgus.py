@@ -5,9 +5,9 @@ Two estimators write the same JointAngles fields (knee_valgus in degrees,
 positive = knee medial/valgus; a bilateral knee-to-ankle separation ratio) but
 from different data depending on capture mode:
 
-- SingleCameraValgusEstimator: frontal-plane projection angle (FPPA) from the
-  image-plane 2D skeleton, plus an x-only knee-to-ankle separation ratio. Avoids
-  the unreliable monocular depth axis entirely.
+- SingleCameraValgusEstimator: the knee's image-plane deviation from where it
+  would project if it tracked the toes (expectation from the monocular 3D
+  pose), converted to femur tilt; plus an x-only knee-to-ankle separation ratio.
 - TriangulatedValgusEstimator: 3D knee deviation from the plane the knee tracks
   in when it follows the toes (spanned by the hip-ankle line and the foot's
   forward direction), so knees-over-toes reads neutral at any toe-out angle and
@@ -102,24 +102,31 @@ def _xyz(skeleton_3d: Skeleton3D, index: int) -> tuple[np.ndarray | None, float]
 
 class SingleCameraValgusEstimator:
     """
-    Frontal-plane projection angle (FPPA) from a single frontal camera.
+    Knee tracking from a single frontal camera, on the same scale as the 3D metric.
 
-    Works entirely in the image plane (x, y), never touching the monocular depth
-    axis — the least reliable coordinate in a single-camera pose. Valgus is the
-    knee's horizontal deviation from the hip-ankle line, normalized by pelvis
-    width, signed positive when the knee moves medially (toward the midline
-    between the feet).
-
-    Pelvis width is the denominator because it is the only stable reference
-    available every frame. The deviation itself is horizontal and does not
-    foreshorten, but every vertical or diagonal reference does: the previous
-    denominator was the live hip-to-ankle span, which collapses on descent and
-    inflated identical knee cave by ~1.4x at parallel and ~1.8x at the bottom
-    (the angle at the knee is worse still, ~2.4x, because both limb segments
-    foreshorten). Pelvis width is frontal, so it holds across depth — and
-    since both terms are in pixels, the ratio is also invariant to how far the
-    athlete stands from the camera.
+    The knee's horizontal deviation from the hip-ankle line is measured in the
+    image plane, normalized by pelvis width (frontal, so it holds across depth
+    and camera distance). That raw frontal-plane projection angle reads normal
+    toe-out as knees-out: a knee tracking over toes turned out 20° sits ~35°
+    "lateral" at the bottom, so a real cave could never cross a positive
+    threshold. The deviation is therefore measured against where the knee
+    would project if it tracked the toes — the knees-over-toes plane, built
+    from the monocular 3D pose. Its expected offset is the knee's forward
+    travel times the sine of the toe-out, a product that barely changes when
+    monocular depth is compressed (shorter forward travel, wider-looking
+    toe-out), so the weak depth axis only sets the expectation, never the
+    measured deviation. The excess medial displacement is converted to femur
+    tilt out of that plane, the triangulated estimator's definition, so one
+    threshold triple serves both capture modes. Once the body is measured, the
+    femur length comes from standing frames, where the thigh is vertical and
+    depth error cannot shorten it.
     """
+
+    def __init__(self) -> None:
+        self._femur_m: float | None = None
+
+    def set_femur_length(self, femur_m: float) -> None:
+        self._femur_m = femur_m
 
     def estimate(
         self,
@@ -135,6 +142,8 @@ class SingleCameraValgusEstimator:
         r_knee, c_rk = _xy(skeleton_2d, CK.RIGHT_KNEE)
         l_ankle, c_la = _xy(skeleton_2d, CK.LEFT_ANKLE)
         r_ankle, c_ra = _xy(skeleton_2d, CK.RIGHT_ANKLE)
+        _, c_lt = _xy(skeleton_2d, CK.LEFT_FOOT_INDEX)
+        _, c_rt = _xy(skeleton_2d, CK.RIGHT_FOOT_INDEX)
 
         if l_ankle is None or r_ankle is None:
             return _MISSING_RESULT
@@ -146,28 +155,40 @@ class SingleCameraValgusEstimator:
             else 0.0
         )
 
-        valgus_l = self._fppa(l_hip, l_knee, l_ankle, midline_x, pelvis_width)
-        valgus_r = self._fppa(r_hip, r_knee, r_ankle, midline_x, pelvis_width)
+        neutral_l = neutral_r = femur_l = femur_r = NAN
+        if skeleton_3d is not None:
+            neutral_l, neutral_r, femur_l, femur_r = _knees_over_toes_offsets(skeleton_3d, self._femur_m)
 
+        valgus_l = self._tracking_deviation(
+            l_hip, l_knee, l_ankle, midline_x, pelvis_width, neutral_l, femur_l,
+        )
+        valgus_r = self._tracking_deviation(
+            r_hip, r_knee, r_ankle, midline_x, pelvis_width, neutral_r, femur_r,
+        )
+
+        # The metric needs the toes, so its confidence does too.
         facing = self._facing_confidence(skeleton_2d, l_hip, r_hip)
-        conf_l = min(c_lh, c_lk, c_la) * facing
-        conf_r = min(c_rh, c_rk, c_ra) * facing
+        conf_l = min(c_lh, c_lk, c_la, c_lt) * facing
+        conf_r = min(c_rh, c_rk, c_ra, c_rt) * facing
 
         kasr = self._kasr_2d(l_knee, r_knee, l_ankle, r_ankle)
 
         return ValgusResult(valgus_l, valgus_r, conf_l, conf_r, kasr)
 
     @staticmethod
-    def _fppa(
+    def _tracking_deviation(
         hip: np.ndarray | None,
         knee: np.ndarray | None,
         ankle: np.ndarray | None,
         midline_x: float,
         pelvis_width: float,
+        neutral_offset: float,
+        femur_in_pelvis_widths: float,
     ) -> float:
         if hip is None or knee is None or ankle is None:
             return NAN
-
+        if not (np.isfinite(neutral_offset) and np.isfinite(femur_in_pelvis_widths)):
+            return NAN
         if abs(ankle[1] - hip[1]) < _MIN_LEG_SPAN_PX:
             return NAN
         if pelvis_width < _MIN_PELVIS_WIDTH_PX:
@@ -183,9 +204,10 @@ class SingleCameraValgusEstimator:
 
         # Medial direction for this leg: toward the midline between the feet.
         medial_dir = 1.0 if midline_x >= ankle[0] else -1.0
-        signed_deviation = deviation_x * medial_dir
+        observed = deviation_x * medial_dir / pelvis_width
 
-        return float(np.degrees(np.arctan2(signed_deviation, pelvis_width)))
+        excess = (observed - neutral_offset) / femur_in_pelvis_widths
+        return float(np.degrees(np.arcsin(np.clip(excess, -1.0, 1.0))))
 
     @staticmethod
     def _kasr_2d(
@@ -360,6 +382,59 @@ class TriangulatedValgusEstimator:
         if ankle_sep < _MIN_ANKLE_SEP_M:
             return NAN
         return knee_sep / ankle_sep
+
+
+def _knees_over_toes_offsets(
+    skeleton_3d: Skeleton3D, femur_m: float | None = None,
+) -> tuple[float, float, float, float]:
+    """Medial knee offset from the hip-ankle line if each knee tracked its toes,
+    and each femur's length, all in pelvis widths (horizontal hip separation).
+    A measured ``femur_m`` replaces the per-frame thigh length.
+
+    Returns (neutral_l, neutral_r, femur_l, femur_r); NaN where unmeasurable.
+    """
+    l_hip, _ = _xyz(skeleton_3d, CK.LEFT_HIP)
+    r_hip, _ = _xyz(skeleton_3d, CK.RIGHT_HIP)
+    l_ankle, _ = _xyz(skeleton_3d, CK.LEFT_ANKLE)
+    r_ankle, _ = _xyz(skeleton_3d, CK.RIGHT_ANKLE)
+    if l_hip is None or r_hip is None or l_ankle is None or r_ankle is None:
+        return NAN, NAN, NAN, NAN
+    pelvis_width = abs(float(l_hip[0] - r_hip[0]))
+    if pelvis_width < _MIN_SEGMENT_M:
+        return NAN, NAN, NAN, NAN
+    midline_x = (l_ankle[0] + r_ankle[0]) / 2.0
+
+    def _side(hip: np.ndarray, knee_index: int, ankle: np.ndarray, toe_index: int) -> tuple[float, float]:
+        knee, _ = _xyz(skeleton_3d, knee_index)
+        toe, _ = _xyz(skeleton_3d, toe_index)
+        if knee is None or toe is None:
+            return NAN, NAN
+        leg_line = ankle - hip
+        foot = toe - ankle
+        foot_horizontal = foot - np.dot(foot, WORLD_UP) * WORLD_UP
+        plane_normal = np.cross(leg_line, foot_horizontal)
+        leg_len = float(np.linalg.norm(leg_line))
+        foot_len = float(np.linalg.norm(foot_horizontal))
+        if leg_len < _MIN_SEGMENT_M or foot_len < _MIN_FOOT_M:
+            return NAN, NAN
+        if float(np.linalg.norm(plane_normal)) < _MIN_PLANE_SINE * leg_len * foot_len:
+            return NAN, NAN
+        plane_normal = normalize_vector(plane_normal)
+        tracked_knee = knee - np.dot(knee - hip, plane_normal) * plane_normal
+
+        span_y = ankle[1] - hip[1]
+        if abs(span_y) < 1e-6:
+            return NAN, NAN
+        t = np.clip((tracked_knee[1] - hip[1]) / span_y, 0.0, 1.0)
+        line_x = hip[0] + t * (ankle[0] - hip[0])
+        medial_dir = 1.0 if midline_x >= ankle[0] else -1.0
+        neutral = float(tracked_knee[0] - line_x) * medial_dir / pelvis_width
+        femur = (femur_m if femur_m else float(np.linalg.norm(knee - hip))) / pelvis_width
+        return neutral, femur
+
+    neutral_l, femur_l = _side(l_hip, CK.LEFT_KNEE, l_ankle, CK.LEFT_FOOT_INDEX)
+    neutral_r, femur_r = _side(r_hip, CK.RIGHT_KNEE, r_ankle, CK.RIGHT_FOOT_INDEX)
+    return neutral_l, neutral_r, femur_l, femur_r
 
 
 def build_valgus_estimator(multi_camera: bool) -> ValgusEstimator:

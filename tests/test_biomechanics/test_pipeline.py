@@ -389,6 +389,9 @@ def _build_multi_camera_pipeline(monkeypatch) -> tuple:
     pipe = pipeline_module.BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
     provider = _FakeProvider(clock)
     pipe._multi_camera_provider = provider
+    # The synthetic squat bottoms ~4 cm above parallel, just past the default
+    # target; count every descent here. TestDepthTargetGate covers the gate.
+    pipe.set_depth_target(None)
     return pipe, provider, clock
 
 
@@ -425,9 +428,17 @@ def _reps(count: int) -> list[float]:
     return depths
 
 
-def _forward_lean_thresholds(pipe) -> tuple[float, float, float]:
-    rule = pipe._rule_engine.get_rule(FaultType.FORWARD_LEAN)
-    return (rule.mild_threshold, rule.moderate_threshold, rule.severe_threshold)
+def _squat_thresholds(pipe) -> dict:
+    """Every threshold attribute of every squat rule, keyed by rule and attribute."""
+    snapshot = {}
+    for rule in pipe._rule_engine.rules:
+        for name, value in vars(rule).items():
+            if isinstance(value, float) and not name.startswith("_last"):
+                snapshot[(rule.fault_type.value, name)] = value
+            elif isinstance(value, dict):
+                for key, tier_value in value.items():
+                    snapshot[(rule.fault_type.value, name, key)] = tier_value
+    return snapshot
 
 
 class TestMultiCameraPipeline:
@@ -499,20 +510,19 @@ class TestMultiCameraPipeline:
         }
         assert 2 in valgus_reps
 
-    def test_thresholds_survive_repeated_resets(self, monkeypatch):
-        """W3 regression: proportion scaling used to compound on every per-set reset."""
+    def test_observed_reps_never_move_a_threshold(self, monkeypatch):
+        """A2 regression: calibration once turned each athlete's faults into their
+        normal (a caved first rep raised the valgus bar). Thresholds are absolute."""
         pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        before = _squat_thresholds(pipe)
         pipe.apply_athlete_params(ATHLETE_PARAMS)
-        # The profile's one-time baseline calibration adjusts thresholds after
-        # the first clean rep; snapshot once that has settled.
-        _run_frames(pipe, provider, clock, _reps(1))
-        settled = _forward_lean_thresholds(pipe)
+        _run_frames(pipe, provider, clock, _reps(1), valgus_m=VALGUS_SHIFT_M)
 
         for _ in range(RESET_REPEATS):
             pipe.reset_readiness_gate()
-            _run_frames(pipe, provider, clock, _reps(1))
+            _run_frames(pipe, provider, clock, _reps(1), valgus_m=VALGUS_SHIFT_M)
 
-        assert _forward_lean_thresholds(pipe) == pytest.approx(settled)
+        assert _squat_thresholds(pipe) == pytest.approx(before)
         assert provider.temporal_resets == RESET_REPEATS
 
     def test_body_calibration_completes_and_survives_reset(self, monkeypatch):
@@ -532,14 +542,13 @@ class TestMultiCameraPipeline:
 
     def test_apply_athlete_params_round_trip(self, monkeypatch):
         pipe, _, _ = _build_multi_camera_pipeline(monkeypatch)
-        base = _forward_lean_thresholds(pipe)
 
         pipe.apply_athlete_params(ATHLETE_PARAMS)
 
         assert pipe.body_calibration.is_complete
         assert pipe.body_calibration.to_athlete_params() == pytest.approx(ATHLETE_PARAMS)
-        # Long femurs relative to torso: forward-lean thresholds moved (more lean allowed).
-        assert _forward_lean_thresholds(pipe) != pytest.approx(base)
+        # The measured femur now normalizes depth.
+        assert pipe._femur_length_m() == pytest.approx(ATHLETE_PARAMS["femur_avg_m"])
 
     def test_dropout_is_predicted_then_dropped(self, monkeypatch):
         pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
@@ -655,34 +664,30 @@ class TestMissingKeypointsDoNotFakeMotion:
         assert len(evaluated_on) == 1
 
 
-INJECTED_ASYMMETRY_DEG = 12.0
-ASYMMETRY_INJECT_MIN_KNEE_DEG = 20.0
-
-
 class TestPerRepVerdicts:
-    def test_asymmetry_fault_lands_on_the_completed_rep(self, monkeypatch):
-        from biomechanics.faults.fault_types import FaultType
-
+    def test_rep_fault_lands_on_the_completed_rep(self, monkeypatch):
+        """Whole-rep verdicts belong to the rep that produced them, in both the
+        rep's fault list and the frame that completes it."""
         pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
-        _run_frames(pipe, provider, clock, [0.0] * READINESS_WARM_UP_FRAMES)
-
-        # Inject a constant left-right knee difference at the IK output while squatting.
-        real_solve = pipe._ik_solver.solve
-
-        def _asymmetric_solve(skeleton):
-            angles = real_solve(skeleton)
-            if angles.knee_flexion_l > ASYMMETRY_INJECT_MIN_KNEE_DEG:
-                angles.knee_flexion_r = angles.knee_flexion_l - INJECTED_ASYMMETRY_DEG
-            return angles
-
-        monkeypatch.setattr(pipe._ik_solver, "solve", _asymmetric_solve)
-        rep_results = _run_frames(pipe, provider, clock, squat_depth_profile())
+        rep_results = _run_frames(pipe, provider, clock, _reps(1), valgus_m=VALGUS_SHIFT_M)
         completed = [result for result in rep_results if result.rep_data is not None]
         assert len(completed) == 1
-        rep_faults = {fault.fault_type for fault in completed[0].rep_data.faults}
-        frame_faults = {fault.fault_type for fault in completed[0].faults}
-        assert FaultType.BILATERAL_ASYMMETRY in rep_faults
-        assert FaultType.BILATERAL_ASYMMETRY in frame_faults
+        rep_data = completed[0].rep_data
+        knee_faults = [fault for fault in rep_data.faults if fault.fault_type == FaultType.KNEE_VALGUS]
+        assert knee_faults
+        assert knee_faults[0].rep_number == rep_data.rep_number
+        assert FaultType.KNEE_VALGUS in {fault.fault_type for fault in completed[0].faults}
+
+    def test_completed_rep_carries_its_features(self, monkeypatch):
+        """The same numbers the rules judged travel on the rep to the diagnosis."""
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        rep_results = _run_frames(pipe, provider, clock, _reps(1))
+        rep_data = next(result.rep_data for result in rep_results if result.rep_data is not None)
+        features = rep_data.features
+        assert features["rep_number"] == rep_data.rep_number
+        assert math.isfinite(features["depth_ratio"])
+        assert features["depth_ratio"] < SHALLOW_SYNTHETIC_DEPTH_RATIO_CEILING
+        assert math.isfinite(features["concentric_velocity_mps"])
 
     def test_set_reset_clears_per_rep_rule_state(self, monkeypatch):
         pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
@@ -691,9 +696,51 @@ class TestPerRepVerdicts:
         for depth in squat_depth_profile()[: len(squat_depth_profile()) // 2]:
             _step(pipe, provider, clock, world_squat_points(max(depth, MIN_DEPTH_RATIO)))
         pipe.reset_readiness_gate()
-        symmetry_rule = pipe._rule_engine.get_rule(FaultType.BILATERAL_ASYMMETRY)
-        assert symmetry_rule._rep_depths == []
-        assert not symmetry_rule._was_in_rep
+        bar_rule = pipe._rule_engine.get_rule(FaultType.BILATERAL_ASYMMETRY)
+        assert bar_rule._samples == 0
+        assert not bar_rule._in_rep_prev
+        assert len(pipe._rep_trajectory) == 0
+        assert pipe._rep_setup is None
+
+
+# The synthetic squat's thigh stops 5° above horizontal: a depth ratio of
+# sin(5°) ≈ 0.087, just past the default target's 0.08 tolerance.
+SHALLOW_SYNTHETIC_DEPTH_RATIO_CEILING = 0.15
+LENIENT_DEPTH_TARGET = 0.10
+
+
+class TestDepthTargetGate:
+    def test_rep_short_of_the_target_is_not_counted_and_says_why(self, monkeypatch):
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        pipe.set_depth_target(0.0)
+        results = _run_frames(pipe, provider, clock, _reps(1))
+
+        assert all(result.rep_data is None for result in results)
+        shallow = [result for result in results if result.shallow_rep_class is not None]
+        assert len(shallow) == 1
+        depth_faults = [fault for fault in shallow[0].faults if fault.fault_type == FaultType.DEPTH]
+        assert depth_faults and depth_faults[0].details["shallow_rep"] is True
+        assert pipe.rep_count == 0
+
+    def test_rep_within_the_athletes_target_counts(self, monkeypatch):
+        """A target above parallel (limited range) accepts the same rep."""
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        pipe.set_depth_target(LENIENT_DEPTH_TARGET)
+        results = _run_frames(pipe, provider, clock, _reps(2))
+
+        reps = [result.rep_data for result in results if result.rep_data is not None]
+        assert [rep.rep_number for rep in reps] == [1, 2]
+        assert all(rep.depth_target_met for rep in reps)
+
+    def test_uncalibrated_squat_starts_with_a_lenient_target(self, monkeypatch):
+        """Refusing reps of an athlete not yet measured is worse than counting a high one."""
+        from biomechanics import pipeline as pipeline_module
+
+        monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
+        pipe = pipeline_module.BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
+        depth = BiomechanicsConfig().faults.depth
+        assert pipe._rule_engine.depth_target_ratio == depth.uncalibrated_target_ratio
+        assert depth.uncalibrated_target_ratio > depth.default_target_ratio
 
 
 class TestTwoCameraRigs:
@@ -822,3 +869,57 @@ class TestCameraCalibrationWiring:
 
         assert isinstance(pipe._barbell_detector, _FakeBarbellDetector)
         assert received["bar_detector"] is pipe._barbell_detector
+
+
+class _RecordingIPCClient:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    def send_message(self, message: dict) -> None:
+        self.messages.append(message)
+
+
+class TestPipelineToDiagnosis:
+    def test_live_reps_reach_the_set_diagnosis(self, monkeypatch):
+        """Pipeline output must survive the session tracker into a diagnosis.
+
+        The tracker once crashed on every rep (inside a try/except) because
+        the pipeline's trajectory samples changed type — no set was ever
+        diagnosed, and no unit test drove real pipeline output through it.
+        """
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.coaching.session_tracker import SessionTracker
+        from biomechanics.config import IPCConfig
+
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        client = _RecordingIPCClient()
+        tracker = SessionTracker(IPCBridge(client, ipc_config=IPCConfig()))
+        tracker.set_athlete_params(ATHLETE_PARAMS, {})
+
+        # Consume on the frame that completes each rep, as pipeline_process does.
+        for depth in _reps(3):
+            result = _step(
+                pipe, provider, clock,
+                world_squat_points(max(depth, MIN_DEPTH_RATIO), valgus_m=VALGUS_SHIFT_M),
+            )
+            if result.rep_data is None:
+                continue
+            bottom_kpts, bottom_angles = pipe.consume_bottom_frame()
+            tracker.on_rep_complete(
+                result.rep_data,
+                bottom_kpts=bottom_kpts,
+                bottom_angles=bottom_angles,
+                standing_kpts=pipe.consume_standing_frame(),
+                trajectory_samples=pipe.consume_rep_trajectory(),
+            )
+
+        assert len(tracker._rep_kinematic_buffer) == 3
+        assert all(trajectory is not None for trajectory in tracker._rep_trajectory_buffer)
+        tracker._end_current_set()
+
+        diagnoses = [message for message in client.messages if message["type"] == "diagnosis_complete"]
+        assert len(diagnoses) == 1
+        symptoms = {symptom["symptom_id"] for symptom in diagnoses[0]["diagnosis"]["detected_symptoms"]}
+        assert "knee_not_tracking_toes" in symptoms
+        rep_messages = [message for message in client.messages if message["type"] == "rep_complete"]
+        assert all(message["features"]["rep_number"] == message["rep_number"] for message in rep_messages)
