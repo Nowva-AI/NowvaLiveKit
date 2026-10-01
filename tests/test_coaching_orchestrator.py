@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from agent.services.coaching_orchestrator import (
+    UNOBSERVABLE_FAULTS_LINE,
     CoachingEvent,
     CoachingOrchestrator,
     CuePriority,
@@ -758,7 +759,7 @@ def _mock_scoring() -> dict:
             "trunk_control": 0.60,
             "knee_tracking": 0.75,
             "symmetry": 0.90,
-            "ankle": 0.50,
+            "tempo": 0.50,
         },
         "best_rep": 2,
         "worst_rep": 1,
@@ -1000,3 +1001,267 @@ class TestAthleteState:
         instructions = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
         assert "ATHLETE STATE" in instructions
         assert "No humor" in instructions
+
+
+# =============================================================================
+# TEST SET RECAP WAITS FOR ITS OWN DIAGNOSIS
+# =============================================================================
+
+
+def _recap_prompts(callbacks: dict) -> list[str]:
+    return [call[0][0] for call in callbacks["generate_llm_reply_fn"].call_args_list]
+
+
+class TestRecapWaitsForItsDiagnosis:
+    """The pipeline diagnoses a set only after rest_start reaches it, which is
+    after the recap is queued. The recap must wait for that set's diagnosis."""
+
+    def test_diagnosis_arriving_after_the_recap_is_queued_reaches_the_recap(self):
+        cbs = _make_callbacks()
+        orch = CoachingOrchestrator(**cbs, advance_set_fn=AsyncMock(return_value=2))
+        orch.reset_set(target_reps=2, total_sets=3)
+
+        async def _run():
+            orch.start()
+            try:
+                await orch.on_rep_complete(1, "parallel", True, [], set_number=1)
+                await orch.on_rep_complete(2, "parallel", True, [], set_number=1)
+                # Recap is queued; the diagnosis lands a moment later
+                await asyncio.sleep(0.2)
+                orch.set_diagnosis_data(_mock_diagnosis(), _mock_scoring(), set_number=1)
+                await asyncio.sleep(0.3)
+            finally:
+                orch.stop()
+
+        asyncio.run(_run())
+        prompts = _recap_prompts(cbs)
+        assert len(prompts) == 1
+        assert "FORM SCORE: 72 out of 100" in prompts[0]
+
+    def test_previous_sets_late_diagnosis_is_not_used(self):
+        cbs = _make_callbacks()
+        orch = CoachingOrchestrator(**cbs)
+        orch._diagnosis_wait_s = 0.1
+        orch.set_diagnosis_data(_mock_diagnosis(), _mock_scoring(), set_number=1)
+        data = {
+            "set_number": 2, "diagnosis_set_number": 2, "total_reps": 5, "clean_reps": 4,
+            "fault_summary": {}, "per_rep": [],
+        }
+        asyncio.run(orch._speak_llm_set_recap(data))
+        prompt = _recap_prompts(cbs)[0]
+        assert "FORM SCORE" not in prompt
+        assert orch._pending_diagnosis is None
+
+    def test_recap_goes_ahead_without_diagnosis_after_the_wait(self):
+        cbs = _make_callbacks()
+        orch = CoachingOrchestrator(**cbs)
+        orch._diagnosis_wait_s = 0.05
+        data = {
+            "set_number": 1, "diagnosis_set_number": 1, "total_reps": 5, "clean_reps": 4,
+            "fault_summary": {}, "per_rep": [],
+        }
+        started = time.monotonic()
+        asyncio.run(orch._speak_llm_set_recap(data))
+        assert time.monotonic() - started < 1.0
+        prompt = _recap_prompts(cbs)[0]
+        assert "just finished a set" in prompt
+        assert "FORM SCORE" not in prompt
+
+    def test_exercise_recap_waits_for_the_final_sets_diagnosis(self):
+        cbs = _make_callbacks()
+        orch = CoachingOrchestrator(**cbs, advance_set_fn=AsyncMock(return_value=None))
+        orch.reset_set(target_reps=1, total_sets=1)
+
+        async def _run():
+            orch.start()
+            try:
+                await orch.on_rep_complete(1, "parallel", True, [], set_number=1)
+                await asyncio.sleep(0.2)
+                orch.set_diagnosis_data(_mock_diagnosis(), _mock_scoring(), set_number=1)
+                await asyncio.sleep(0.3)
+            finally:
+                orch.stop()
+
+        asyncio.run(_run())
+        prompts = _recap_prompts(cbs)
+        assert len(prompts) == 1
+        assert "Form score progression: Set 1: 72 out of 100" in prompts[0]
+
+    def test_set_summary_carries_the_pipeline_set_number(self, orchestrator):
+        asyncio.run(orchestrator.on_rep_complete(1, "parallel", True, [], set_number=4))
+        assert orchestrator._build_set_summary()["diagnosis_set_number"] == 4
+
+    def test_set_summary_falls_back_to_the_agent_set_count(self, orchestrator):
+        orchestrator._set_number = 2
+        asyncio.run(orchestrator.on_rep_complete(1, "parallel", True, []))
+        assert orchestrator._build_set_summary()["diagnosis_set_number"] == 2
+
+
+class TestSetEndedEarly:
+    def test_verbally_ended_set_counts_toward_the_last_set(self):
+        """Without counting it, the real last set ran a set recap instead of
+        the exercise recap and the workout never completed."""
+        cbs = _make_callbacks()
+        orch = CoachingOrchestrator(**cbs, advance_set_fn=AsyncMock(return_value=None))
+        orch.reset_set(target_reps=1, total_sets=2)
+        orch.mark_set_ended_early()
+
+        async def _run():
+            await orch.on_rep_complete(1, "parallel", True, [])
+            events = []
+            while not orch._queue.empty():
+                events.append(orch._queue.get_nowait())
+            return events
+
+        events = asyncio.run(_run())
+        assert [e.event_type for e in events] == ["llm_exercise_recap"]
+
+
+# =============================================================================
+# TEST DIAGNOSIS CONTEXT FOR THE RECAP
+# =============================================================================
+
+
+def _diagnosis_with(**overrides) -> dict:
+    diagnosis = _mock_diagnosis()
+    diagnosis.update(overrides)
+    return diagnosis
+
+
+class TestDiagnosisContext:
+    def test_dimensions_include_tempo_and_not_ankle(self, orchestrator):
+        scoring = _mock_scoring()
+        scoring["per_dimension"]["ankle"] = 0.4
+        score_line = orchestrator._build_diagnosis_context(_mock_diagnosis(), scoring)[0]
+        assert "tempo: 50" in score_line
+        assert "ankle" not in score_line
+
+    def test_longterm_cause_is_voiced_once_per_session(self, orchestrator):
+        longterm = [{
+            "cause_id": "ankle_mobility", "tier": 3, "score": 0.6,
+            "explanation": "Ankle mobility work will open up your depth",
+            "observability": "observable",
+        }]
+        first = " ".join(orchestrator._build_diagnosis_context(
+            _diagnosis_with(longterm_causes=longterm), _mock_scoring()))
+        second = " ".join(orchestrator._build_diagnosis_context(
+            _diagnosis_with(longterm_causes=longterm), _mock_scoring()))
+        assert "LONG-TERM" in first and "Ankle mobility work" in first
+        assert "LONG-TERM" not in second
+
+    def test_contextual_note_is_voiced_once_per_session(self, orchestrator):
+        notes = [{
+            "cause_id": "long_femurs", "tier": 0, "score": 0.5,
+            "explanation": "Longer thighs mean more forward lean is normal for you",
+            "observability": "observable",
+        }]
+        first = " ".join(orchestrator._build_diagnosis_context(
+            _diagnosis_with(contextual_notes=notes), _mock_scoring()))
+        second = " ".join(orchestrator._build_diagnosis_context(
+            _diagnosis_with(contextual_notes=notes), _mock_scoring()))
+        assert "ANATOMY NOTE" in first and "Longer thighs" in first
+        assert "ANATOMY NOTE" not in second
+
+    def test_hedges_when_the_top_cause_is_approximate(self, orchestrator):
+        diagnosis = _mock_diagnosis()
+        diagnosis["immediate_causes"][0]["observability"] = "approximate"
+        text = " ".join(orchestrator._build_diagnosis_context(diagnosis, _mock_scoring()))
+        assert "hedge" in text
+
+    def test_hedges_when_measurement_confidence_is_low(self, orchestrator):
+        text = " ".join(orchestrator._build_diagnosis_context(
+            _diagnosis_with(confidence=0.3), _mock_scoring()))
+        assert "hedge" in text
+
+    def test_no_hedge_when_confident_and_observable(self, orchestrator):
+        text = " ".join(orchestrator._build_diagnosis_context(_mock_diagnosis(), _mock_scoring()))
+        assert "hedge" not in text
+
+    def test_never_claims_faults_the_cameras_cannot_see(self, orchestrator):
+        parts = orchestrator._build_diagnosis_context(_mock_diagnosis(), _mock_scoring())
+        assert UNOBSERVABLE_FAULTS_LINE in parts
+        assert "butt wink" in UNOBSERVABLE_FAULTS_LINE
+
+    def test_top_cause_id_outlives_the_recap(self, orchestrator):
+        orchestrator.set_diagnosis_data(_mock_diagnosis(), _mock_scoring())
+        orchestrator._consume_diagnosis()
+        assert orchestrator.top_cause_id == "stance_narrow"
+
+
+class TestApproximateFaultsInRecap:
+    def test_recap_marks_approximate_faults_for_hedging(self, mock_callbacks):
+        orch = CoachingOrchestrator(**mock_callbacks)
+        asyncio.run(orch.on_fault(None, "hip_shoot", "moderate", observability="approximate"))
+        data = {
+            "set_number": 1, "total_reps": 5, "clean_reps": 3, "per_rep": [],
+            "fault_summary": {
+                "hip_shoot": {"count": 2, "pct": 40},
+                "knee_valgus": {"count": 1, "pct": 20},
+            },
+        }
+        asyncio.run(orch._speak_llm_set_recap(data))
+        prompt = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+        assert "hips rising before the chest on 2 of 5 reps (approximate)" in prompt
+        assert "knees caving in on 1 of 5 reps;" in prompt or "knees caving in on 1 of 5 reps." in prompt
+        assert "looked like" in prompt
+
+
+# =============================================================================
+# TEST POSITIVE REINFORCEMENT FROM HIGHLIGHTS
+# =============================================================================
+
+
+def _positive_cues(orch) -> list[str]:
+    cues = []
+    while not orch._queue.empty():
+        event = orch._queue.get_nowait()
+        if event.priority == CuePriority.POSITIVE_CUE:
+            cues.append(event.cue_key)
+    return cues
+
+
+class TestPositiveHighlights:
+    def _orchestrator(self, mock_callbacks, monkeypatch, roll: float) -> CoachingOrchestrator:
+        monkeypatch.setattr("agent.services.coaching_orchestrator.random.random", lambda: roll)
+        orch = CoachingOrchestrator(**mock_callbacks)
+        orch.reset_set(target_reps=12, positive_cue_keys=["strong", "clean", "great_depth"])
+        return orch
+
+    def test_new_best_rep_is_always_praised(self, mock_callbacks, monkeypatch):
+        orch = self._orchestrator(mock_callbacks, monkeypatch, roll=0.99)
+        asyncio.run(orch.on_rep_complete(1, "parallel", True, [], highlights=["best_rep_so_far", "clean"]))
+        assert _positive_cues(orch) == ["strong"]
+
+    def test_ordinary_clean_rep_is_praised_only_occasionally(self, mock_callbacks, monkeypatch):
+        orch = self._orchestrator(mock_callbacks, monkeypatch, roll=0.99)
+        asyncio.run(orch.on_rep_complete(1, "parallel", True, [], highlights=["clean", "depth_target_met"]))
+        assert _positive_cues(orch) == []
+
+    def test_praise_picks_from_the_reps_highlights(self, mock_callbacks, monkeypatch):
+        orch = self._orchestrator(mock_callbacks, monkeypatch, roll=0.0)
+        asyncio.run(orch.on_rep_complete(1, "parallel", True, [], highlights=["depth_target_met"]))
+        assert _positive_cues(orch) == ["great_depth"]
+
+    def test_praise_waits_out_the_rep_gap(self, mock_callbacks, monkeypatch):
+        orch = self._orchestrator(mock_callbacks, monkeypatch, roll=0.0)
+
+        async def _run():
+            praised = []
+            for rep in range(1, 5):
+                await orch.on_rep_complete(rep, "parallel", True, [], highlights=["best_rep_so_far"])
+                praised.append(_positive_cues(orch))
+            return praised
+
+        assert asyncio.run(_run()) == [["strong"], [], [], ["strong"]]
+
+    def test_faulted_rep_is_never_praised(self, mock_callbacks, monkeypatch):
+        orch = self._orchestrator(mock_callbacks, monkeypatch, roll=0.0)
+        asyncio.run(orch.on_rep_complete(
+            1, "parallel", False, ["knee_valgus"], highlights=["best_rep_so_far"]))
+        assert _positive_cues(orch) == []
+
+    def test_highlight_without_cached_cue_is_skipped(self, mock_callbacks, monkeypatch):
+        orch = self._orchestrator(mock_callbacks, monkeypatch, roll=0.0)
+        orch.positive_cue_keys = ["good_rep"]
+        asyncio.run(orch.on_rep_complete(1, "parallel", True, [], highlights=["best_rep_so_far"]))
+        assert _positive_cues(orch) == []

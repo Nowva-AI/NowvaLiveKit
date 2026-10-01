@@ -31,12 +31,15 @@ CHRONIC_MIN_SESSIONS = 3
 # Fault types the pipeline evaluates at or after rep completion. They never
 # appear in a rep's faults_detailed and their rep_number tags the NEXT rep,
 # so next-rep outcome evaluation and rep linking would produce false labels.
+# The squat's once-per-rep verdicts (knee_valgus, hip_shoot, balance,
+# hip_shift, bar-tilt bilateral_asymmetry, ...) are judged when the rep
+# finishes, carry its own number and sit in its faults_detailed, so they are
+# not listed. lockout stays listed for the deadlift's lockout rule.
 END_OF_REP_FAULT_TYPES = frozenset({
     "depth",
     "lockout",
     "range_of_motion",
     "trunk_stability",
-    "bilateral_asymmetry",
 })
 
 Op = tuple[str, dict]

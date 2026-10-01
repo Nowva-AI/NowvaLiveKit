@@ -1,255 +1,180 @@
-"""Tests for AudioCueService — TTS pre-caching for coaching cues."""
+"""Tests for AudioCueService — on-disk cue clips and the runtime TTS fallback."""
 
 import asyncio
 import sys
 import time
+import wave
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import agent.services.audio_cue_service as audio_cue_module
 from agent.services.audio_cue_service import (
-    CACHE_TTL_SECONDS,
     CUE_TEXT_MAP,
+    SAMPLE_RATE,
     AudioCueService,
 )
+from agent.services.coaching_constants import CUE_DISPLAY_LABELS
+from biomechanics.coaching.cue_cache import SQUAT_CUES
 
-# Sample cue dict as sent by biomechanics IPC bridge
+# Sample cue dict as sent by the biomechanics IPC bridge
 SAMPLE_SQUAT_CUES = {
     "knees_out": "knees_out",
+    "knees_out_left": "knees_out_left",
     "chest_up": "chest_up",
     "deeper": "deeper",
-    "heels_down": "heels_down",
     "good_rep": "good_rep",
     "rep_1": "rep_1",
     "rep_2": "rep_2",
-    "rep_3": "rep_3",
 }
+SAMPLE_TTS_KEYS = {key for key in SAMPLE_SQUAT_CUES if not key.startswith("rep_")}
 
 FAKE_PCM = b"\x00\x01" * 1200  # 2400 bytes of fake 16-bit PCM
+JARGON_WORDS = ["valgus", "eccentric", "concentric", "dorsiflexion"]
 
 
-def _make_speech_response(audio_bytes: bytes = FAKE_PCM):
+def _make_speech_response(audio_bytes: bytes = FAKE_PCM) -> MagicMock:
     """Create a mock response for client.audio.speech.create()."""
-    resp = MagicMock()
-    resp.read.return_value = audio_bytes
-    return resp
+    response = MagicMock()
+    response.read.return_value = audio_bytes
+    return response
+
+
+def _write_cue_wav(path: Path, sample_count: int = 2400) -> None:
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(b"\x00\x00" * sample_count)
 
 
 @pytest.fixture
-def service():
-    return AudioCueService()
+def cue_wav_dir(tmp_path, monkeypatch) -> Path:
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir()
+    monkeypatch.setattr(audio_cue_module, "CUES_WAV_DIR", wav_dir)
+    monkeypatch.setattr(audio_cue_module, "REP_SOUND_PATH", tmp_path / "no_rep_sound.wav")
+    return wav_dir
 
 
-# ------------------------------------------------------------------
-# cache_cues
-# ------------------------------------------------------------------
+@pytest.fixture
+def service(cue_wav_dir) -> AudioCueService:
+    return AudioCueService(session=None)
 
-def test_cache_cues_generates_all_known_keys(service):
-    """cache_cues should generate TTS for every key present in CUE_TEXT_MAP."""
-    async def _run():
+
+class TestCacheCuesFallback:
+    def test_generates_tts_for_cues_missing_on_disk(self, service):
         mock_client = AsyncMock()
         mock_client.audio.speech.create = AsyncMock(return_value=_make_speech_response())
         service._client = mock_client
 
-        await service.cache_cues(SAMPLE_SQUAT_CUES)
+        asyncio.run(service.cache_cues(SAMPLE_SQUAT_CUES))
 
-        assert len(service.cache) == len(SAMPLE_SQUAT_CUES)
-        for key in SAMPLE_SQUAT_CUES:
-            assert key in service.cache
-            assert isinstance(service.cache[key], bytes)
-            assert len(service.cache[key]) > 0
+        assert set(service._fallback_cache) == SAMPLE_TTS_KEYS
+        assert all(service.has_cue(key) for key in SAMPLE_TTS_KEYS)
 
-    asyncio.run(_run())
-
-
-def test_cache_cues_skips_unknown_keys(service):
-    """Keys not in CUE_TEXT_MAP should be silently skipped."""
-    async def _run():
+    def test_skips_keys_without_text(self, service):
         mock_client = AsyncMock()
         mock_client.audio.speech.create = AsyncMock(return_value=_make_speech_response())
         service._client = mock_client
 
-        cues = {"knees_out": "knees_out", "unknown_cue": "unknown_cue"}
-        await service.cache_cues(cues)
+        asyncio.run(service.cache_cues({"knees_out": "knees_out", "mystery_cue": "mystery_cue"}))
 
-        assert "knees_out" in service.cache
-        assert "unknown_cue" not in service.cache
+        assert set(service._fallback_cache) == {"knees_out"}
 
-    asyncio.run(_run())
+    def test_skips_cues_already_on_disk(self, cue_wav_dir):
+        _write_cue_wav(cue_wav_dir / "knees_out_0.wav")
+        service = AudioCueService(session=None)
+        mock_client = AsyncMock()
+        mock_client.audio.speech.create = AsyncMock(return_value=_make_speech_response())
+        service._client = mock_client
 
+        asyncio.run(service.cache_cues({"knees_out": "knees_out"}))
 
-def test_cache_cues_concurrent_generation(service):
-    """All cues should be generated concurrently (not sequentially)."""
-    async def _run():
-        call_times = []
+        mock_client.audio.speech.create.assert_not_awaited()
+        assert service.has_cue("knees_out")
 
-        async def fake_create(**kwargs):
-            call_times.append(time.monotonic())
-            await asyncio.sleep(0.05)  # simulate 50ms API call
+    def test_generates_concurrently(self, service):
+        async def _slow_create(**kwargs):
+            await asyncio.sleep(0.05)
             return _make_speech_response()
 
         mock_client = AsyncMock()
-        mock_client.audio.speech.create = fake_create
+        mock_client.audio.speech.create = _slow_create
         service._client = mock_client
 
-        start = time.monotonic()
-        await service.cache_cues(SAMPLE_SQUAT_CUES)
-        elapsed = time.monotonic() - start
+        started = time.monotonic()
+        asyncio.run(service.cache_cues(SAMPLE_SQUAT_CUES))
+        assert time.monotonic() - started < 0.2
 
-        # If sequential, would take 8 * 0.05 = 0.4s. Concurrent should be ~0.05s.
-        assert elapsed < 0.3, f"Cue generation took {elapsed:.2f}s — likely not concurrent"
-
-    asyncio.run(_run())
-
-
-def test_cache_cues_handles_partial_failure(service):
-    """If some TTS calls fail, the rest should still be cached."""
-    async def _run():
+    def test_partial_failure_keeps_the_rest(self, service):
         call_count = 0
 
-        async def flaky_create(**kwargs):
+        async def _flaky_create(**kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count % 3 == 0:
+            if call_count % 2 == 0:
                 raise RuntimeError("Simulated TTS API error")
             return _make_speech_response()
 
         mock_client = AsyncMock()
-        mock_client.audio.speech.create = flaky_create
+        mock_client.audio.speech.create = _flaky_create
         service._client = mock_client
 
-        await service.cache_cues(SAMPLE_SQUAT_CUES)
+        asyncio.run(service.cache_cues(SAMPLE_SQUAT_CUES))
 
-        # Some should succeed even though some failed
-        assert len(service.cache) > 0
-        assert len(service.cache) < len(SAMPLE_SQUAT_CUES)
-
-    asyncio.run(_run())
+        assert 0 < len(service._fallback_cache) < len(SAMPLE_TTS_KEYS)
 
 
-def test_cache_cues_sets_expiry(service):
-    """Cache expiry should be set to ~30 minutes from now."""
-    async def _run():
-        mock_client = AsyncMock()
-        mock_client.audio.speech.create = AsyncMock(return_value=_make_speech_response())
-        service._client = mock_client
+class TestDiskIndex:
+    def test_side_variant_clips_index_under_their_own_key(self, cue_wav_dir):
+        _write_cue_wav(cue_wav_dir / "knees_out_0.wav")
+        _write_cue_wav(cue_wav_dir / "knees_out_left_0.wav")
+        _write_cue_wav(cue_wav_dir / "knees_out_left_1.wav")
+        service = AudioCueService(session=None)
 
-        before = time.monotonic()
-        await service.cache_cues(SAMPLE_SQUAT_CUES)
-        after = time.monotonic()
+        assert len(service._memory_cache["knees_out"]) == 1
+        assert len(service._memory_cache["knees_out_left"]) == 2
+        assert not service.has_cue("knees_out_right")
 
-        assert service.cache_expiry >= before + CACHE_TTL_SECONDS
-        assert service.cache_expiry <= after + CACHE_TTL_SECONDS
+    def test_files_without_a_variant_number_are_ignored(self, cue_wav_dir):
+        _write_cue_wav(cue_wav_dir / "review.wav")
+        _write_cue_wav(cue_wav_dir / "knees_out_final.wav")
+        service = AudioCueService(session=None)
 
-    asyncio.run(_run())
-
-
-# ------------------------------------------------------------------
-# get_cue_audio
-# ------------------------------------------------------------------
-
-def test_get_cue_audio_returns_bytes_for_cached_key(service):
-    """get_cue_audio should return cached bytes for a known key."""
-    service.cache = {"knees_out": FAKE_PCM}
-    service.cache_expiry = time.monotonic() + 600
-
-    result = service.get_cue_audio("knees_out")
-    assert result == FAKE_PCM
+        assert service._disk_cache == {}
+        assert not service.is_cache_valid()
 
 
-def test_get_cue_audio_returns_none_for_missing_key(service):
-    """get_cue_audio should return None for keys not in cache."""
-    service.cache = {"knees_out": FAKE_PCM}
-    service.cache_expiry = time.monotonic() + 600
+class TestCueText:
+    def test_get_cue_text_returns_text_for_known_key(self):
+        assert AudioCueService.get_cue_text("knees_out") == "Knees out!"
+        assert AudioCueService.get_cue_text("rep_5") == "Five!"
+        assert AudioCueService.get_cue_text("good_rep") == "Good rep!"
 
-    assert service.get_cue_audio("nonexistent") is None
+    def test_get_cue_text_returns_none_for_unknown_key(self):
+        assert AudioCueService.get_cue_text("nonexistent") is None
 
+    def test_every_squat_cue_has_text(self):
+        missing = [key for key in SQUAT_CUES if key not in CUE_TEXT_MAP]
+        assert missing == []
 
-def test_get_cue_audio_returns_none_when_expired(service):
-    """get_cue_audio should return None if TTL has expired."""
-    service.cache = {"knees_out": FAKE_PCM}
-    service.cache_expiry = time.monotonic() - 1  # expired
+    def test_every_squat_correction_has_a_report_label(self):
+        missing = [
+            key for key in SQUAT_CUES
+            if not key.startswith("rep_") and key not in CUE_DISPLAY_LABELS
+        ]
+        assert missing == []
 
-    assert service.get_cue_audio("knees_out") is None
+    def test_cue_text_has_no_jargon(self):
+        for key, text in CUE_TEXT_MAP.items():
+            assert not any(word in text.lower() for word in JARGON_WORDS), key
 
-
-def test_get_cue_audio_returns_none_when_empty(service):
-    """get_cue_audio should return None if cache is empty."""
-    assert service.get_cue_audio("knees_out") is None
-
-
-def test_get_cue_audio_retrieval_under_10ms(service):
-    """Cache retrieval should be a fast dict lookup (<10ms)."""
-    service.cache = {f"rep_{i}": FAKE_PCM for i in range(1, 21)}
-    service.cache_expiry = time.monotonic() + 600
-
-    start = time.monotonic()
-    for i in range(1, 21):
-        service.get_cue_audio(f"rep_{i}")
-    elapsed_ms = (time.monotonic() - start) * 1000
-
-    assert elapsed_ms < 10, f"20 cache lookups took {elapsed_ms:.2f}ms"
-
-
-# ------------------------------------------------------------------
-# is_cache_valid
-# ------------------------------------------------------------------
-
-def test_is_cache_valid_true_when_populated_and_fresh(service):
-    service.cache = {"knees_out": FAKE_PCM}
-    service.cache_expiry = time.monotonic() + 600
-    assert service.is_cache_valid() is True
-
-
-def test_is_cache_valid_false_when_empty(service):
-    service.cache_expiry = time.monotonic() + 600
-    assert service.is_cache_valid() is False
-
-
-def test_is_cache_valid_false_when_expired(service):
-    service.cache = {"knees_out": FAKE_PCM}
-    service.cache_expiry = time.monotonic() - 1
-    assert service.is_cache_valid() is False
-
-
-# ------------------------------------------------------------------
-# get_cue_text (static, used by Option C fallback)
-# ------------------------------------------------------------------
-
-def test_get_cue_text_returns_text_for_known_key():
-    assert AudioCueService.get_cue_text("knees_out") == "Knees out!"
-    assert AudioCueService.get_cue_text("rep_5") == "Five!"
-    assert AudioCueService.get_cue_text("good_rep") == "Good rep!"
-
-
-def test_get_cue_text_returns_none_for_unknown_key():
-    assert AudioCueService.get_cue_text("nonexistent") is None
-
-
-# ------------------------------------------------------------------
-# CUE_TEXT_MAP coverage
-# ------------------------------------------------------------------
-
-def test_cue_text_map_covers_all_rep_counts():
-    """CUE_TEXT_MAP should have entries for rep_1 through rep_20."""
-    for i in range(1, 21):
-        assert f"rep_{i}" in CUE_TEXT_MAP
-
-
-def test_cue_text_map_covers_squat_corrections():
-    """CUE_TEXT_MAP should cover all squat correction cue keys."""
-    squat_keys = ["knees_out", "chest_up", "deeper", "heels_down",
-                  "even_it_out", "slow_down", "brace"]
-    for key in squat_keys:
-        assert key in CUE_TEXT_MAP
-
-
-def test_cue_text_map_covers_positive_cues():
-    """CUE_TEXT_MAP should cover all positive reinforcement cue keys."""
-    positive_keys = ["good_rep", "great_depth", "strong", "clean", "perfect"]
-    for key in positive_keys:
-        assert key in CUE_TEXT_MAP
+    def test_dead_cue_keys_have_no_text(self):
+        for key in ("hips_through", "flat_back"):
+            assert key not in CUE_TEXT_MAP
+            assert key not in CUE_DISPLAY_LABELS

@@ -1112,7 +1112,7 @@ class WorkoutAgent(BaseNovaAgent):
                 f"fault names. Keep it to 1-2 sentences."
             )
 
-        cause_id = coaching.get_last_cue_cause_id()
+        cause_id = coaching.get_top_cause_id()
 
         result = await coaching.request_on_demand_demo(cause_id=cause_id)
         if not result or result.get("error") or result.get("status") == "unavailable":

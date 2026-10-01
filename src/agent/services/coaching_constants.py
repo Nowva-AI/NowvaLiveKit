@@ -1,9 +1,10 @@
 """Shared coaching constants: the Nova persona and the cue key registry.
 
-Cue keys are emitted by biomechanics.coaching.cue_cache. CUE_TEXT_MAP holds
-the exact spoken strings that pre-generated TTS audio is cached against —
-do not reword them without regenerating the audio. CUE_DISPLAY_LABELS holds
-the short labels shown in set reports.
+Cue keys are emitted by biomechanics.coaching.cue_cache. The spoken lines for
+the pre-generated cue audio live in src/assets/cue_text/cues.json; CUE_TEXT_MAP
+holds one plain line per key for the on-screen banner and for runtime TTS when
+a cue has no audio on disk. CUE_DISPLAY_LABELS holds the short labels shown in
+set reports.
 """
 
 from __future__ import annotations
@@ -40,21 +41,31 @@ _NUMBER_WORDS = {
 CUE_TEXT_MAP: dict[str, str] = {
     # Squat corrections
     "knees_out": "Knees out!",
+    "knees_out_left": "Left knee out!",
+    "knees_out_right": "Right knee out!",
     "chest_up": "Chest up!",
-    "deeper": "Get deeper!",
     "heels_down": "Heels down!",
+    "heels_down_left": "Left heel down!",
+    "heels_down_right": "Right heel down!",
+    "whole_foot": "Whole foot!",
     "even_it_out": "Even it out!",
-    "slow_down": "Slow down!",
+    "even_it_out_left": "Drifting left, stay centered!",
+    "even_it_out_right": "Drifting right, stay centered!",
+    "level_bar": "Keep the bar level!",
+    "deeper": "Get deeper!",
+    "square_feet": "Square your feet!",
+    "square_feet_left": "Left foot even!",
+    "square_feet_right": "Right foot even!",
+    "lockout": "Stand tall up top!",
+    "slow_down": "Control the way down!",
+    "same_depth": "Match your first rep!",
+    "drive": "Drive up hard!",
     "brace": "Brace your core!",
-    # Deadlift corrections
-    "hips_through": "Hips through!",
-    "flat_back": "Flat back!",
-    "lockout": "Lock it out!",
     # Intra-set stance / toe-out coaching
-    "stance_explain": "That lean's coming from your stance — step your feet out wider.",
+    "stance_explain": "That's coming from your stance — step your feet out wider.",
     "stance_wider": "A little wider.",
     "stance_narrower": "Bring it in a touch.",
-    "toe_out_explain": "That lean's coming from your feet — turn your toes out more.",
+    "toe_out_explain": "That's coming from your feet — turn your toes out more.",
     "toe_out_more": "More toe-out.",
     "toe_out_less": "Ease them back in.",
     "adjust_good": "Right there — hold that.",
@@ -71,15 +82,26 @@ CUE_TEXT_MAP: dict[str, str] = {
 # Cue key → human-readable label for set reports (rep_* labels are built inline)
 CUE_DISPLAY_LABELS: dict[str, str] = {
     "knees_out": "Knees out!",
+    "knees_out_left": "Left knee out!",
+    "knees_out_right": "Right knee out!",
     "chest_up": "Chest up!",
-    "deeper": "Go deeper!",
     "heels_down": "Heels down!",
+    "heels_down_left": "Left heel down!",
+    "heels_down_right": "Right heel down!",
+    "whole_foot": "Whole foot!",
     "even_it_out": "Even it out!",
-    "slow_down": "Slow down!",
+    "even_it_out_left": "Drifting left",
+    "even_it_out_right": "Drifting right",
+    "level_bar": "Level the bar",
+    "deeper": "Go deeper!",
+    "square_feet": "Square feet",
+    "square_feet_left": "Left foot even",
+    "square_feet_right": "Right foot even",
+    "lockout": "Stand tall",
+    "slow_down": "Control the descent",
+    "same_depth": "Same depth",
+    "drive": "Drive up!",
     "brace": "Brace core!",
-    "hips_through": "Hips through!",
-    "flat_back": "Flat back!",
-    "lockout": "Lock it out!",
     "stance_explain": "Stance is the cause",
     "stance_wider": "Wider",
     "stance_narrower": "Narrower",
@@ -96,13 +118,20 @@ CUE_DISPLAY_LABELS: dict[str, str] = {
 
 # Preemptive outcome text: cue_key → (positive_text, negative_text)
 # Positive plays when the fault is fixed on the next rep; negative if it persists.
+# Keyed by base cue key: a side variant (knees_out_left) uses its base entry.
 PREEMPTIVE_TEXT: dict[str, tuple[str, str]] = {
     "knees_out": ("Good, knees are tracking better!", "Still caving in, push those knees out!"),
-    "chest_up": ("Nice, chest is up!", "Still leaning forward, keep that chest up!"),
+    "chest_up": ("Nice, chest and hips came up together!", "Hips are still shooting up first, lead with your chest!"),
     "deeper": ("Great depth that time!", "Still a bit shallow, try to get lower!"),
     "heels_down": ("Heels are planted!", "Heels are still coming up!"),
+    "whole_foot": ("Better, weight's over the whole foot!", "Still drifting off the middle of your foot!"),
     "even_it_out": ("Looking more even!", "Still favoring one side!"),
+    "level_bar": ("Bar's level now!", "Bar's still tipping, push evenly!"),
+    "square_feet": ("Feet look even now!", "Feet are still uneven, square them up!"),
+    "lockout": ("Nice, standing tall!", "Still not all the way up, finish tall!"),
     "slow_down": ("Better tempo!", "Still rushing, slow it down!"),
+    "same_depth": ("Right back to your depth!", "Still a bit higher than your first reps!"),
+    "drive": ("That moved faster!", "Still slowing down, drive hard!"),
     "brace": ("Good brace!", "Don't forget to brace your core!"),
 }
 

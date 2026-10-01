@@ -22,6 +22,7 @@ from agent.services.coaching_constants import (
 from biomechanics.coaching.cue_cache import (
     DEFAULT_FAULT_CUE_PRIORITY,
     PREEMPT_GAP_RATIO_ORCHESTRATOR,
+    base_cue_key,
     can_cue_fault,
     fault_cue_priority,
 )
@@ -39,6 +40,31 @@ RECENT_CUE_CONTEXT_WINDOW_S = 10.0
 
 # Below this diagnosis confidence, the recap prompt asks the LLM to hedge.
 LOW_CONFIDENCE_THRESHOLD = 0.5
+
+# The pipeline diagnoses a set only once rest_start reaches it, after the
+# recap is already queued. The recap waits this long for that diagnosis.
+DIAGNOSIS_WAIT_S = 2.5
+
+# Faults the cameras cannot see. The recap must never claim them.
+UNOBSERVABLE_FAULTS_LINE = (
+    "Never say or imply anything about lower-back tucking (butt wink), upper-back rounding, "
+    "bracing, or foot arch — the cameras can't see those."
+)
+
+# Diagnosis causes that point at the feet: when the latest set's top cause is
+# one of these, the next fault cue arms the stance / toe-out monitor.
+STANCE_CAUSE_IDS = frozenset({"narrow_stance", "stance_toe_mismatch", "narrow_foot_angle"})
+
+# Praise for fault-free reps: never within this many reps of the last praise.
+POSITIVE_CUE_MIN_REP_GAP = 3
+# Chance of praising an ordinary fault-free rep; a new best rep is always praised.
+POSITIVE_CUE_CHANCE = 0.3
+# rep_complete highlight -> praise cue
+HIGHLIGHT_CUE_KEYS = {
+    "best_rep_so_far": "strong",
+    "depth_target_met": "great_depth",
+    "clean": "clean",
+}
 
 # Intra-set stance/toe-out adjustment monitoring (Feature 2).
 # Stance is in shoulder-width multiples; toe-out in degrees of external rotation.
@@ -145,6 +171,9 @@ class CoachingOrchestrator:
         self._last_motivation_rep: int = 0
         self._motivation_interval: int = 3
         self._positive_cue_keys: List[str] = []
+        self._last_positive_rep: Optional[int] = None
+        # Pipeline set number of the latest rep — what diagnosis_complete carries
+        self._pipeline_set_number: Optional[int] = None
 
         # Fault cue rate limiting (orchestrator-level, per cue key)
         self._last_fault_cue_time: float = 0.0
@@ -172,6 +201,16 @@ class CoachingOrchestrator:
         # Diagnosis data — populated by set_diagnosis_data(), consumed by recaps
         self._pending_diagnosis: Optional[Dict[str, Any]] = None
         self._pending_scoring: Optional[Dict[str, Any]] = None
+        self._pending_diagnosis_set_number: Optional[int] = None
+        self._diagnosis_arrived: Optional[asyncio.Event] = None
+        self._diagnosis_wait_s: float = DIAGNOSIS_WAIT_S
+        # Latest diagnosis, kept after the recap consumes it (stance follow-up)
+        self._latest_diagnosis: Optional[Dict[str, Any]] = None
+        # Session-level: long-term causes and anatomy notes are voiced once
+        self._longterm_cause_voiced: bool = False
+        self._contextual_note_voiced: bool = False
+        # Fault types the pipeline flagged approximate; the recap hedges them
+        self._approximate_fault_types: Set[str] = set()
 
         # Latest frame data snapshot — for real-time form queries (Feature 3)
         self._latest_angles: Dict[str, Any] = {}
@@ -248,6 +287,7 @@ class CoachingOrchestrator:
         self._set_shallow_depths = []
         self._recent_faults = []
         self._last_motivation_rep = 0
+        self._last_positive_rep = None
         self._positive_cue_keys = list(positive_cue_keys or [])
         self._last_fault_cue_time = 0.0
         self._last_fault_cue_priority = DEFAULT_FAULT_CUE_PRIORITY
@@ -276,6 +316,11 @@ class CoachingOrchestrator:
         self._resting = False
         logger.info("[ORCHESTRATOR] Rest complete — resuming")
 
+    def mark_set_ended_early(self) -> None:
+        """Count a set the lifter ended verbally, so set numbering and the
+        last-set check stay right for the sets that follow."""
+        self._set_number += 1
+
     # ------------------------------------------------------------------
     # Public state accessors
     # ------------------------------------------------------------------
@@ -296,6 +341,12 @@ class CoachingOrchestrator:
     @property
     def last_cue_context(self) -> Optional[Dict[str, Any]]:
         return self._last_cue_context
+
+    @property
+    def top_cause_id(self) -> Optional[str]:
+        """Top immediate cause of the latest set diagnosis."""
+        immediate = (self._latest_diagnosis or {}).get("immediate_causes") or []
+        return immediate[0].get("cause_id") if immediate else None
 
     @resting.setter
     def resting(self, value: bool) -> None:
@@ -328,12 +379,21 @@ class CoachingOrchestrator:
     def rest_seconds(self, value: int) -> None:
         self._rest_seconds = value
 
-    def set_diagnosis_data(self, diagnosis: Dict[str, Any], scoring: Dict[str, Any]) -> None:
+    def set_diagnosis_data(
+        self,
+        diagnosis: Dict[str, Any],
+        scoring: Dict[str, Any],
+        set_number: Optional[int] = None,
+    ) -> None:
         """Store diagnosis results from the pipeline and signal any waiting recap."""
         self._pending_diagnosis = diagnosis
         self._pending_scoring = scoring
+        self._pending_diagnosis_set_number = set_number
+        self._latest_diagnosis = diagnosis
+        if self._diagnosis_arrived is not None:
+            self._diagnosis_arrived.set()
         logger.info(
-            f"[ORCHESTRATOR] Diagnosis data received: "
+            f"[ORCHESTRATOR] Diagnosis data received: set={set_number} "
             f"confidence={diagnosis.get('confidence', 0):.2f} "
             f"score={scoring.get('mean_score', 0):.3f}"
         )
@@ -372,21 +432,58 @@ class CoachingOrchestrator:
         scoring = self._pending_scoring
         self._pending_diagnosis = None
         self._pending_scoring = None
+        self._pending_diagnosis_set_number = None
         return diagnosis, scoring
+
+    async def _await_set_diagnosis(self, set_number: Optional[int]) -> tuple:
+        """This set's diagnosis, waiting up to _diagnosis_wait_s for it.
+
+        The pipeline diagnoses a set only after rest_start reaches it, which
+        is after the recap is queued; reading straight away gave the recap
+        the previous set's diagnosis, or none. Without a set number to match
+        (older callers), whatever is pending is used as before.
+        """
+        if set_number is None:
+            return self._consume_diagnosis()
+        deadline = time.monotonic() + self._diagnosis_wait_s
+        while True:
+            if self._pending_diagnosis is not None:
+                if self._pending_diagnosis_set_number in (None, set_number):
+                    return self._consume_diagnosis()
+                logger.info(
+                    f"[ORCHESTRATOR] Dropping diagnosis for set "
+                    f"{self._pending_diagnosis_set_number} — recapping set {set_number}"
+                )
+                self._consume_diagnosis()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._diagnosis_arrived = asyncio.Event()
+            try:
+                await asyncio.wait_for(self._diagnosis_arrived.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            finally:
+                self._diagnosis_arrived = None
+        logger.info(
+            f"[ORCHESTRATOR] No diagnosis for set {set_number} within "
+            f"{self._diagnosis_wait_s:.1f}s — recapping without it"
+        )
+        return None, None
 
     # ------------------------------------------------------------------
     # Adjustment monitoring (Feature 2: after-cue coaching loop)
     # ------------------------------------------------------------------
 
     def _maybe_start_adjustment_from_fault(self) -> Optional[str]:
-        """Check stance width and toe-out against targets after a forward lean fault.
+        """Check stance width and toe-out against targets after a fault cue.
 
-        Called intra-set when the chest_up cue fires for a forward_lean fault.
-        Excessive forward lean is often caused by a too-narrow stance or
-        insufficient toe-out — guide the user to fix the root cause between reps.
+        Called intra-set after a fault cue when the latest set diagnosis
+        blames the stance or foot angle — guide the user to fix that root
+        cause between reps.
 
         Returns the cue key explaining what was armed, so the caller can play
-        it — otherwise the lifter hears "chest up" then, with no stated
+        it — otherwise the lifter hears "knees out" then, with no stated
         reason, "a little wider".
         """
         if self._adjustment_utterances >= MAX_ADJUSTMENT_UTTERANCES:
@@ -530,17 +627,24 @@ class CoachingOrchestrator:
         fault_type: str,
         severity: str,
         message: str = "",
+        observability: Optional[str] = None,
     ):
         """Enqueue a fault correction cue (HIGHEST priority)."""
         if self._resting:
+            return
+        # Approximate faults are recorded upstream but never spoken mid-set:
+        # the camera setup can't confirm them.
+        if observability == "approximate":
+            self._approximate_fault_types.add(fault_type)
+            logger.info(f"[ORCHESTRATOR] Approximate fault — no cue (type={fault_type})")
             return
         self._recent_faults.append(fault_type)
         if len(self._recent_faults) > 10:
             self._recent_faults = self._recent_faults[-10:]
 
         # Rate limit fault cues to avoid overwhelming the lifter. A
-        # higher-priority fault may jump the gap — otherwise forward lean,
-        # which fires least often, never gets cued at all.
+        # higher-priority fault may jump the gap — otherwise a rarer but more
+        # important fault is starved by the frequent ones.
         now = time.monotonic()
         priority = fault_cue_priority(fault_type)
         if not can_cue_fault(
@@ -551,6 +655,10 @@ class CoachingOrchestrator:
             preempt_floor_ratio=PREEMPT_GAP_RATIO_ORCHESTRATOR,
         ):
             return
+
+        # A side variant without audio on disk falls back to the base cue.
+        if cue_key and not self._get_cue_audio(cue_key):
+            cue_key = base_cue_key(cue_key)
 
         if cue_key and self._get_cue_audio(cue_key):
             self._last_fault_cue_time = now
@@ -613,11 +721,15 @@ class CoachingOrchestrator:
         max_depth_angle: float = 0.0,
         rep_duration_ms: int = 0,
         ascent_time_s: float = 0.0,
+        highlights: Optional[List[str]] = None,
+        set_number: Optional[int] = None,
     ):
         """Enqueue rep count cue and evaluate motivation trigger."""
         if self._resting:
             return
         self._set_rep_count += 1  # Track relative reps per set (ignores absolute pipeline number)
+        if set_number is not None:
+            self._pipeline_set_number = set_number
 
         # Concentric slowdown vs the fastest rep of the set is the effort signal (velocity-loss proxy)
         ascent_ratio = None
@@ -723,16 +835,16 @@ class CoachingOrchestrator:
             return  # Set complete — skip motivation/positive cues
 
         # Positive reinforcement for clean reps
-        if is_clean and self._positive_cue_keys and random.random() < 0.3:
-            positive_key = random.choice(self._positive_cue_keys)
-            if self._get_cue_audio(positive_key):
-                await self._queue.put(CoachingEvent(
-                    priority=CuePriority.POSITIVE_CUE,
-                    timestamp=time.monotonic(),
-                    event_type="cached_cue",
-                    cue_key=positive_key,
-                ))
-                logger.info(f"[ORCHESTRATOR] ⬆ Enqueued POSITIVE cue: {positive_key}")
+        positive_key = self._choose_positive_cue(is_clean, highlights)
+        if positive_key and self._get_cue_audio(positive_key):
+            self._last_positive_rep = self._set_rep_count
+            await self._queue.put(CoachingEvent(
+                priority=CuePriority.POSITIVE_CUE,
+                timestamp=time.monotonic(),
+                event_type="cached_cue",
+                cue_key=positive_key,
+            ))
+            logger.info(f"[ORCHESTRATOR] ⬆ Enqueued POSITIVE cue: {positive_key}")
 
         # Evaluate LLM motivation at "top of rep" (uses per-set rep number)
         if self._should_trigger_motivation(self._set_rep_count):
@@ -745,6 +857,33 @@ class CoachingOrchestrator:
             ))
             self._last_motivation_rep = self._set_rep_count
             logger.info(f"[ORCHESTRATOR] Enqueued motivation at rep {self._set_rep_count}")
+
+    def _choose_positive_cue(
+        self, is_clean: bool, highlights: Optional[List[str]],
+    ) -> Optional[str]:
+        """Praise for a fault-free rep: always on a new best rep, otherwise
+        occasionally, and never within POSITIVE_CUE_MIN_REP_GAP reps of the
+        last praise. Without highlights (older pipeline) any positive cue fits."""
+        if not is_clean or not self._positive_cue_keys:
+            return None
+        if (
+            self._last_positive_rep is not None
+            and self._set_rep_count - self._last_positive_rep < POSITIVE_CUE_MIN_REP_GAP
+        ):
+            return None
+        if highlights is None:
+            candidates = list(self._positive_cue_keys)
+        else:
+            candidates = [
+                HIGHLIGHT_CUE_KEYS[highlight] for highlight in highlights
+                if HIGHLIGHT_CUE_KEYS.get(highlight) in self._positive_cue_keys
+            ]
+            best_key = HIGHLIGHT_CUE_KEYS["best_rep_so_far"]
+            if "best_rep_so_far" in highlights and best_key in candidates:
+                return best_key
+        if not candidates or random.random() >= POSITIVE_CUE_CHANCE:
+            return None
+        return random.choice(candidates)
 
     async def on_set_complete(self, set_data: dict):
         """Enqueue LLM set recap.
@@ -798,6 +937,7 @@ class CoachingOrchestrator:
             data={
                 "all_set_summaries": list(self._all_set_summaries),
                 "total_sets": self._total_sets,
+                "diagnosis_set_number": final_set_data.get("diagnosis_set_number"),
             },
         ))
         logger.info("[ORCHESTRATOR] Last set complete — queued exercise recap")
@@ -833,6 +973,12 @@ class CoachingOrchestrator:
 
         return {
             "set_number": self._set_number,
+            # The pipeline's number for this set, matched against diagnosis_complete
+            "diagnosis_set_number": (
+                self._pipeline_set_number
+                if self._pipeline_set_number is not None
+                else self._set_number
+            ),
             "total_reps": self._set_rep_count,
             "clean_reps": self._set_clean_count,
             "shallow_reps": self._set_shallow_count,
@@ -994,15 +1140,21 @@ class CoachingOrchestrator:
             if self._resting or (self._set_number, self._set_start_wall_time) != set_token:
                 logger.info("[ORCHESTRATOR] Set ended during cue — no follow-up armed")
                 return
-            # After a forward lean cue, check if stance/toe-out needs fixing
-            if fault_type == "forward_lean":
+            # When the latest diagnosis blames the feet, follow the cue with
+            # the stance / toe-out check
+            if (
+                fault_type
+                and not self._adjustment_active
+                and self.top_cause_id in STANCE_CAUSE_IDS
+            ):
                 explain_key = self._maybe_start_adjustment_from_fault()
                 if explain_key and self._get_cue_audio(explain_key):
                     await self._play_cached(explain_key)
             # Pre-generate positive/negative audio for next-rep outcome
             from agent.services.coaching_constants import PREEMPTIVE_TEXT
-            if fault_type and self._generate_tts_fn and event.cue_key in PREEMPTIVE_TEXT:
-                positive_text, negative_text = PREEMPTIVE_TEXT[event.cue_key]
+            preemptive_key = base_cue_key(event.cue_key or "")
+            if fault_type and self._generate_tts_fn and preemptive_key in PREEMPTIVE_TEXT:
+                positive_text, negative_text = PREEMPTIVE_TEXT[preemptive_key]
                 self._pending_outcome = PendingCueOutcome(
                     fault_type=fault_type,
                     cue_key=event.cue_key,
@@ -1218,7 +1370,7 @@ class CoachingOrchestrator:
 
     async def _speak_llm_set_recap(self, data: dict):
         """Generate and speak comprehensive LLM set recap."""
-        diagnosis, scoring = self._consume_diagnosis()
+        diagnosis, scoring = await self._await_set_diagnosis(data.get("diagnosis_set_number"))
 
         set_num = data.get("set_number", 0)
         total_reps = data.get("total_reps", 0)
@@ -1258,8 +1410,14 @@ class CoachingOrchestrator:
             fault_lines = []
             for fault_type, stats in fault_summary.items():
                 count = stats.get("count", 0)
-                fault_lines.append(f"{fault_label(fault_type)} on {count} of {total_reps} reps")
+                approximate = " (approximate)" if fault_type in self._approximate_fault_types else ""
+                fault_lines.append(f"{fault_label(fault_type)} on {count} of {total_reps} reps{approximate}")
             parts.append(f"Faults: {'; '.join(fault_lines)}.")
+            if any(fault_type in self._approximate_fault_types for fault_type in fault_summary):
+                parts.append(
+                    "Faults marked approximate are hard to judge from this camera setup — "
+                    "if you mention one, say it looked like it, never state it as fact."
+                )
         parts.extend(self._build_rep_highlights(per_rep))
 
         # Enrich with diagnosis data if available
@@ -1396,8 +1554,7 @@ class CoachingOrchestrator:
             highlights.append(f"Roughest rep: rep {worst['rep']} — {labels}.")
         return highlights
 
-    @staticmethod
-    def _build_diagnosis_context(diagnosis: dict, scoring: dict) -> List[str]:
+    def _build_diagnosis_context(self, diagnosis: dict, scoring: dict) -> List[str]:
         """Build diagnosis-enriched context lines for the LLM prompt."""
         parts: List[str] = []
 
@@ -1406,7 +1563,7 @@ class CoachingOrchestrator:
         dim_labels = [
             ("depth", "depth"), ("trunk", "trunk_control"),
             ("knee", "knee_tracking"), ("symmetry", "symmetry"),
-            ("ankle", "ankle"),
+            ("tempo", "tempo"),
         ]
         dim_str = ", ".join(
             f"{label}: {round(dims[key] * 100)}"
@@ -1424,8 +1581,8 @@ class CoachingOrchestrator:
         parts.append(f"TREND: {trend} over the set")
 
         immediate = diagnosis.get("immediate_causes", [])
-        if immediate:
-            top = immediate[0]
+        top = immediate[0] if immediate else None
+        if top:
             parts.append(f"TOP ISSUE: {top.get('explanation', 'N/A')}")
             delta = top.get("parameter_delta")
             if delta:
@@ -1438,19 +1595,38 @@ class CoachingOrchestrator:
         if session_causes:
             parts.append(f"SESSION PATTERN: {session_causes[0].get('explanation', '')}")
 
+        # One long-term cause per session, in the first recap that has one
+        longterm = diagnosis.get("longterm_causes") or []
+        if longterm and not self._longterm_cause_voiced:
+            self._longterm_cause_voiced = True
+            parts.append(
+                f"LONG-TERM (mention once, briefly, as something to build over the coming weeks — "
+                f"not a fix for the next set): {longterm[0].get('explanation', '')}"
+            )
+
+        notes = diagnosis.get("contextual_notes") or []
+        if notes and not self._contextual_note_voiced:
+            self._contextual_note_voiced = True
+            parts.append(
+                f"ANATOMY NOTE (say once, reassuringly — this is how they're built, not a fault): "
+                f"{notes[0].get('explanation', '')}"
+            )
+
         confidence = diagnosis.get("confidence", 0)
-        if confidence < LOW_CONFIDENCE_THRESHOLD:
+        top_is_approximate = bool(top) and top.get("observability") == "approximate"
+        if confidence < LOW_CONFIDENCE_THRESHOLD or top_is_approximate:
             parts.append(
                 "This analysis is low-confidence — hedge the adjustment (say it 'looked like'), "
                 "and never mention confidence or percentages."
             )
 
+        parts.append(UNOBSERVABLE_FAULTS_LINE)
         return parts
 
     async def _speak_llm_exercise_recap(self, data: dict):
         """Generate and speak comprehensive exercise recap after all sets."""
-        # Consume pending diagnosis for the final set
-        diagnosis, scoring = self._consume_diagnosis()
+        # The final set's diagnosis follows workout_complete — wait for it
+        diagnosis, scoring = await self._await_set_diagnosis(data.get("diagnosis_set_number"))
 
         all_summaries = data.get("all_set_summaries", [])
         total_sets = data.get("total_sets", len(all_summaries))

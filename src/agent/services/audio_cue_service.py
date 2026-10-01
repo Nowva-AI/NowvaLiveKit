@@ -1,10 +1,11 @@
 """
 Audio Cue Service — Loads pre-generated TTS audio for real-time coaching.
 
-Audio files are generated once via scripts/generate_cue_audio.py using the
-OpenAI Realtime API (same voice as the voice agent). Multiple variants per
-cue are stored on disk as WAV files; this service indexes the paths and picks
-a random variant each time for natural-sounding playback.
+Audio files are generated once via scripts/tools/generate_cue_audio.py, which
+speaks the reviewed lines in src/assets/cue_text/cues.json with Cartesia
+Sonic-3 (same voice as the voice agent). Multiple variants per cue are stored
+on disk as WAV files; this service indexes the paths and picks a random
+variant each time for natural-sounding playback.
 
 Playback routes through LiveKit's session.say() so audio reaches the user
 via the WebRTC track.

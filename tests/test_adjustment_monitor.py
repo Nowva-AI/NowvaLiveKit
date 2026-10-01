@@ -1,7 +1,8 @@
 """Tests for the intra-set stance/toe-out adjustment monitor.
 
-The monitor starts when a forward-lean cue fires mid-set and coaches the
-lifter back to their target stance while they stand between reps.
+The monitor starts when a fault cue fires mid-set while the latest set
+diagnosis blames the stance or foot angle, and coaches the lifter back to
+their target stance while they stand between reps.
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from agent.services.coaching_constants import PREEMPTIVE_TEXT
 from agent.services.coaching_orchestrator import (
     STANCE_TOLERANCE,
     TOE_OUT_TOLERANCE_DEG,
@@ -71,8 +73,15 @@ def _spoken(call: dict) -> str:
     return str(content[0]) if content else str(user_input)
 
 
+def _diagnosis_blaming(cause_id: str) -> dict:
+    return {
+        "confidence": 0.8,
+        "immediate_causes": [{"cause_id": cause_id, "score": 0.7, "explanation": "x"}],
+    }
+
+
 def _fault_cue_event(
-    cue_key: str = "chest_up", fault_type: str = "forward_lean"
+    cue_key: str = "chest_up", fault_type: str = "hip_shoot"
 ) -> CoachingEvent:
     return CoachingEvent(
         priority=CuePriority.FAULT_CUE,
@@ -84,7 +93,7 @@ def _fault_cue_event(
 
 
 class TestMonitorStart:
-    def test_forward_lean_cue_starts_stance_monitor(self):
+    def test_narrow_stance_starts_stance_monitor(self):
         orch = _make_orchestrator()
         orch.record_angle_sample(_frame(stance=1.1))
         orch._maybe_start_adjustment_from_fault()
@@ -120,16 +129,69 @@ class TestMonitorStart:
 
 
 class TestMonitorTriggering:
-    def test_only_forward_lean_starts_the_monitor(self):
+    def test_stance_cause_in_latest_diagnosis_starts_the_monitor(self):
         async def _run():
             orch = _make_orchestrator()
             orch.record_angle_sample(_frame(stance=1.1))
 
+            # No diagnosis yet: a fault cue alone does not arm it
             await orch._dispatch_cached_cue(_fault_cue_event("knees_out", "knee_valgus"))
             assert not orch._adjustment_active
 
+            orch.set_diagnosis_data(_diagnosis_blaming("narrow_stance"), {"mean_score": 0.7})
+            await orch._dispatch_cached_cue(_fault_cue_event("knees_out", "knee_valgus"))
+            assert orch._adjustment_active
+
+        asyncio.run(_run())
+
+    def test_each_stance_cause_arms_the_monitor(self):
+        async def _run():
+            for cause_id in ("narrow_stance", "stance_toe_mismatch", "narrow_foot_angle"):
+                orch = _make_orchestrator()
+                orch.record_angle_sample(_frame(stance=1.1))
+                orch.set_diagnosis_data(_diagnosis_blaming(cause_id), {"mean_score": 0.7})
+                await orch._dispatch_cached_cue(_fault_cue_event())
+                assert orch._adjustment_active, cause_id
+
+        asyncio.run(_run())
+
+    def test_other_top_cause_does_not_arm_the_monitor(self):
+        async def _run():
+            orch = _make_orchestrator()
+            orch.record_angle_sample(_frame(stance=1.1))
+            orch.set_diagnosis_data(_diagnosis_blaming("ankle_mobility"), {"mean_score": 0.7})
+            await orch._dispatch_cached_cue(_fault_cue_event())
+            assert not orch._adjustment_active
+
+        asyncio.run(_run())
+
+    def test_follow_up_survives_the_recap_consuming_the_diagnosis(self):
+        """The recap consumes the pending diagnosis; the next set's cues
+        still need to know what it blamed."""
+        async def _run():
+            orch = _make_orchestrator()
+            orch.record_angle_sample(_frame(stance=1.1))
+            orch.set_diagnosis_data(_diagnosis_blaming("narrow_stance"), {"mean_score": 0.7})
+            orch._consume_diagnosis()
             await orch._dispatch_cached_cue(_fault_cue_event())
             assert orch._adjustment_active
+
+        asyncio.run(_run())
+
+    def test_running_monitor_is_not_explained_again(self):
+        async def _run():
+            orch = _make_orchestrator()
+            spoken: list[str] = []
+
+            async def _record(key):
+                spoken.append(key)
+
+            orch._play_cached = _record
+            orch.record_angle_sample(_frame(stance=1.1))
+            orch.set_diagnosis_data(_diagnosis_blaming("narrow_stance"), {"mean_score": 0.7})
+            await orch._dispatch_cached_cue(_fault_cue_event())
+            await orch._dispatch_cached_cue(_fault_cue_event("knees_out", "knee_valgus"))
+            assert spoken == ["chest_up", "stance_explain", "knees_out"]
 
         asyncio.run(_run())
 
@@ -448,7 +510,7 @@ class TestPreemptiveGenerationHandoff:
             await orch._dispatch_cached_cue(_fault_cue_event())
 
             orch._set_rep_count = 1  # the rep the cue played during
-            orch._resolve_pending_outcome(["forward_lean"])
+            orch._resolve_pending_outcome(["hip_shoot"])
             await asyncio.sleep(0)
             judged_own_rep = orch._pending_outcome is None
 
@@ -462,17 +524,30 @@ class TestPreemptiveGenerationHandoff:
     def test_audio_arrives_when_tts_beats_the_rep(self):
         judged_own_rep, played = self._run_cue_then_reps(0.0)
         assert judged_own_rep is False
-        assert played == [["audio:Nice, chest is up!"]]
+        assert played == [[f"audio:{PREEMPTIVE_TEXT['chest_up'][0]}"]]
 
     def test_audio_still_arrives_when_tts_finishes_after_the_rep(self):
         judged_own_rep, played = self._run_cue_then_reps(0.2)
         assert judged_own_rep is False
-        assert played == [["audio:Nice, chest is up!"]]
+        assert played == [[f"audio:{PREEMPTIVE_TEXT['chest_up'][0]}"]]
+
+    def test_side_variant_cue_uses_its_base_outcome_lines(self):
+        async def _run():
+            orch, played = self._orchestrator(0.0)
+            await orch._dispatch_cached_cue(_fault_cue_event("knees_out_left", "knee_valgus"))
+            assert orch._pending_outcome is not None
+            orch._set_rep_count = 2
+            orch._resolve_pending_outcome([])
+            await asyncio.sleep(0.3)
+            return played
+
+        played = asyncio.run(_run())
+        assert played == [[f"audio:{PREEMPTIVE_TEXT['knees_out'][0]}"]]
 
 
 class TestUtteranceBudgetIsPerSet:
-    """A repeat forward-lean cue re-aims the monitor but must not refill
-    the budget, or a lifter who never reaches target gets cued all set."""
+    """A repeat fault cue re-aims the monitor but must not refill the
+    budget, or a lifter who never reaches target gets cued all set."""
 
     def _exhaust(self, orch):
         from agent.services.coaching_orchestrator import MAX_ADJUSTMENT_UTTERANCES
@@ -578,6 +653,7 @@ class TestArmingExplanation:
             spoken: list[str] = []
             orch._play_cached = lambda key: _record(spoken, key)
             orch.record_angle_sample(_frame(stance=1.1))
+            orch.set_diagnosis_data(_diagnosis_blaming("narrow_stance"), {"mean_score": 0.7})
             await orch._dispatch_cached_cue(_fault_cue_event())
             assert spoken == ["chest_up", "stance_explain"]
 

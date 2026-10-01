@@ -19,10 +19,18 @@ DIMENSION_LABELS = {
 
 FAULT_LABELS = {
     "knee_valgus": "knees caving in",
-    "butt_wink": "butt wink",
+    "hip_shoot": "hips rising before the chest",
+    "heel_rise": "heels lifting",
+    "balance": "weight drifting off the middle of the foot",
+    "hip_shift": "hips sliding to one side",
+    "bilateral_asymmetry": "bar tilting to one side",
+    "depth": "not reaching their depth target",
+    "foot_placement": "feet set up unevenly",
+    "lockout": "not standing all the way up between reps",
+    "tempo": "dropping too fast on the way down",
+    "depth_drift": "reps getting shallower",
+    "velocity_loss": "reps slowing down",
     "forward_lean": "leaning forward",
-    "shallow_depth": "shallow depth",
-    "asymmetric_loading": "uneven side loading",
 }
 
 

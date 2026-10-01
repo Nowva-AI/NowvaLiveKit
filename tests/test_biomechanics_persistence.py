@@ -403,6 +403,21 @@ class TestRecorderOps:
         rep2_ops = recorder._ops_for("rep", _rep_msg(rep_number=3))
         assert _ops_by_kind(rep2_ops, "cue_outcome") == []
 
+    @pytest.mark.parametrize("fault_type", ["hip_shoot", "bilateral_asymmetry", "velocity_loss"])
+    def test_once_per_rep_squat_fault_is_linked_and_evaluated(self, fault_type):
+        """Once-per-rep verdicts carry their own rep's number and appear in
+        that rep's faults_detailed, so they link and get an outcome."""
+        recorder = _make_recorder()
+        recorder._ops_for("fault", _fault_msg(fault_type=fault_type, rep_number=2))
+        rep2_ops = recorder._ops_for(
+            "rep", _rep_msg(rep_number=2, faults_detailed=[_fault_detail(fault_type, 0.6)])
+        )
+        assert len(_ops_by_kind(rep2_ops, "link_cues")) == 1
+        rep3_ops = recorder._ops_for("rep", _rep_msg(rep_number=3))
+        outcomes = _ops_by_kind(rep3_ops, "cue_outcome")
+        assert len(outcomes) == 1
+        assert outcomes[0]["present_next_rep"] is False
+
     def test_end_of_rep_fault_no_severity_next_set(self):
         recorder = _make_recorder()
         recorder._ops_for("fault", _fault_msg(fault_type="depth", rep_number=1))

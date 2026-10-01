@@ -10,7 +10,10 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from unittest.mock import AsyncMock
+
 from agent.services.assessment_logger import AssessmentLogger
+from agent.services.coaching_orchestrator import CoachingOrchestrator
 from agent.services.coaching_service import CoachingService
 
 
@@ -181,3 +184,78 @@ class TestCalibrationCompletePersistence:
         assert row.athlete_params == stored_params
         assert row.baseline == {"peakDorsi": 33.0, "peakKneeFlex": 118.0}
         assert row.thresholds == {"knee_valgus": {"mild": 12.5}}
+
+
+class _FakeRecorder:
+    def __init__(self) -> None:
+        self.faults: list[dict] = []
+        self.reps: list[dict] = []
+        self.sets: list[dict] = []
+
+    def record_fault(self, message: dict) -> None:
+        self.faults.append(message)
+
+    def record_rep(self, message: dict) -> None:
+        self.reps.append(message)
+
+    def record_set(self, message: dict) -> None:
+        self.sets.append(message)
+
+
+def _wired_service() -> tuple[CoachingService, CoachingOrchestrator, _FakeRecorder]:
+    service = CoachingService(session=None, state=None)
+    orchestrator = CoachingOrchestrator(
+        play_cached_audio_fn=AsyncMock(),
+        generate_llm_reply_fn=AsyncMock(),
+        get_cue_audio_fn=lambda key: bool(key),
+    )
+    orchestrator.reset_set(target_reps=10)
+    recorder = _FakeRecorder()
+    service._coaching_orchestrator = orchestrator
+    service._biomech_recorder = recorder
+    service._workout_active_flag = True
+    return service, orchestrator, recorder
+
+
+class TestPipelineMessageWiring:
+    def test_approximate_fault_is_recorded_but_not_cued(self):
+        service, orchestrator, recorder = _wired_service()
+        message = {
+            "type": "fault", "fault_type": "hip_shoot", "severity": "moderate",
+            "cue": None, "rep_number": 2, "side": None, "observability": "approximate",
+        }
+        asyncio.run(service._handle_message(message))
+        assert recorder.faults == [message]
+        assert orchestrator._queue.empty()
+
+    def test_side_cue_reaches_the_orchestrator_as_given(self):
+        service, orchestrator, _ = _wired_service()
+        asyncio.run(service._handle_message({
+            "type": "fault", "fault_type": "knee_valgus", "severity": "moderate",
+            "cue": "knees_out_left", "rep_number": 2, "side": "left",
+            "observability": "observable",
+        }))
+        assert orchestrator._queue.get_nowait().cue_key == "knees_out_left"
+
+    def test_rep_complete_passes_highlights_and_set_number(self):
+        service, orchestrator, _ = _wired_service()
+        orchestrator.positive_cue_keys = ["strong"]
+        asyncio.run(service._handle_message({
+            "type": "rep_complete", "rep_number": 1, "is_clean": True,
+            "faults_in_rep": [], "set_number": 3, "highlights": ["best_rep_so_far"],
+        }))
+        assert orchestrator._build_set_summary()["diagnosis_set_number"] == 3
+        assert orchestrator._queue.get_nowait().cue_key == "strong"
+
+    def test_diagnosis_complete_passes_its_set_number(self):
+        service, orchestrator, _ = _wired_service()
+        asyncio.run(service._handle_message({
+            "type": "diagnosis_complete", "set_number": 3,
+            "diagnosis": {
+                "confidence": 0.8,
+                "immediate_causes": [{"cause_id": "narrow_stance", "explanation": "x"}],
+            },
+            "scoring": {"mean_score": 0.7},
+        }))
+        assert orchestrator._pending_diagnosis_set_number == 3
+        assert service.get_top_cause_id() == "narrow_stance"

@@ -9,11 +9,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from agent.services.progress_context import (
+    FAULT_LABELS,
     build_greeting_progress_line,
     build_progress_comparison_lines,
     build_progress_report,
     build_session_comparison_line,
+    fault_label,
 )
+
+SQUAT_CONTRACT_FAULT_TYPES = [
+    "knee_valgus", "hip_shoot", "heel_rise", "balance", "hip_shift",
+    "bilateral_asymmetry", "depth", "foot_placement", "lockout", "tempo",
+    "depth_drift", "velocity_loss",
+]
+JARGON_WORDS = ["valgus", "eccentric", "concentric", "dorsiflexion", "asymmetry"]
 
 
 def _baseline(**overrides):
@@ -174,3 +183,18 @@ class TestProgressReport:
         report = build_progress_report(rows, None)
         assert "Form score trend" not in report
         assert "2 squat sets recorded" in report
+
+
+class TestFaultLabels:
+    def test_every_squat_fault_has_a_plain_label(self):
+        for fault_type in SQUAT_CONTRACT_FAULT_TYPES:
+            label = FAULT_LABELS[fault_type]
+            assert "_" not in label
+            assert not any(word in label for word in JARGON_WORDS), label
+
+    def test_dead_keys_are_gone(self):
+        for fault_type in ("butt_wink", "shallow_depth", "asymmetric_loading"):
+            assert fault_type not in FAULT_LABELS
+
+    def test_unknown_fault_falls_back_to_spaced_name(self):
+        assert fault_label("elbow_flare") == "elbow flare"

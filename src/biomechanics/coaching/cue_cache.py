@@ -25,13 +25,28 @@ def _build_cues(**named_cues: str) -> Dict[str, str]:
 
 
 SQUAT_CUES: Dict[str, str] = _build_cues(
-    # Corrections
+    # Corrections. A _left/_right variant names the side; the base key is
+    # the fallback when no side is known.
     knees_out="knees_out",
+    knees_out_left="knees_out_left",
+    knees_out_right="knees_out_right",
     chest_up="chest_up",
-    deeper="deeper",
     heels_down="heels_down",
+    heels_down_left="heels_down_left",
+    heels_down_right="heels_down_right",
+    whole_foot="whole_foot",
     even_it_out="even_it_out",
+    even_it_out_left="even_it_out_left",
+    even_it_out_right="even_it_out_right",
+    level_bar="level_bar",
+    deeper="deeper",
+    square_feet="square_feet",
+    square_feet_left="square_feet_left",
+    square_feet_right="square_feet_right",
+    lockout="lockout",
     slow_down="slow_down",
+    same_depth="same_depth",
+    drive="drive",
     brace="brace",
     # Intra-set stance / toe-out coaching
     stance_explain="stance_explain",
@@ -51,8 +66,6 @@ SQUAT_CUES: Dict[str, str] = _build_cues(
 
 DEADLIFT_CUES: Dict[str, str] = _build_cues(
     # Corrections
-    hips_through="hips_through",
-    flat_back="flat_back",
     chest_up="chest_up",
     lockout="lockout",
     slow_down="slow_down",
@@ -85,28 +98,47 @@ EXERCISE_CUE_MAP: Dict[str, Dict[str, str]] = {
 }
 
 FAULT_TO_CUE_MAP: Dict[str, str] = {
+    # Squat
     "knee_valgus": "knees_out",
-    "forward_lean": "chest_up",
-    "depth": "deeper",
-    "bilateral_asymmetry": "even_it_out",
-    "back_rounding": "chest_up",
+    "hip_shoot": "chest_up",
     "heel_rise": "heels_down",
+    "balance": "whole_foot",
+    "hip_shift": "even_it_out",
+    "bilateral_asymmetry": "level_bar",
+    "depth": "deeper",
+    "foot_placement": "square_feet",
+    "lockout": "lockout",
+    "tempo": "slow_down",
+    "depth_drift": "same_depth",
+    "velocity_loss": "drive",
+    # Other profiles
+    "forward_lean": "chest_up",
+    "back_rounding": "chest_up",
 }
+
+SIDE_CUE_SIDES = ("left", "right")
 
 POSITIVE_CUE_KEYS = frozenset({"good_rep", "great_depth", "strong", "clean", "perfect"})
 
 # Which fault wins when several compete for the same cue slot — lower first.
-# Forward lean leads because it is the root-cause fault: it drives the
-# intra-set stance correction, and fixing it usually resolves the knee and
-# asymmetry faults downstream. Left flat, the more frequent knee/asymmetry
-# faults claim every slot and forward lean is never cued at all.
+# Knee cave and hip shoot lead: they are what a coach watching the squat
+# corrects first. Foot and balance faults follow, then depth and setup,
+# then the fatigue signals. Faults not listed rank after all of these.
 FAULT_CUE_PRIORITY: Dict[str, int] = {
-    "forward_lean": 0,
-    "knee_valgus": 1,
+    "knee_valgus": 0,
+    "hip_shoot": 1,
     "heel_rise": 2,
-    "bilateral_asymmetry": 3,
+    "balance": 3,
+    "hip_shift": 4,
+    "bilateral_asymmetry": 5,
+    "depth": 6,
+    "foot_placement": 7,
+    "lockout": 8,
+    "tempo": 9,
+    "depth_drift": 10,
+    "velocity_loss": 11,
 }
-DEFAULT_FAULT_CUE_PRIORITY = 4
+DEFAULT_FAULT_CUE_PRIORITY = 12
 
 # A higher-priority fault may jump the cue gap, but must still wait out
 # a fraction of it to avoid back-to-back audio. The floor differs by
@@ -120,6 +152,15 @@ PREEMPT_GAP_RATIO_ORCHESTRATOR = 0.0
 
 def fault_cue_priority(fault_type: str) -> int:
     return FAULT_CUE_PRIORITY.get(fault_type, DEFAULT_FAULT_CUE_PRIORITY)
+
+
+def base_cue_key(cue_key: str) -> str:
+    """The side-neutral key for a side variant (knees_out_left -> knees_out)."""
+    for side in SIDE_CUE_SIDES:
+        suffix = f"_{side}"
+        if cue_key.endswith(suffix):
+            return cue_key[:-len(suffix)]
+    return cue_key
 
 
 def can_cue_fault(
@@ -179,13 +220,17 @@ class CueCache:
         self.last_cue_priority = DEFAULT_FAULT_CUE_PRIORITY
         return dict(self.cues)
 
-    def get_cue_for_fault(self, fault_type: str, timestamp: float) -> Optional[str]:
+    def get_cue_for_fault(
+        self, fault_type: str, timestamp: float, side: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Get a cue key for a detected fault, respecting rate limiting.
 
         Args:
             fault_type: The fault type string (e.g. "knee_valgus")
             timestamp: Current time in seconds
+            side: "left" or "right" picks the side-specific cue when the
+                exercise has one; anything else gets the base cue
 
         Returns:
             Cue key string if available and not rate-limited, else None
@@ -202,6 +247,8 @@ class CueCache:
         cue_key = FAULT_TO_CUE_MAP.get(fault_type)
         if cue_key is None or cue_key not in self.cues:
             return None
+        if side in SIDE_CUE_SIDES and f"{cue_key}_{side}" in self.cues:
+            cue_key = f"{cue_key}_{side}"
 
         self.last_cue_time = timestamp
         self.last_cue_priority = priority

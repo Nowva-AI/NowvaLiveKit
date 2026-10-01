@@ -13,7 +13,7 @@ import os
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable
 
 from agent.services.assessment_logger import AssessmentLogger
 from agent.services.coaching_constants import (
@@ -299,11 +299,10 @@ class CoachingService:
             return self._coaching_orchestrator.resting
         return False
 
-    def get_last_cue_cause_id(self) -> str | None:
+    def get_top_cause_id(self) -> str | None:
+        """Top immediate cause of the latest set diagnosis, for "show me" demos."""
         orch = self._coaching_orchestrator
-        if orch and orch.last_cue_context:
-            return orch.last_cue_context.get("fault_type")
-        return None
+        return orch.top_cause_id if orch else None
 
     # ------------------------------------------------------------------
     # Real-time form queries
@@ -477,7 +476,11 @@ class CoachingService:
                 fault_type = message.get("fault_type", "")
                 severity = message.get("severity", "")
                 fault_msg = message.get("message", "")
-                logger.info(f"[COACHING SERVICE] FAULT received: type={fault_type} severity={severity} cue={cue_key} msg='{fault_msg}'")
+                observability = message.get("observability")
+                logger.info(
+                    f"[COACHING SERVICE] FAULT received: type={fault_type} severity={severity} "
+                    f"cue={cue_key} side={message.get('side')} observability={observability} msg='{fault_msg}'"
+                )
                 if self._workout_active and self._biomech_recorder:
                     self._biomech_recorder.record_fault(message)
                 if not self._workout_active:
@@ -488,6 +491,7 @@ class CoachingService:
                         fault_type=fault_type,
                         severity=severity,
                         message=fault_msg,
+                        observability=observability,
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — fault dropped")
@@ -518,6 +522,8 @@ class CoachingService:
                         max_depth_angle=max_depth_angle,
                         rep_duration_ms=rep_duration_ms,
                         ascent_time_s=ascent_time_s,
+                        highlights=message.get("highlights"),
+                        set_number=message.get("set_number"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — rep_complete dropped")
@@ -572,7 +578,9 @@ class CoachingService:
                 if self._workout_active and self._biomech_recorder:
                     self._biomech_recorder.record_set(message)
                 if self._coaching_orchestrator:
-                    self._coaching_orchestrator.set_diagnosis_data(diagnosis, scoring)
+                    self._coaching_orchestrator.set_diagnosis_data(
+                        diagnosis, scoring, set_number=message.get("set_number"),
+                    )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — diagnosis_complete dropped")
             elif msg_type == "set_complete":
@@ -1127,6 +1135,7 @@ class CoachingService:
         if self._coaching_orchestrator:
             self._coaching_orchestrator.resting = True
             self._coaching_orchestrator.set_rep_count = reps
+            self._coaching_orchestrator.mark_set_ended_early()
 
         new_target = await self._advance_workout_set()
 
