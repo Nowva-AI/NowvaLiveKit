@@ -57,17 +57,18 @@ class FixedLagKeypointSmoother:
 
     A tracked keypoint snaps to rejected measurements only after REACQUIRE_AGREEING_FRAMES agreeing rejections
     (or after MAX_REJECTION_S with the last TIMEOUT_AGREEING_FRAMES agreeing), and only at confidence above
-    MIN_SNAP_CONFIDENCE. A keypoint that exceeds max_predicted_frames misses is dropped (confidence 0) and
-    re-seeds from its next valid measurement at any positive confidence.
+    MIN_SNAP_CONFIDENCE. A keypoint unmeasured for longer than max_prediction_s is dropped (confidence 0) and
+    re-seeds from its next valid measurement at any positive confidence. The limit is time, not frames, so it
+    means the same at 12 fps as at 30.
     """
 
     def __init__(self, lag_frames: int = 2, process_noise: float = 10.0,
                  uncertainty_scale_m: float = 0.02, measurement_std_floor_m: float = 0.003,
                  measurement_std_ceiling_m: float = 0.08, gate_sigma: float = 4.0,
-                 gate_min_radius_m: float = 0.08, max_predicted_frames: int = 5,
+                 gate_min_radius_m: float = 0.08, max_prediction_s: float = 0.17,
                  min_output_confidence: float = 0.15) -> None:
-        if lag_frames < 0 or max_predicted_frames < 0:
-            raise ValueError("lag_frames and max_predicted_frames must be >= 0")
+        if lag_frames < 0 or max_prediction_s < 0.0:
+            raise ValueError("lag_frames and max_prediction_s must be >= 0")
         if process_noise <= 0.0 or uncertainty_scale_m <= 0.0:
             raise ValueError("process_noise and uncertainty_scale_m must be > 0")
         if not 0.0 < measurement_std_floor_m <= measurement_std_ceiling_m:
@@ -80,7 +81,7 @@ class FixedLagKeypointSmoother:
         # 3D innovation distance has RMS sqrt(3) * per-axis sigma, so gate_sigma is applied to that RMS.
         self._gate_sigma_sq = gate_sigma ** 2 * SPATIAL_AXES
         self._gate_min_radius_sq = gate_min_radius_m ** 2
-        self._max_predicted_frames = max_predicted_frames
+        self._max_prediction_s = max_prediction_s
         self._min_output_confidence = min_output_confidence
         self._reacquire_agreement_sq = REACQUIRE_AGREEMENT_M ** 2
         self._history: deque[_FilterStep] = deque(maxlen=lag_frames + 1)
@@ -129,8 +130,6 @@ class FixedLagKeypointSmoother:
         self._p11 = np.full((keypoint_count, 1), INITIAL_VELOCITY_VARIANCE)
         self._tracked = valid
         self._all_tracked = bool(valid.all())
-        self._missed_frames = np.zeros(keypoint_count, dtype=np.int64)
-        self._any_missed = False
         self._last_accepted_timestamps = np.full(keypoint_count, timestamp)
         self._rejection_streak = np.zeros(keypoint_count, dtype=np.int64)
         self._any_rejection_streak = False
@@ -200,9 +199,6 @@ class FixedLagKeypointSmoother:
             if self._any_rejection_streak:
                 self._rejection_streak.fill(0)
                 self._any_rejection_streak = False
-            if self._any_missed:
-                self._missed_frames.fill(0)
-                self._any_missed = False
             self._last_accepted_timestamps.fill(timestamp)
             confidences_out = self._scale_sq / (new_p00[:, 0] + self._scale_sq)
         else:
@@ -255,10 +251,9 @@ class FixedLagKeypointSmoother:
             new_p01[fresh] = 0.0
             new_p11[fresh] = INITIAL_VELOCITY_VARIANCE
 
-        self._missed_frames = np.where(received, 0, self._missed_frames + 1)
-        self._any_missed = True
         self._last_accepted_timestamps = np.where(received, timestamp, self._last_accepted_timestamps)
-        lost = tracked & (self._missed_frames > self._max_predicted_frames)
+        unmeasured_s = timestamp - self._last_accepted_timestamps
+        lost = tracked & (unmeasured_s > self._max_prediction_s + TIME_EPSILON_S)
         if lost.any():
             tracked = tracked & ~lost
             velocities[lost] = 0.0

@@ -14,10 +14,18 @@ from affect.voice_style import (
     NEUTRAL_STYLE,
     VoiceStyle,
     qwen3_instruct,
+    set_coaching_moment,
     style_for,
     to_cartesia,
     to_elevenlabs,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_coaching_moment():
+    set_coaching_moment(None)
+    yield
+    set_coaching_moment(None)
 
 
 class TestPolicy:
@@ -38,6 +46,40 @@ class TestPolicy:
         state = AthleteState(effort="near_limit", affect="flat", confident=True)
         style = style_for(state, "coaching")
         assert style.pace == -1 and style.warmth == 1
+
+
+class TestCoachingMoments:
+    def test_last_rep_is_firmer_for_coaching(self) -> None:
+        set_coaching_moment("last_rep")
+        assert style_for(None, "coaching").energy == 1
+
+    def test_recap_is_calm(self) -> None:
+        set_coaching_moment("recap")
+        style = style_for(AthleteState(affect="engaged", confident=True), "coaching")
+        assert style.energy == -1 and style.pace == 0
+
+    def test_moment_only_shapes_coaching_speech(self) -> None:
+        set_coaching_moment("last_rep")
+        assert style_for(None, "conversation") == NEUTRAL_STYLE
+
+    def test_frustration_still_wins_over_moment(self) -> None:
+        set_coaching_moment("last_rep")
+        style = style_for(AthleteState(affect="frustrated", confident=True), "coaching")
+        assert style.energy == -1 and style.warmth == 1
+
+    def test_cleared_moment_falls_back_to_affect(self) -> None:
+        set_coaching_moment("recap")
+        set_coaching_moment(None)
+        assert style_for(None, "coaching") == NEUTRAL_STYLE
+
+    def test_unknown_moment_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            set_coaching_moment("warmup")
+
+    def test_last_rep_moves_elevenlabs_settings(self) -> None:
+        set_coaching_moment("last_rep")
+        controls = to_elevenlabs(style_for(None, "coaching"), StyleConfig())
+        assert controls.stability < ELEVENLABS_DEFAULT_STABILITY
 
 
 class TestCartesiaMapping:

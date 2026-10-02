@@ -54,6 +54,10 @@ _MIN_ANKLE_SEP_M = 0.02
 _FRONTAL_NOMINAL = 0.35
 # Keypoint confidence floor for a usable measurement.
 _MIN_CONFIDENCE = 0.1
+# Single camera: knee tracking needs the athlete roughly square to the camera.
+# A turn the monocular pose only partly sees reads ~0.45 deg of fake cave per
+# degree of unseen turn, so beyond this body yaw there is no knee reading.
+_MAX_FACING_YAW_DEG = 15.0
 # Medial direction along the pelvis ML axis (left hip - right hip) per side.
 _MEDIAL_SIGN_LEFT = -1.0
 _MEDIAL_SIGN_RIGHT = 1.0
@@ -119,7 +123,9 @@ class SingleCameraValgusEstimator:
     tilt out of that plane, the triangulated estimator's definition, so one
     threshold triple serves both capture modes. Once the body is measured, the
     femur length comes from standing frames, where the thigh is vertical and
-    depth error cannot shorten it.
+    depth error cannot shorten it. An athlete turned more than
+    _MAX_FACING_YAW_DEG from the camera (hip and shoulder lines together; the
+    hip line alone is biased on MediaPipe) gets no reading.
     """
 
     def __init__(self) -> None:
@@ -134,6 +140,8 @@ class SingleCameraValgusEstimator:
         skeleton_3d: Skeleton3D | None = None,
     ) -> ValgusResult:
         if skeleton_2d is None:
+            return _MISSING_RESULT
+        if skeleton_3d is not None and abs(_body_yaw_deg(skeleton_3d)) > _MAX_FACING_YAW_DEG:
             return _MISSING_RESULT
 
         l_hip, c_lh = _xy(skeleton_2d, CK.LEFT_HIP)
@@ -382,6 +390,24 @@ class TriangulatedValgusEstimator:
         if ankle_sep < _MIN_ANKLE_SEP_M:
             return NAN
         return knee_sep / ankle_sep
+
+
+def _body_yaw_deg(skeleton_3d: Skeleton3D) -> float:
+    """Turn of the hip and shoulder lines (averaged) away from the camera's X axis,
+    in degrees; NaN without both lines."""
+    lines = []
+    for left_index, right_index in ((CK.LEFT_HIP, CK.RIGHT_HIP), (CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER)):
+        left, _ = _xyz(skeleton_3d, left_index)
+        right, _ = _xyz(skeleton_3d, right_index)
+        if left is None or right is None:
+            return NAN
+        horizontal = np.array([left[0] - right[0], left[2] - right[2]])
+        length = float(np.linalg.norm(horizontal))
+        if length < _MIN_SEGMENT_M:
+            return NAN
+        lines.append(horizontal / length)
+    body_line = lines[0] + lines[1]
+    return float(np.degrees(np.arctan2(-body_line[1], body_line[0])))
 
 
 def _knees_over_toes_offsets(

@@ -6,6 +6,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from agent.services.tts_normalizer import normalize_stream, normalize_tts_text
@@ -98,15 +100,17 @@ class TestMarkupSplitAcrossChunks:
 
     def test_tokenized_laughter_arrives_whole(self) -> None:
         out = _stream_through_normalizer(["Ha", " [", "laughter", "]", " fair", "."])
-        assert "[laughter]" in out
+        assert any("[laughter]" in chunk for chunk in out)
         assert "".join(out) == "Ha [laughter] fair."
 
     def test_tokenized_break_tag_arrives_whole(self) -> None:
         out = _stream_through_normalizer(["Ready?", "<break", " time=", '"400ms"', "/>", " Go."])
-        assert '<break time="400ms"/>' in out
+        assert any('<break time="400ms"/>' in chunk for chunk in out)
 
-    def test_plain_text_is_not_held_back(self) -> None:
-        assert _stream_through_normalizer(["Chest", " up", "."]) == ["Chest", " up", "."]
+    def test_plain_text_released_word_by_word(self) -> None:
+        out = _stream_through_normalizer(["Chest", " up", " now", "."])
+        assert out[0] == "Chest "
+        assert "".join(out) == "Chest up now."
 
     def test_unclosed_bracket_is_flushed_at_stream_end(self) -> None:
         assert "".join(_stream_through_normalizer(["Set 1 ", "[of 3"])) == "Set 1 [of 3"
@@ -130,6 +134,13 @@ class TestInlineTagsPreserved:
         assert normalize_tts_text(text) == text
 
 
+class TestIndentedBulletAcrossChunks:
+    def test_indented_bullet_after_a_chunk_ending_in_spaces(self) -> None:
+        spoken = "".join(_stream_through_normalizer(["one\n  ", "- two"]))
+        assert "-" not in spoken
+        assert spoken.endswith("two")
+
+
 class TestStreamBehavior:
     def test_chunk_edges_not_trimmed(self) -> None:
         async def chunks():
@@ -150,3 +161,62 @@ class TestStreamBehavior:
             return [c async for c in normalize_stream(chunks())]
 
         assert asyncio.run(collect()) == ["go"]
+
+
+class TestChunkSafety:
+    """A pattern split across streamed chunks must convert exactly as if it arrived whole."""
+
+    def test_range_split_across_chunks(self) -> None:
+        assert "".join(_stream_through_normalizer(["90", "-", "120", " seconds"])) == "90 to 120 seconds"
+
+    def test_spaced_range_split_across_chunks(self) -> None:
+        assert "".join(_stream_through_normalizer(["rest ", "90", " -", " 120", " seconds."])) == (
+            "rest 90 to 120 seconds."
+        )
+
+    def test_score_split_across_chunks(self) -> None:
+        assert "".join(_stream_through_normalizer(["scored ", "84", "/", "100"])) == "scored 84 out of 100"
+
+    def test_bold_split_across_chunks_keeps_word_gap(self) -> None:
+        assert "".join(_stream_through_normalizer(["*", "*great", "*", "* depth."])) == "great depth."
+
+    def test_unit_split_across_chunks(self) -> None:
+        assert "".join(_stream_through_normalizer(["Put ", "100", " kg", " on."])) == "Put 100 kilograms on."
+
+
+class TestDateGuard:
+    def test_iso_date_spoken_as_date(self) -> None:
+        assert normalize_tts_text("on 2026-10-03.") == "on October 3, 2026."
+
+    def test_streamed_iso_date_spoken_as_date(self) -> None:
+        assert "".join(_stream_through_normalizer(["on ", "2026", "-10", "-03", "."])) == "on October 3, 2026."
+
+
+class TestUnitMap:
+    @pytest.mark.parametrize(
+        ("written", "spoken"),
+        [
+            ("100kg today", "100 kilograms today"),
+            ("135 lbs today", "135 pounds today"),
+            ("add 1 kg", "add 1 kilogram"),
+            ("in 250ms", "in 250 milliseconds"),
+            ("rest 90s then go", "rest 90 seconds then go"),
+            ("~90 seconds", "about 90 seconds"),
+            ("your 1RM", "your 1-rep max"),
+            ("an AMRAP set", "an as many reps as possible set"),
+        ],
+    )
+    def test_unit_spoken_out(self, written: str, spoken: str) -> None:
+        assert normalize_tts_text(written) == spoken
+
+    def test_decade_not_read_as_seconds(self) -> None:
+        assert normalize_tts_text("since the 1990s") == "since the 1990s"
+
+    def test_tags_left_untouched(self) -> None:
+        text = 'Ready?<break time="400ms"/> Go.'
+        assert normalize_tts_text(text) == text
+
+
+class TestBrandPronunciation:
+    def test_brand_respelled_for_tts(self) -> None:
+        assert normalize_tts_text("Welcome to Nowva.") == "Welcome to Nova."

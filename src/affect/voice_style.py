@@ -10,6 +10,7 @@ from affect.config import StyleConfig
 from affect.state import AthleteState
 
 SpeechKind = Literal["conversation", "coaching"]
+CoachingMoment = Literal["last_rep", "recap"]
 Level = Literal[-1, 0, 1]
 
 CARTESIA_EMOTION_BY_STYLE: dict[tuple[int, int], str] = {
@@ -68,9 +69,31 @@ _AFFECT_STYLES: dict[str, dict[SpeechKind, VoiceStyle]] = {
 }
 
 
+# Where the workout is shapes how coaching speech sounds: firmer near the last rep,
+# calm for the recap. A frustrated or strained athlete still gets the calm, warm style
+# below — negative affect is never met with intensity.
+_MOMENT_STYLES: dict[str, VoiceStyle] = {
+    "last_rep": VoiceStyle(energy=1, pace=0, warmth=0),
+    "recap": VoiceStyle(energy=-1, pace=0, warmth=0),
+}
+_NEVER_OVERRIDDEN_AFFECTS = ("frustrated", "strained")
+_coaching_moment: CoachingMoment | None = None
+
+
+def set_coaching_moment(moment: CoachingMoment | None) -> None:
+    """The coaching orchestrator calls this as a workout moves between moments; None clears it."""
+    global _coaching_moment
+    if moment is not None and moment not in _MOMENT_STYLES:
+        raise ValueError(f"Unknown coaching moment: {moment!r}")
+    _coaching_moment = moment
+
+
 def style_for(state: AthleteState | None, speech_kind: SpeechKind = "conversation") -> VoiceStyle:
+    moment_style = _MOMENT_STYLES.get(_coaching_moment) if speech_kind == "coaching" else None
     if state is None or not state.confident:
-        return NEUTRAL_STYLE
+        return moment_style or NEUTRAL_STYLE
+    if moment_style is not None and state.affect not in _NEVER_OVERRIDDEN_AFFECTS:
+        return moment_style
     style = _AFFECT_STYLES.get(state.affect, _AFFECT_STYLES["flat"])[speech_kind]
     if state.effort == "near_limit" and speech_kind == "coaching" and state.affect in ("flat", "engaged"):
         return VoiceStyle(energy=0, pace=-1, warmth=1)

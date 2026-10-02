@@ -15,6 +15,7 @@ import agent.agents.shared.helpers as helpers
 from agent.agents.shared.helpers import (
     build_program_generation_payload,
     check_calibration,
+    normalize_exercise_name,
     normalize_sex,
     service_headers,
 )
@@ -54,6 +55,23 @@ class TestNormalizeSex:
     def test_unclear_returns_none(self):
         assert normalize_sex("yes") is None
         assert normalize_sex("") is None
+
+
+class TestNormalizeExerciseName:
+    def test_plain_squat_defaults_to_bodyweight(self):
+        for alias in ("squat", "squats", "Squat ", "bodyweight squat", "air squats", "bw squat"):
+            assert normalize_exercise_name(alias) == "Bodyweight Squat"
+
+    def test_bar_mention_maps_to_barbell_back_squat(self):
+        for alias in ("back squat", "barbell squat", "barbell back squats"):
+            assert normalize_exercise_name(alias) == "Barbell Back Squat"
+
+    def test_bodyweight_squat_is_a_squat_movement_pattern(self):
+        # Calibration is stored per movement pattern; a bodyweight squat must find
+        # the same calibration as a barbell squat (biomechanics/calibration.py).
+        from biomechanics.calibration import get_movement_pattern
+
+        assert get_movement_pattern("Bodyweight Squat") == "squat"
 
 
 class TestServiceHeaders:

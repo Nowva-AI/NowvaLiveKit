@@ -55,6 +55,30 @@ class TestDraftScenarios:
             assert "valgus" not in scenario.lower(), cue_key
 
 
+class TestAgentSideCues:
+    def test_every_playable_cue_gets_drafted(self):
+        from agent.services.coaching_constants import CUE_TEXT_MAP
+
+        agent_side = [
+            key for key in CUE_TEXT_MAP
+            if key not in SQUAT_CUES and not key.startswith("rep_")
+        ]
+        assert agent_side
+        for cue_key in agent_side:
+            assert cue_key in draft.cue_keys_to_draft(), cue_key
+            assert draft.scenario_for(cue_key), cue_key
+
+    def test_fix_confirmation_builds_on_its_fault(self):
+        scenario = draft.scenario_for("knees_out_fixed")
+        assert scenario.startswith(draft.CUE_SCENARIOS["knees_out"])
+        assert "held" in scenario
+
+    def test_agent_side_keys_follow_the_squat_cues(self):
+        keys = draft.cue_keys_to_draft()
+        assert keys[: len(SQUAT_CUES)] == list(SQUAT_CUES)
+        assert len(keys) == len(set(keys))
+
+
 class TestDraftPrompt:
     def test_prompt_asks_for_three_short_lines_as_json(self):
         prompt = draft.build_cue_prompt("drive")
@@ -158,14 +182,18 @@ class TestSynthesisDecisions:
 
 
 class TestAudioFormat:
-    def test_payload_requests_sonic3_raw_pcm_at_the_loader_rate(self):
-        payload = generate.build_tts_payload("Knees out", "voice-id")
-        assert payload["model_id"] == "sonic-3"
-        assert payload["transcript"] == "Knees out"
-        assert payload["voice"] == {"mode": "id", "id": "voice-id"}
-        assert payload["output_format"] == {
-            "container": "raw", "encoding": "pcm_s16le", "sample_rate": audio_cue_service.SAMPLE_RATE,
+    def test_payload_requests_flash_with_the_live_voice_settings(self):
+        payload = generate.build_tts_payload("Knees out")
+        assert payload["model_id"] == "eleven_flash_v2_5"
+        assert payload["text"] == "Knees out"
+        assert payload["voice_settings"] == {
+            "stability": generate.ELEVENLABS_DEFAULT_STABILITY,
+            "similarity_boost": generate.ELEVENLABS_DEFAULT_SIMILARITY,
+            "speed": generate.ELEVENLABS_DEFAULT_SPEED,
         }
+
+    def test_output_format_is_raw_pcm_at_the_loader_rate(self):
+        assert generate.OUTPUT_FORMAT == f"pcm_{audio_cue_service.SAMPLE_RATE}"
 
     def test_wav_matches_what_the_loader_assumes(self):
         wav_bytes = generate.pcm_to_wav_bytes(b"\x00\x01" * 240)

@@ -23,6 +23,9 @@ from pathlib import Path
 
 from agent.agents.shared.base_agent import BaseNovaAgent
 from agent.services.assessment_logger import RecommendationRecord
+from agent.services.coaching_service import assessment_focus_line
+from agent.services.squat_card import ExplainSquatMixin
+from biomechanics.diagnosis.demo_builder import summarize_cue_magnitude
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +36,14 @@ def _get_teaching_prompt(exercise: str) -> str:
     return (
         f"# Teaching Mode\n"
         f"You are assessing a beginner's {exercise} form before their workout. "
-        f"Be brief, warm, and clear."
+        f"Be brief, warm, and clear.\n"
+        f"For any how or why question about squat technique, call explain_squat and "
+        f"answer from it. Never claim to see what the cameras can't: lower-back tuck, "
+        f"upper-back rounding, bracing and foot arch are invisible on every setup."
     )
 
 
-class TeachingAgent(BaseNovaAgent):
+class TeachingAgent(ExplainSquatMixin, BaseNovaAgent):
     """Assesses a beginner's squat form, then hands off to CalibrationAgent."""
 
     def __init__(self, state, userdata, exercise: str = "squat") -> None:
@@ -83,9 +89,9 @@ class TeachingAgent(BaseNovaAgent):
         self._start_assessment_logging()
 
         await self._say(
-            f"Say something natural and brief — like you're about to check "
-            f"the user's {self.exercise} form before their workout. Think "
-            f"'let me see how you move first' energy. One sentence, no filler."
+            f"Say something natural and brief: before their workout you want "
+            f"to watch how they move their {self.exercise}. One sentence, no "
+            f"filler, in your own words."
         )
         await self._run_setup()
 
@@ -156,13 +162,23 @@ class TeachingAgent(BaseNovaAgent):
             await self._handoff(diagnosis, scoring, round_num)
             return
 
+        if message.get("proceed_anyway"):
+            coaching = getattr(self.userdata, "coaching_service", None)
+            immediate = diagnosis.get("immediate_causes") or []
+            top_cause = coaching.top_cause(diagnosis) if coaching else (immediate[0] if immediate else None)
+            await self._handoff(
+                diagnosis, scoring, round_num,
+                carried_focus=assessment_focus_line(top_cause, message.get("body_measurement")),
+            )
+            return
+
         if demo_was_played:
             await self._say(
                 f"[CONTEXT] exercise={self.exercise}, round={round_num}\n\n"
                 "The user just watched a visual demo showing their form issue "
-                "and how to correct it. Acknowledge that briefly — something like "
-                "'alright, you saw the difference' — then tell them to try again "
-                "with that adjustment. One sentence, warm and direct."
+                "and how to correct it. Briefly acknowledge that they've now seen "
+                "the difference, then tell them to try again with that adjustment. "
+                "One sentence, warm and direct, in your own words."
             )
         else:
             await self._say(self._build_correction_prompt(diagnosis, scoring, round_num))
@@ -188,8 +204,8 @@ class TeachingAgent(BaseNovaAgent):
             )
             delta = top_issue.get("parameter_delta")
             if delta:
-                delta_str = ", ".join(f"{k}: {v}" for k, v in delta.items())
-                context_parts.append(f"Recommended adjustment: {delta_str}.")
+                magnitude = summarize_cue_magnitude(top_issue.get("cause_id", ""), delta)
+                context_parts.append(f"Recommended adjustment: {magnitude}.")
 
         if len(immediate) > 1:
             context_parts.append(
@@ -202,12 +218,10 @@ class TeachingAgent(BaseNovaAgent):
             f"[CONTEXT] exercise={self.exercise}\n"
             f"{context_str}\n\n"
             f"The user's form needs adjustment before you can move on. "
-            f"Tell them the specific issue and what to fix — be actionable "
-            f"(e.g., 'widen your stance a bit' or 'push your knees out more'). "
-            f"Then tell them to try again. "
-            f"Keep it encouraging and brief (2-3 sentences). "
-            f"Do NOT say 'assessment' — say something like "
-            f"'Let me see that again with [adjustment].'"
+            f"Tell them the specific issue and the one concrete change to make, "
+            f"then ask to see it again with that change. "
+            f"Keep it encouraging and brief (2-3 sentences), in your own words. "
+            f"Do NOT say assessment."
         )
 
     # ------------------------------------------------------------------
@@ -216,11 +230,12 @@ class TeachingAgent(BaseNovaAgent):
 
     async def _handoff(
         self, diagnosis: dict, scoring: dict, round_num: int,
+        carried_focus: str | None = None,
     ) -> None:
         self._handed_off = True
-        logger.info("[TEACHING] Assessment passed — handing off to CalibrationAgent")
+        logger.info("[TEACHING] Assessment done — handing off to CalibrationAgent")
 
-        self._stop_assessment_logging(passed=True)
+        self._stop_assessment_logging(passed=carried_focus is None)
 
         session_causes = diagnosis.get("session_causes", [])
         contextual = diagnosis.get("contextual_notes", [])
@@ -236,17 +251,22 @@ class TeachingAgent(BaseNovaAgent):
         if notes:
             context += f" Things to watch under load: {'; '.join(notes[:2])}."
 
+        if carried_focus:
+            verdict = (
+                f"After {round_num} tries one thing is still off, and that's fine: it becomes "
+                f"the focus of the workout instead of another retry. {carried_focus} "
+                f"Tell them the one thing to keep working on, without asking them to try again. "
+            )
+        else:
+            verdict = "The user's squat form passed the assessment. Praise their form briefly. "
         await self._say(
             f"[CONTEXT] exercise={self.exercise}, {context}\n\n"
-            f"The user's squat form passed the assessment. "
-            f"Praise their form briefly. "
+            f"{verdict}"
             f"Then transition: tell them you need a few deep bodyweight squats "
             f"to learn their movement pattern so you can coach them properly "
             f"during the workout. "
             f"Keep it natural and brief (2-3 sentences)."
         )
-
-        await self._truncate_context_for_handoff()
 
         coaching = getattr(self.userdata, "coaching_service", None)
         if coaching is not None:
@@ -254,7 +274,7 @@ class TeachingAgent(BaseNovaAgent):
             coaching.set_assessment_ready_callback(None)
 
         from agent.agents.calibration_agent import CalibrationAgent
-        new_agent = CalibrationAgent(state=self.state, userdata=self.userdata)
+        new_agent = await self._carry_context_to(CalibrationAgent(state=self.state, userdata=self.userdata))
         self.session.update_agent(new_agent)
 
     # ------------------------------------------------------------------

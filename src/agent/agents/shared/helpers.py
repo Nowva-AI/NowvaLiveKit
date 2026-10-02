@@ -73,24 +73,28 @@ def normalize_exercise_name(raw_name: str) -> Optional[str]:
     """
     name_lower = raw_name.lower().strip()
 
+    # A plain "squat" is a bodyweight squat (every recorded quick session was one);
+    # it is a barbell squat only when the user names the bar.
     EXERCISE_ALIASES = {
-        "squat": "Barbell Back Squat",
-        "squats": "Barbell Back Squat",
+        "squat": "Bodyweight Squat",
+        "squats": "Bodyweight Squat",
         "back squat": "Barbell Back Squat",
         "back squats": "Barbell Back Squat",
         "barbell squat": "Barbell Back Squat",
+        "barbell squats": "Barbell Back Squat",
         "barbell back squat": "Barbell Back Squat",
+        "barbell back squats": "Barbell Back Squat",
         "front squat": "Barbell Front Squat",
         "front squats": "Barbell Front Squat",
         "barbell front squat": "Barbell Front Squat",
         "goblet squat": "Goblet Squat",
         "goblet squats": "Goblet Squat",
-        "bodyweight squat": "Barbell Back Squat",
-        "bodyweight squats": "Barbell Back Squat",
-        "bw squat": "Barbell Back Squat",
-        "bw squats": "Barbell Back Squat",
-        "air squat": "Barbell Back Squat",
-        "air squats": "Barbell Back Squat",
+        "bodyweight squat": "Bodyweight Squat",
+        "bodyweight squats": "Bodyweight Squat",
+        "bw squat": "Bodyweight Squat",
+        "bw squats": "Bodyweight Squat",
+        "air squat": "Bodyweight Squat",
+        "air squats": "Bodyweight Squat",
         "deadlift": "Barbell Deadlift",
         "deadlifts": "Barbell Deadlift",
         "barbell deadlift": "Barbell Deadlift",

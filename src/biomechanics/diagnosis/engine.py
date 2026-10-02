@@ -57,6 +57,16 @@ _CORE_MEASURES = ("knee_valgus_max", "depth_ratio", "hip_shift_ratio", "trunk_pi
 # Toe-out difference that counts as fully asymmetric setup, for scaling it
 # against stagger in the setup-asymmetry feature.
 SETUP_FLARE_SCALE_DEG = 60.0
+# Side-view measures a single camera cannot resolve. They are blanked before
+# causes are scored, so a frontal symptom can't voice them through a shared
+# cause (e.g. incomplete lockout -> weight too heavy, evidenced by speed loss).
+_SIDE_VIEW_FIELDS = (
+    "trunk_pitch_at_bottom",
+    "hip_shoot_deg",
+    "balance_ratio",
+    "concentric_velocity_mps",
+    "velocity_loss_pct",
+)
 
 
 class HypothesisEngine:
@@ -68,7 +78,9 @@ class HypothesisEngine:
         set_summary = score_set(reps, anthro, rom) if len(reps) >= 2 else None
         # Causes are judged on the set's median rep: a single worst rep may
         # not even show the symptom that implicated them.
-        aggregate_rep = self._aggregate_rep(reps, set_summary)
+        aggregate_rep = self._without_unseen_side_view(
+            self._aggregate_rep(reps, set_summary), set_features.capture_mode
+        )
 
         detected_symptoms = self._detect_symptoms(reps, anthro, set_features.capture_mode)
         cause_scores = self._score_causes(
@@ -304,6 +316,14 @@ class HypothesisEngine:
             return round(rep_factor * coverage, 3)
         weights = [OBSERVABILITY_WEIGHT.get(s.observability, 0.5) for s in detected_symptoms]
         return round(rep_factor * coverage * sum(weights) / len(weights), 3)
+
+    @staticmethod
+    def _without_unseen_side_view(
+        rep: RepKinematicSummary, capture_mode: str
+    ) -> RepKinematicSummary:
+        if measurement_observability("side_view", capture_mode) != NOT_OBSERVABLE:
+            return rep
+        return rep.model_copy(update={name: math.nan for name in _SIDE_VIEW_FIELDS})
 
     def _aggregate_rep(
         self,

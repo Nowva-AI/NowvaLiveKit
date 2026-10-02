@@ -77,7 +77,7 @@ class RomanianDeadliftProfile(ExerciseProfile):
             ascending_vel_threshold=8.0,
             min_depth_cm=30.0,
             standing_return_cm=5.0,
-            min_rep_duration_frames=20,
+            min_rep_duration_s=0.667,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:

@@ -14,6 +14,7 @@ from agent.services.progress_context import (
     build_progress_comparison_lines,
     build_progress_report,
     build_session_comparison_line,
+    build_trend_comparison_lines,
     fault_label,
 )
 
@@ -117,6 +118,11 @@ class TestProgressComparisonLines:
         assert "72 to 78" in joined
         assert "+6 points" in joined
 
+    def test_tempo_change_is_compared(self):
+        baseline = _baseline(per_dimension={"tempo": 0.50})
+        lines = build_progress_comparison_lines(baseline, _scoring(tempo=0.70))
+        assert "tempo: 50 to 70 (+20)" in " ".join(lines)
+
     def test_missing_dimensions_skipped(self):
         scoring = {"mean_score": 0.7, "per_dimension": {}}
         lines = build_progress_comparison_lines(_baseline(), scoring)
@@ -198,3 +204,40 @@ class TestFaultLabels:
 
     def test_unknown_fault_falls_back_to_spaced_name(self):
         assert fault_label("elbow_flare") == "elbow flare"
+
+
+def _fault_trends(total_occurrences: int = 30, total_reps: int = 60, sessions: int = 3) -> dict:
+    return {
+        "sessions_analyzed": sessions,
+        "total_reps": total_reps,
+        "fault_profile": [{"fault_type": "knee_valgus", "total_occurrences": total_occurrences}],
+        "chronic_faults": [],
+    }
+
+
+class TestTrendComparisonLines:
+    """A set is compared with recent sessions as a per-rep rate: a 5-rep set
+    must not look 'improving' just because a session has more reps."""
+
+    def test_same_rate_as_usual_says_nothing(self):
+        # Usual rate 30/60 = half the reps; this set 4 of 8 = half
+        assert build_trend_comparison_lines(_fault_trends(), {"knee_valgus": 4}, 8) == []
+
+    def test_short_set_at_the_usual_rate_is_not_called_improving(self):
+        # Per-session average is 10 occurrences; 3 of 6 reps is still half the reps
+        assert build_trend_comparison_lines(_fault_trends(), {"knee_valgus": 3}, 6) == []
+
+    def test_lower_rate_reads_as_improving(self):
+        lines = build_trend_comparison_lines(_fault_trends(), {"knee_valgus": 1}, 10)
+        assert len(lines) == 1
+        assert "CROSS-SESSION TREND" in lines[0]
+        assert "knees caving in" in lines[0]
+        assert "below" in lines[0]
+
+    def test_higher_rate_reads_as_above_usual(self):
+        lines = build_trend_comparison_lines(_fault_trends(total_occurrences=6), {"knee_valgus": 5}, 8)
+        assert len(lines) == 1
+        assert "more often" in lines[0]
+
+    def test_no_reps_gives_nothing(self):
+        assert build_trend_comparison_lines(_fault_trends(), {"knee_valgus": 0}, 0) == []

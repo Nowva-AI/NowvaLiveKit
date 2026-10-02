@@ -34,6 +34,7 @@ from agent.agents.shared.userdata import UserData
 from agent.core.latency_tracker import LatencyTracker
 from agent.services.compaction_service import CompactionService
 from agent.services.context_viewer import ContextViewer
+from agent.services.vad_lag_watchdog import VadLagWatchdog
 from profiler.collector import SessionProfiler
 
 logger = logging.getLogger(__name__)
@@ -180,12 +181,13 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Create agent session with cascade pipeline
     logger.info("[NOVA] Creating agent session...")
+    turn_handling = pipeline_factory.build_turn_handling()
     session = AgentSession(
         stt=stt,
         llm=llm,
         tts=tts,
         vad=vad,
-        turn_handling=pipeline_factory.build_turn_handling(),
+        turn_handling=turn_handling,
         userdata=userdata,
     )
     logger.info("[NOVA] Agent session created")
@@ -252,12 +254,13 @@ async def entrypoint(ctx: agents.JobContext):
     def _on_user_state(ev):
         logger.info(f"[SESSION] User state: {ev.old_state} → {ev.new_state}")
         profiler.record("turn", "user_state", old=str(ev.old_state), new=str(ev.new_state))
+        # LiveKit's user states are listening / speaking / away — there is no "idle".
         old = str(ev.old_state).lower()
         new = str(ev.new_state).lower()
-        if "idle" in old and "speaking" in new:
+        if new == "speaking" and old != "speaking":
             profiler.begin_turn()
             profiler.record_user_speech_start()
-        elif "speaking" in old and "idle" in new:
+        elif old == "speaking":
             profiler.record_user_speech_end()
 
     @session.on("user_input_transcribed")
@@ -265,7 +268,8 @@ async def entrypoint(ctx: agents.JobContext):
         if not ev.is_final and not ev.transcript.strip():
             return  # skip empty partials (VAD speech-start with no text yet)
         final_tag = "FINAL" if ev.is_final else "partial"
-        logger.info(f"[SESSION] User speech [{final_tag}]: {ev.transcript}")
+        # Transcripts are the user's own words: DEBUG only, the console log goes to disk.
+        logger.debug(f"[SESSION] User speech [{final_tag}]: {ev.transcript}")
         if ev.is_final:
             profiler.record_transcript(ev.transcript)
             profiler.record("turn", "transcript", text=ev.transcript, is_final=True)
@@ -278,9 +282,9 @@ async def entrypoint(ctx: agents.JobContext):
         if callable(text):
             text = text()
         if text:
-            logger.info(f"[SESSION] Conversation item ({role}): {text[:200]}")
+            logger.debug(f"[SESSION] Conversation item ({role}): {text[:200]}")
         else:
-            logger.info(f"[SESSION] Conversation item ({role}): [non-text content]")
+            logger.debug(f"[SESSION] Conversation item ({role}): [non-text content]")
 
     @session.on("speech_created")
     def _on_speech_created(ev):
@@ -394,7 +398,9 @@ async def entrypoint(ctx: agents.JobContext):
     def _on_tools_executed(ev):
         for call, output in ev.zipped():
             result_str = str(output.output)[:150] if output else "None"
-            logger.info(f"[SESSION] Tool executed: {call.name}({call.arguments}) → {result_str}")
+            # Arguments carry what the user said (names, emails, requests): DEBUG only.
+            logger.info(f"[SESSION] Tool executed: {call.name}")
+            logger.debug(f"[SESSION] Tool executed: {call.name}({call.arguments}) → {result_str}")
             profiler.record("tool", "executed", name=call.name, args=str(call.arguments)[:200])
 
     @session.on("error")
@@ -448,6 +454,15 @@ async def entrypoint(ctx: agents.JobContext):
             pre_connect_audio_timeout=5.0,
         ),
     )
+
+    # Hold turns longer while Silero falls behind real time (overloaded machine)
+    vad_watchdog = VadLagWatchdog(session, turn_handling["endpointing"]["min_delay"])
+    vad_watchdog_task = asyncio.create_task(vad_watchdog.run(), name="vad_lag_watchdog")
+
+    async def stop_vad_watchdog(reason: str):
+        vad_watchdog_task.cancel()
+
+    ctx.add_shutdown_callback(stop_vad_watchdog)
 
     # Start compaction service after session is live
     if userdata.compaction_service:

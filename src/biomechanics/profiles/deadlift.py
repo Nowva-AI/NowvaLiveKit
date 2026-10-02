@@ -80,7 +80,7 @@ class DeadliftProfile(ExerciseProfile):
             ascending_vel_threshold=3.0,
             min_depth_cm=20.0,
             standing_return_cm=5.0,
-            min_rep_duration_frames=20,
+            min_rep_duration_s=0.667,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:

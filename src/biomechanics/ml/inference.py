@@ -2,7 +2,9 @@
 BiLSTM Inference Orchestrator
 
 Wires feature extraction → sequence buffering → model forward pass → rep counting
-into a single ``process_skeleton()`` call for the pipeline.
+into a single ``process_skeleton()`` call for the pipeline. Live skeletons are
+Y-down with missing keypoints zeroed at the hip centre; the model sees the Y-up
+training convention and each missing keypoint at its last measured position.
 """
 
 from typing import Optional, Tuple
@@ -16,6 +18,9 @@ from biomechanics.ml.feature_extractor import LandmarkFeatureExtractor
 from biomechanics.ml.sequence_buffer import SequenceBuffer
 from biomechanics.ml.bilstm_model import BiLSTMRepModel
 from biomechanics.ml.bilstm_counter import BiLSTMRepCounter, BiLSTMCounterConfig
+
+# Keypoints below this confidence are missing (the IK solver's floor).
+MIN_KEYPOINT_CONFIDENCE = 0.1
 
 
 class BiLSTMInference:
@@ -35,8 +40,10 @@ class BiLSTMInference:
         self._model_path = model_path
         self._device = device
 
-        self._extractor = LandmarkFeatureExtractor()
+        self._extractor = LandmarkFeatureExtractor(input_y_down=True)
         self._buffer = SequenceBuffer(window_size=30)
+        self._last_measured_points: Optional[np.ndarray] = None
+        self._ever_measured: Optional[np.ndarray] = None
         self._counter = BiLSTMRepCounter(config)
         self._model: Optional[BiLSTMRepModel] = None  # lazy loaded
 
@@ -55,7 +62,7 @@ class BiLSTMInference:
         if self._model is None:
             self._load_model()
 
-        features = self._extractor.extract(skeleton)
+        features = self._extractor.extract_points(self._hold_last_measured(skeleton))
         sequence = self._buffer.push(features)
 
         if sequence is None:
@@ -72,6 +79,17 @@ class BiLSTMInference:
             timestamp=skeleton.timestamp,
             frame_index=skeleton.frame_index,
         )
+
+    def _hold_last_measured(self, skeleton: Skeleton3D) -> np.ndarray:
+        points = skeleton.to_numpy()
+        measured = np.array([kp.confidence for kp in skeleton.keypoints]) >= MIN_KEYPOINT_CONFIDENCE
+        if self._last_measured_points is None:
+            self._last_measured_points = points.copy()
+            self._ever_measured = measured.copy()
+        held = np.where((~measured & self._ever_measured)[:, None], self._last_measured_points, points)
+        self._last_measured_points = np.where(measured[:, None], points, self._last_measured_points)
+        self._ever_measured |= measured
+        return held
 
     @property
     def rep_count(self) -> int:
@@ -108,3 +126,5 @@ class BiLSTMInference:
         """Reset buffer and counter state (e.g. between sets)."""
         self._buffer.reset()
         self._counter.reset()
+        self._last_measured_points = None
+        self._ever_measured = None

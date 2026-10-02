@@ -147,46 +147,62 @@ class TestCueCachePreemption:
         assert cache.get_cue_for_fault("velocity_loss", later) == "drive"
 
 
+async def _rep(orch, rep_number: int, *faults: tuple) -> None:
+    """One rep: its faults arrive, then rep_complete decides the cue."""
+    for cue_key, fault_type, severity, *observability in faults:
+        await orch.on_fault(
+            cue_key, fault_type, severity,
+            observability=observability[0] if observability else "observable",
+        )
+    await orch.on_rep_complete(rep_number, "parallel", False, [f[1] for f in faults])
+
+
 class TestOrchestratorPreemption:
-    def test_knee_valgus_jumps_the_fault_gap(self):
+    def test_severe_knee_cave_jumps_the_fault_gap(self):
         async def _run():
             orch = _orchestrator()
-            await orch.on_fault("chest_up", "hip_shoot", "mild")
+            orch.reset_set(target_reps=10)
+            await _rep(orch, 1, ("lockout", "lockout", "moderate"))
             orch._last_fault_cue_time -= 4.7  # pretend 4.7s elapsed
-            await orch.on_fault("knees_out", "knee_valgus", "moderate")
-            assert "knees_out" in _drain(orch)
+            await _rep(orch, 2, ("knees_out", "knee_valgus", "severe"))
+            assert sorted(_drain(orch)) == ["knees_out", "lockout"]
 
         asyncio.run(_run())
 
-    def test_lower_priority_does_not_jump_the_gap(self):
+    def test_same_fault_does_not_jump_the_gap(self):
         async def _run():
             orch = _orchestrator()
-            await orch.on_fault("knees_out", "knee_valgus", "moderate")
+            orch.reset_set(target_reps=10)
+            await _rep(orch, 1, ("knees_out", "knee_valgus", "moderate"))
             orch._last_fault_cue_time -= 4.7
-            await orch.on_fault("level_bar", "bilateral_asymmetry", "mild")
+            await _rep(orch, 2, ("knees_out", "knee_valgus", "moderate"))
             assert _drain(orch) == ["knees_out"]
 
         asyncio.run(_run())
 
-    def test_queued_faults_dispatch_most_important_first(self):
+    def test_one_cue_per_rep_the_most_important(self):
         async def _run():
             orch = _orchestrator()
-            # All three enqueue because each has strictly higher priority.
-            await orch.on_fault("drive", "velocity_loss", "mild")
-            await orch.on_fault("even_it_out", "hip_shift", "mild")
-            await orch.on_fault("knees_out_left", "knee_valgus", "mild")
-            assert _drain(orch) == ["knees_out_left", "even_it_out", "drive"]
+            orch.reset_set(target_reps=10)
+            await _rep(
+                orch, 1,
+                ("lockout", "lockout", "moderate"),
+                ("slow_down", "tempo", "moderate"),
+                ("knees_out_left", "knee_valgus", "moderate"),
+            )
+            assert _drain(orch) == ["knees_out_left"]
 
         asyncio.run(_run())
 
     def test_priority_resets_between_sets(self):
         async def _run():
             orch = _orchestrator()
-            await orch.on_fault("knees_out", "knee_valgus", "moderate")
+            orch.reset_set(target_reps=10)
+            await _rep(orch, 1, ("knees_out", "knee_valgus", "moderate"))
             orch.reset_set(target_reps=5)
             # A new set must not be blocked by the previous set's top cue.
-            await orch.on_fault("drive", "velocity_loss", "mild")
-            assert "drive" in _drain(orch)
+            await _rep(orch, 1, ("slow_down", "tempo", "moderate"))
+            assert "slow_down" in _drain(orch)
 
         asyncio.run(_run())
 
@@ -195,7 +211,7 @@ class TestOrchestratorCueSelection:
     def test_side_cue_is_played_as_given(self):
         async def _run():
             orch = _orchestrator()
-            await orch.on_fault("knees_out_right", "knee_valgus", "moderate")
+            await _rep(orch, 1, ("knees_out_right", "knee_valgus", "moderate"))
             assert _drain(orch) == ["knees_out_right"]
 
         asyncio.run(_run())
@@ -203,7 +219,7 @@ class TestOrchestratorCueSelection:
     def test_side_cue_without_audio_falls_back_to_base(self):
         async def _run():
             orch = _orchestrator(get_cue_audio_fn=lambda key: key == "knees_out")
-            await orch.on_fault("knees_out_left", "knee_valgus", "moderate")
+            await _rep(orch, 1, ("knees_out_left", "knee_valgus", "moderate"))
             assert _drain(orch) == ["knees_out"]
 
         asyncio.run(_run())
@@ -211,7 +227,7 @@ class TestOrchestratorCueSelection:
     def test_approximate_fault_is_never_cued(self):
         async def _run():
             orch = _orchestrator()
-            await orch.on_fault("chest_up", "hip_shoot", "severe", observability="approximate")
+            await _rep(orch, 1, ("even_it_out", "hip_shift", "severe", "approximate"))
             assert _drain(orch) == []
             assert orch._recent_faults == []
 
@@ -220,8 +236,11 @@ class TestOrchestratorCueSelection:
     def test_approximate_fault_does_not_take_the_cue_slot(self):
         async def _run():
             orch = _orchestrator()
-            await orch.on_fault(None, "knee_valgus", "severe", observability="approximate")
-            await orch.on_fault("drive", "velocity_loss", "mild", observability="observable")
-            assert _drain(orch) == ["drive"]
+            await _rep(
+                orch, 1,
+                (None, "knee_valgus", "severe", "approximate"),
+                ("slow_down", "tempo", "moderate"),
+            )
+            assert _drain(orch) == ["slow_down"]
 
         asyncio.run(_run())

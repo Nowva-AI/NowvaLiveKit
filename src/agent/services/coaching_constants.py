@@ -29,6 +29,26 @@ COACHING_PERSONA = (
     f"{SPOKEN_OUTPUT_RULES}"
 )
 
+# Fault-specific praise, played once a cued fault stays gone for two reps.
+# Keyed "<base cue key>_fixed"; external focus, like the cues themselves.
+FIXED_CUE_TEXT: dict[str, str] = {
+    "knees_out_fixed": "That's it, spreading the floor.",
+    "chest_up_fixed": "Better, bar and hips rose together.",
+    "heels_down_fixed": "Good, whole foot stayed down.",
+    "whole_foot_fixed": "Better, balanced over mid-foot.",
+    "even_it_out_fixed": "Good, staying centered.",
+    "level_bar_fixed": "Good, bar stayed level.",
+    "deeper_fixed": "There's your depth.",
+    "square_feet_fixed": "Good, feet are even.",
+    "lockout_fixed": "Good, all the way up.",
+    "slow_down_fixed": "Better, controlled on the way down.",
+    "same_depth_fixed": "Right back to your depth.",
+    "drive_fixed": "That one moved, good drive.",
+}
+
+# Played once when the pipeline loses sight of the athlete mid-set.
+TRACKING_LOST_CUE = "tracking_lost"
+
 # Number words for rep cues
 _NUMBER_WORDS = {
     1: "One!", 2: "Two!", 3: "Three!", 4: "Four!", 5: "Five!",
@@ -75,6 +95,8 @@ CUE_TEXT_MAP: dict[str, str] = {
     "strong": "Strong!",
     "clean": "Clean!",
     "perfect": "Perfect!",
+    **FIXED_CUE_TEXT,
+    TRACKING_LOST_CUE: "I can't see you fully, step back into view.",
     # Rep counts
     **{f"rep_{i}": _NUMBER_WORDS[i] for i in range(1, 21)},
 }
@@ -114,25 +136,8 @@ CUE_DISPLAY_LABELS: dict[str, str] = {
     "strong": "Strong!",
     "clean": "Clean!",
     "perfect": "Perfect!",
-}
-
-# Preemptive outcome text: cue_key → (positive_text, negative_text)
-# Positive plays when the fault is fixed on the next rep; negative if it persists.
-# Keyed by base cue key: a side variant (knees_out_left) uses its base entry.
-PREEMPTIVE_TEXT: dict[str, tuple[str, str]] = {
-    "knees_out": ("Good, knees are tracking better!", "Still caving in, push those knees out!"),
-    "chest_up": ("Nice, chest and hips came up together!", "Hips are still shooting up first, lead with your chest!"),
-    "deeper": ("Great depth that time!", "Still a bit shallow, try to get lower!"),
-    "heels_down": ("Heels are planted!", "Heels are still coming up!"),
-    "whole_foot": ("Better, weight's over the whole foot!", "Still drifting off the middle of your foot!"),
-    "even_it_out": ("Looking more even!", "Still favoring one side!"),
-    "level_bar": ("Bar's level now!", "Bar's still tipping, push evenly!"),
-    "square_feet": ("Feet look even now!", "Feet are still uneven, square them up!"),
-    "lockout": ("Nice, standing tall!", "Still not all the way up, finish tall!"),
-    "slow_down": ("Better tempo!", "Still rushing, slow it down!"),
-    "same_depth": ("Right back to your depth!", "Still a bit higher than your first reps!"),
-    "drive": ("That moved faster!", "Still slowing down, drive hard!"),
-    "brace": ("Good brace!", "Don't forget to brace your core!"),
+    **{key: "Fixed" for key in FIXED_CUE_TEXT},
+    TRACKING_LOST_CUE: "Out of view",
 }
 
 # Intra-set stance/toe-out coaching (Feature 2). These play from the cue
@@ -154,9 +159,9 @@ ADJUSTMENT_ON_TARGET_CUE = "adjust_good"
 
 # Only used when a cue has no pre-generated audio on disk.
 ADJUSTMENT_SYSTEM_PROMPT = (
-    f"{NOVA_IDENTITY} Mid-set. Give a 2-5 word stance adjustment cue. "
-    "No filler words, no humor, plain spoken text only. Examples: "
-    "'A little wider', 'Right there, perfect', 'Too wide, bring it in'."
+    f"{NOVA_IDENTITY} Mid-set. Give one 2-5 word stance cue: which way to move the feet, "
+    "or a confirmation when they're on target. No filler words, no humor, plain spoken "
+    "text only. Vary the wording."
 )
 
 ADJUSTMENT_PARAM_LABELS: dict[str, str] = {

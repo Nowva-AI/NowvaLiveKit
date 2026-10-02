@@ -9,6 +9,7 @@ from typing import Any
 from livekit.agents import Agent, RunContext, function_tool, llm
 
 from affect.state import STATE_ITEM_PREFIX, AthleteState
+from affect.tts_adapters import strip_markup_stream, tts_parses_cartesia_tags
 from agent.services.chat_template_compat import normalize_for_strict_template, requires_strict_template
 from agent.services.tts_normalizer import normalize_stream
 
@@ -95,16 +96,19 @@ class AffectNodesMixin:
 
     def tts_node(self, text, model_settings: Any):
         stream = normalize_stream(text)
+        activity = getattr(self, "_activity", None)
+        tts = getattr(activity, "tts", None) if activity is not None else None
         service = self._affect_service()
         if service is not None and getattr(service, "enabled", False):
             try:
                 style = service.current_style(service.speech_kind())
                 adapter = service.style_adapter
-                activity = getattr(self, "_activity", None)
-                tts = getattr(activity, "tts", None) if activity is not None else None
                 if tts is not None:
                     adapter.prepare_tts(tts, style)
                 stream = adapter.wrap_text(stream, style)
             except Exception:  # noqa: BLE001
                 logger.exception("[AFFECT] tts_node styling failed; continuing unstyled")
+        if tts is not None and not tts_parses_cartesia_tags(tts):
+            # Only sonic-3 performs [laughter]; any other voice reads the word out.
+            stream = strip_markup_stream(stream)
         return Agent.default.tts_node(self, stream, model_settings)

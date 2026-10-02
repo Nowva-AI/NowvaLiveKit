@@ -585,6 +585,15 @@ class PipelineFrame(BaseModel):
     # Set only on the frame the shallow rep completes.
     shallow_rep_class: Optional[int] = None
 
+    # Tracking status. missing_keypoints: leg keypoints (hips, knees, ankles)
+    # this capture did not measure; None when no new frame was captured.
+    # extrapolated_keypoints: leg keypoints of the lagged analysis frame that
+    # were carried by the Kalman, not measured — such frames stay out of the
+    # rep features. lost_cameras: cameras that stopped delivering (multi-camera).
+    missing_keypoints: Optional[List[str]] = None
+    extrapolated_keypoints: Optional[List[str]] = None
+    lost_cameras: Optional[List[str]] = None
+
     # Metadata
     latency_ms: Dict[str, float] = Field(default_factory=dict)  # Per-layer timing
 

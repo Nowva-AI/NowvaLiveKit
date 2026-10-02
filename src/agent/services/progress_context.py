@@ -15,6 +15,7 @@ DIMENSION_LABELS = {
     "trunk_control": "trunk control",
     "knee_tracking": "knee tracking",
     "symmetry": "symmetry",
+    "tempo": "tempo",
 }
 
 FAULT_LABELS = {
@@ -80,7 +81,7 @@ def build_greeting_progress_line(baseline: dict | None) -> str | None:
     return (
         ", ".join(parts) + ". "
         "Weave ONE brief reference to this into the greeting as today's goal, "
-        "in your own words — a quick 'here's what we're cleaning up today' beat, "
+        "in your own words — one quick beat naming what you'll clean up today, "
         "phrased differently every session."
     )
 
@@ -349,37 +350,38 @@ def build_chronic_fault_celebration(
 
 
 def build_trend_comparison_lines(
-    fault_trends: dict | None, current_set_faults: dict[str, int]
+    fault_trends: dict | None, current_faults: dict[str, int], current_reps: int
 ) -> list[str]:
-    """Cross-session trend context for set recaps."""
-    if not fault_trends:
+    """Cross-session trend context for recaps, compared as per-rep rates."""
+    if not fault_trends or current_reps <= 0:
         return []
 
     n_sessions = fault_trends.get("sessions_analyzed", 0)
-    if n_sessions < 2:
+    total_reps = fault_trends.get("total_reps", 0)
+    if n_sessions < 2 or total_reps <= 0:
         return []
 
-    total_reps = fault_trends.get("total_reps", 0)
     profile_lookup = {
         e["fault_type"]: e for e in fault_trends.get("fault_profile", [])
     }
 
     lines: list[str] = []
-    for ft, count in current_set_faults.items():
+    for ft, count in current_faults.items():
         entry = profile_lookup.get(ft)
         if not entry or entry["total_occurrences"] < 3:
             continue
-        avg_per_session = round(entry["total_occurrences"] / n_sessions, 1)
+        usual_rate = entry["total_occurrences"] / total_reps
+        current_rate = count / current_reps
         label = fault_label(ft)
-        if count < avg_per_session * 0.5:
+        if current_rate < usual_rate * 0.5:
             lines.append(
-                f"CROSS-SESSION TREND: {label} hit {count} reps this set vs "
-                f"{avg_per_session} per session average — trending the right direction."
+                f"CROSS-SESSION TREND: {label} showed on {count} of {current_reps} reps — "
+                f"well below their usual rate from recent sessions, trending the right direction."
             )
-        elif count > avg_per_session * 1.5:
+        elif current_rate > usual_rate * 1.5:
             lines.append(
-                f"CROSS-SESSION TREND: {label} hit {count} reps this set vs "
-                f"{avg_per_session} per session average — above their usual."
+                f"CROSS-SESSION TREND: {label} showed on {count} of {current_reps} reps — "
+                f"more often than their usual rate from recent sessions."
             )
 
     return lines

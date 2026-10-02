@@ -29,7 +29,8 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 load_dotenv(REPO_ROOT / ".env")
 
 from agent.agents.prompts.base_prompt import NOVA_IDENTITY  # noqa: E402
-from agent.services.coaching_constants import CUE_TEXT_MAP  # noqa: E402
+from agent.services.coaching_constants import CUE_TEXT_MAP, TRACKING_LOST_CUE  # noqa: E402
+from agent.services.coaching_orchestrator import FIXED_CUE_SUFFIX  # noqa: E402
 from biomechanics.coaching.cue_cache import SQUAT_CUES, base_cue_key  # noqa: E402
 
 CUE_TEXT_DIR = REPO_ROOT / "src" / "assets" / "cue_text"
@@ -53,7 +54,9 @@ SYSTEM_PROMPT = (
     "External focus: point at the floor, the bar, the feet or a direction, not at muscles. "
     "No jargon a beginner wouldn't know instantly (never 'valgus', 'eccentric', "
     "'concentric', 'dorsiflexion' or 'hinge'). "
-    "A voice engine speaks the lines: no emojis, no ALL CAPS, no stage directions."
+    "A voice engine speaks the lines: no emojis, no ALL CAPS, no stage directions. "
+    "The athlete may be squatting with no bar at all, so never mention the bar unless the "
+    "scenario is about the bar itself."
 )
 
 # Base cue key -> the coaching moment the lines must fit. Side variants add
@@ -64,8 +67,8 @@ CUE_SCENARIOS: dict[str, str] = {
         "over the little toes, like spreading the floor apart with the feet."
     ),
     "chest_up": (
-        "The athlete's hips rise faster than their chest coming out of the bottom. Drive the "
-        "upper back up into the bar so chest and hips rise together."
+        "The athlete's hips rise faster than their chest coming out of the bottom. Chest and "
+        "hips should rise together."
     ),
     "heels_down": (
         "One of the athlete's heels lifts off the floor. Keep the whole foot planted, weight "
@@ -135,6 +138,15 @@ CUE_SCENARIOS: dict[str, str] = {
     ),
 }
 
+# Cues the voice agent plays on its own (the pipeline never lists them):
+# fix confirmations, built from their fault's scenario, plus these.
+AGENT_CUE_SCENARIOS: dict[str, str] = {
+    TRACKING_LOST_CUE: (
+        "Mid-set, the camera has lost sight of the athlete's legs. Ask them to step back "
+        "into view so you can see all of them."
+    ),
+}
+
 SIDE_INSTRUCTIONS: dict[str, str] = {
     "knees_out": "Only the {side} knee caves. Every line must name the {side} knee.",
     "heels_down": "Only the {side} heel lifts. Every line must name the {side} heel.",
@@ -192,10 +204,21 @@ async def _draft_with_llm(model: str, cue_keys: list[str]) -> dict[str, list[str
 
 
 def cue_keys_to_draft() -> list[str]:
-    return list(SQUAT_CUES)
+    fix_confirmations = [key for key in CUE_TEXT_MAP if key.endswith(FIXED_CUE_SUFFIX)]
+    agent_keys = [key for key in fix_confirmations + list(AGENT_CUE_SCENARIOS) if key not in SQUAT_CUES]
+    return list(SQUAT_CUES) + agent_keys
 
 
 def scenario_for(cue_key: str) -> str:
+    if cue_key in AGENT_CUE_SCENARIOS:
+        return AGENT_CUE_SCENARIOS[cue_key]
+    if cue_key.endswith(FIXED_CUE_SUFFIX):
+        fault_scenario = CUE_SCENARIOS[cue_key[:-len(FIXED_CUE_SUFFIX)]]
+        return (
+            f"{fault_scenario} You cued this earlier in the set; the athlete fixed it and has "
+            "held it for two reps. Confirm it briefly and name what they did right — praise, "
+            "not another correction."
+        )
     base_key = base_cue_key(cue_key)
     scenario = CUE_SCENARIOS[base_key]
     if base_key == cue_key:

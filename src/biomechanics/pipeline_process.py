@@ -45,6 +45,7 @@ from biomechanics.diagnosis.engine import HypothesisEngine
 from biomechanics.diagnosis.rep_scoring import score_set
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.diagnosis.types import SetFeatures
+from biomechanics.faults.observability import SINGLE_CAMERA, capture_mode_from_env
 from biomechanics.triangulation.calibration import (
     WORLD_ANCHOR_BOARD,
     CalibrationResult,
@@ -90,8 +91,13 @@ DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0, "peakHipFlex":
 
 # Body measurement accumulates during the assessment reps. Reps finished
 # before it completes are held (their bottom frames are kept) so they still
-# get kinematics; past this wait after the last rep they go through without.
+# get kinematics; past this wait after the last rep they are diagnosed on the
+# best estimate so far (provisional), or without kinematics if there is none.
 ASSESSMENT_MEASUREMENT_WAIT_S = 5.0
+# Real sessions: 28% never passed the assessment and the median lifter waited
+# 88 s for a first workout rep. After this many rounds the workout starts with
+# the top cue carried into the set.
+MAX_ASSESSMENT_ROUNDS = 2
 
 # Camera extrinsics are a property of the rig, so they persist across sessions: one
 # file per camera set (calibration.rig_calibration_path), reused until deleted. Refines
@@ -293,6 +299,46 @@ def _adopt_measured_athlete_params(pipeline, session_tracker, bridge, baseline: 
             f"tibia={athlete_params['tibia_avg_m']:.3f}m"
         )
     return athlete_params
+
+
+def _adopt_provisional_athlete_params(pipeline, session_tracker, bridge, baseline: dict) -> dict | None:
+    """The best body estimate so far, for a diagnosis that cannot wait for the measurement."""
+    athlete_params = pipeline.body_calibration.provisional_athlete_params()
+    if athlete_params is None:
+        return None
+    session_tracker.set_athlete_params(athlete_params, baseline)
+    bridge.set_athlete_params(athlete_params, baseline)
+    print(
+        f"  [ASSESSMENT] Body measurement unfinished — diagnosing on a provisional estimate: "
+        f"femur={athlete_params['femur_avg_m']:.3f}m tibia={athlete_params['tibia_avg_m']:.3f}m "
+        f"(replaced once the measurement completes)"
+    )
+    return athlete_params
+
+
+def _assessment_result_message(
+    assessment_round: int,
+    has_immediate: bool,
+    diagnosis: dict,
+    scoring: dict,
+    demo: dict,
+    body_measurement: str,
+) -> dict:
+    """passed: no immediate cause. final_round: no further assessment round follows.
+    proceed_anyway: the last round still found causes — the workout starts and the
+    top immediate cause is carried into the set."""
+    final_round = not has_immediate or assessment_round >= MAX_ASSESSMENT_ROUNDS
+    return {
+        "type": "assessment_result",
+        "round": assessment_round,
+        "passed": not has_immediate,
+        "final_round": final_round,
+        "proceed_anyway": has_immediate and final_round,
+        "body_measurement": body_measurement,
+        "diagnosis": diagnosis,
+        "scoring": scoring,
+        "demo": demo,
+    }
 
 
 def _build_calibration_complete_message(
@@ -902,6 +948,12 @@ def run_biomechanics_pipeline(
 
     # Initialize pipeline
     try:
+        if config.pose.backend == "rtmpose" and capture_mode_from_env() == SINGLE_CAMERA:
+            raise ValueError(
+                "pose.backend 'rtmpose' estimates 2D only: on a single camera no 3D pose is ever "
+                "produced and the readiness gate never passes. Set pose.backend: mediapipe in "
+                "config/biomechanics.yaml, or run the rig with NOWVA_MULTI_CAMERA=true"
+            )
         pipeline = BiomechanicsPipeline(
             config, exercise_name=exercise_name, defer_capture=preload,
         )
@@ -979,6 +1031,8 @@ def run_biomechanics_pipeline(
     # Session-scoped body measurements feeding diagnosis: restored from the
     # stored calibration, or adopted once the pipeline finishes measuring.
     athlete_params: dict | None = None
+    # True while athlete_params is the assessment's provisional estimate.
+    athlete_params_provisional = False
     athlete_baseline: dict = dict(DEFAULT_ROM_BASELINE)
 
     # --- Apply existing calibration if provided ---
@@ -1168,11 +1222,17 @@ def run_biomechanics_pipeline(
 
                 while assessment_reps_done < ASSESSMENT_TARGET_REPS or pending_reps:
                     result = pipeline.process_frame()
+                    bridge.update_tracking_quality(
+                        result, active=pipeline.is_ready, in_rep=pipeline.rep_counter.in_rep,
+                    )
+                    bridge.update_camera_status(result)
 
-                    if athlete_params is None:
-                        athlete_params = _adopt_measured_athlete_params(
+                    if athlete_params is None or athlete_params_provisional:
+                        measured = _adopt_measured_athlete_params(
                             pipeline, session_tracker, bridge, athlete_baseline,
                         )
+                        if measured is not None:
+                            athlete_params, athlete_params_provisional = measured, False
 
                     if pipeline.is_ready and result.skeleton_3d is not None:
                         bridge.send_frame_data(result, rep_phase=pipeline.rep_counter.phase)
@@ -1212,9 +1272,17 @@ def run_biomechanics_pipeline(
                         assessment_reps_done >= ASSESSMENT_TARGET_REPS
                         and time.time() - last_rep_time > ASSESSMENT_MEASUREMENT_WAIT_S
                     )
+                    if pending_reps and athlete_params is None and measurement_overdue:
+                        athlete_params = _adopt_provisional_athlete_params(
+                            pipeline, session_tracker, bridge, athlete_baseline,
+                        )
+                        athlete_params_provisional = athlete_params is not None
                     if pending_reps and (athlete_params is not None or measurement_overdue):
                         if athlete_params is None:
-                            print("  [ASSESSMENT] WARNING: body measurement unfinished — reps pass without kinematics")
+                            print(
+                                "  [ASSESSMENT] WARNING: body measurement unfinished and no provisional "
+                                "estimate — reps pass without kinematics"
+                            )
                         for rep_data, bottom_kpts, bottom_angles, standing_kpts, trajectory_samples in pending_reps:
                             session_tracker.on_rep_complete(
                                 rep_data,
@@ -1283,7 +1351,8 @@ def run_biomechanics_pipeline(
                     # Build demo data before announcing the result so the
                     # choreography is ready the moment the agent reacts.
                     pending_demo = None
-                    if has_immediate and not demo_played:
+                    # The demo plays between rounds; the last round goes straight to the workout.
+                    if has_immediate and not demo_played and assessment_round < MAX_ASSESSMENT_ROUNDS:
                         observed_kpts = session_tracker.bottom_frame_for_rep(
                             score_summary.worst_rep_number
                         )
@@ -1294,22 +1363,29 @@ def run_biomechanics_pipeline(
                     if pending_demo is not None:
                         print(f"  [DEMO] Pose stack ready: {len(pending_demo.cues)} cue(s)")
 
-                    ipc_client.send_message(nan_to_none({
-                        "type": "assessment_result",
-                        "round": assessment_round,
-                        "passed": not has_immediate,
-                        "diagnosis": diagnosis_dict,
-                        "scoring": scoring_dict,
-                        "demo": {
+                    result_message = _assessment_result_message(
+                        assessment_round,
+                        has_immediate,
+                        diagnosis_dict,
+                        scoring_dict,
+                        {
                             "available": pending_demo is not None,
                             "cues": [cue.model_dump() for cue in pending_demo.cues]
                             if pending_demo is not None else [],
                         },
-                    }))
+                        body_measurement="provisional" if athlete_params_provisional else "complete",
+                    )
+                    ipc_client.send_message(nan_to_none(result_message))
 
                     if not has_immediate:
                         assessment_passed = True
                         print(f"\n  [ASSESSMENT] PASSED after {assessment_round} round(s)")
+                    elif result_message["proceed_anyway"]:
+                        assessment_passed = True
+                        print(
+                            f"\n  [ASSESSMENT] Issues remain after {assessment_round} rounds — "
+                            f"starting the workout with the top cue carried into the set"
+                        )
                     else:
                         print(f"  [ASSESSMENT] Issues found — user needs to correct and retry")
                         if pending_demo is not None:
@@ -1343,6 +1419,9 @@ def run_biomechanics_pipeline(
                         "type": "assessment_result",
                         "round": assessment_round,
                         "passed": True,
+                        "final_round": True,
+                        "proceed_anyway": False,
+                        "body_measurement": "missing",
                         "diagnosis": {},
                         "scoring": {},
                     })
@@ -1387,6 +1466,10 @@ def run_biomechanics_pipeline(
         try:
             while not tracker.is_complete:
                 result = pipeline.process_frame()
+                bridge.update_tracking_quality(
+                    result, active=pipeline.is_ready, in_rep=pipeline.rep_counter.in_rep,
+                )
+                bridge.update_camera_status(result)
 
                 if pipeline.is_ready and result.skeleton_3d is not None:
                     cal_set_collector.record_frame(result, result.skeleton_3d)
@@ -1442,7 +1525,10 @@ def run_biomechanics_pipeline(
 
             # Body measurements are session-scoped (per-set resets never touch
             # them); the params adopted during assessment back that up.
-            cal_athlete_params = _extract_athlete_params(pipeline) or athlete_params
+            # A provisional estimate is never persisted as the athlete's body.
+            cal_athlete_params = _extract_athlete_params(pipeline) or (
+                None if athlete_params_provisional else athlete_params
+            )
             # Build real baseline from calibration peaks
             cal_baseline = {
                 "peakDorsi": peaks["peak_dorsiflexion"] if peaks["peak_dorsiflexion"] is not None
@@ -1474,6 +1560,7 @@ def run_biomechanics_pipeline(
             # Wire athlete params for diagnosis engine
             if cal_athlete_params is not None:
                 athlete_params = cal_athlete_params
+                athlete_params_provisional = False
                 session_tracker.set_athlete_params(cal_athlete_params, cal_baseline)
                 bridge.set_athlete_params(cal_athlete_params, cal_baseline)
                 print(
@@ -1753,12 +1840,21 @@ def run_biomechanics_pipeline(
                 )
 
             result = pipeline.process_frame()
+            # A set is being collected only while ready and not resting.
+            bridge.update_tracking_quality(
+                result, active=pipeline.is_ready and not resting and not workout_finished,
+                in_rep=pipeline.rep_counter.in_rep,
+            )
+            bridge.update_camera_status(result)
 
-            # Returning users without stored params get measured during sets
-            if athlete_params is None:
-                athlete_params = _adopt_measured_athlete_params(
+            # Returning users without stored params get measured during sets;
+            # a provisional assessment estimate is replaced the same way.
+            if athlete_params is None or athlete_params_provisional:
+                measured = _adopt_measured_athlete_params(
                     pipeline, session_tracker, bridge, athlete_baseline,
                 )
+                if measured is not None:
+                    athlete_params, athlete_params_provisional = measured, False
 
             if on_demand_bridge is not None:
                 # Replay shows a frozen past rep — streaming the live pose

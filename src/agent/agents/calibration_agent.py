@@ -19,8 +19,8 @@ The system runs two phases automatically:
 
 1. **Form Assessment** (1 rep): The user does 1 bodyweight rep. The system
    analyzes form and either asks for corrections or moves on.
-2. **Calibration** (5 reps): The user does 5 deep bodyweight reps to set
-   personalized thresholds.
+2. **Calibration** (5 reps): The user does 5 deep bodyweight reps that measure
+   their range and set their personal depth target.
 
 # Your Job
 - Be encouraging and patient
@@ -77,9 +77,9 @@ class CalibrationAgent(BaseNovaAgent):
         logger.info("[CALIBRATION] Calibration complete — handing off to WorkoutAgent")
         from agent.agents.workout_agent import WorkoutAgent
 
-        new_agent = WorkoutAgent(
+        new_agent = await self._carry_context_to(WorkoutAgent(
             state=self.state,
             userdata=self.userdata,
             from_calibration=True,
-        )
+        ))
         self.session.update_agent(new_agent)

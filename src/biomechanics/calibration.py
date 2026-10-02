@@ -21,6 +21,7 @@ EXERCISE_TO_MOVEMENT_PATTERN: Dict[str, str] = {
     "Barbell Back Squat": "squat",
     "Barbell Front Squat": "squat",
     "Goblet Squat": "squat",
+    "Bodyweight Squat": "squat",
     # Hip hinge variants (future)
     "Barbell Deadlift": "hip_hinge",
     "Romanian Deadlift": "hip_hinge",

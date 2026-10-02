@@ -82,7 +82,7 @@ async def _strip_stream(text: AsyncIterable[str]) -> AsyncIterator[str]:
         yield strip_style_tags(chunk)
 
 
-async def _strip_markup_stream(text: AsyncIterable[str]) -> AsyncIterator[str]:
+async def strip_markup_stream(text: AsyncIterable[str]) -> AsyncIterator[str]:
     async for chunk in text:
         cleaned = strip_spoken_markup(chunk)
         if cleaned:
@@ -217,7 +217,7 @@ class ElevenLabsSettingsAdapter:
         )
 
     def wrap_text(self, text: AsyncIterable[str], style: VoiceStyle) -> AsyncIterator[str]:
-        return _strip_markup_stream(text)
+        return strip_markup_stream(text)
 
 
 def _given_float(settings: Any, field: str, default: float) -> float:
@@ -265,7 +265,7 @@ class MarkupFreeAdapter:
         return None
 
     def wrap_text(self, text: AsyncIterable[str], style: VoiceStyle) -> AsyncIterator[str]:
-        return _strip_markup_stream(text)
+        return strip_markup_stream(text)
 
 
 class Qwen3InstructAdapter:

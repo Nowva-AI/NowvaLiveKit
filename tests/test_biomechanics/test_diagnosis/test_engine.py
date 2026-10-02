@@ -80,6 +80,9 @@ DELTA_TOLERANCE_M = 1e-6
 # Lean far enough past the balanced pitch to be a genuine fault.
 FAULTY_EXTRA_LEAN_DEG = 20.0
 VALGUS_FAULT_DEG = 12.0
+HIP_SHIFT_FAULT_RATIO = 0.16
+SEVERE_VELOCITY_LOSS_PCT = 40.0
+LOCKOUT_FAULT_RATIO = 0.12
 
 _PLACEHOLDER = re.compile(r"[{}]")
 _NAN_WORD = re.compile(r"\bnan\b", re.IGNORECASE)
@@ -355,20 +358,27 @@ class TestEvidenceWeightedScoring:
 class TestTrunkLeanAgainstBalanceModel:
     """Regression: expected lean was ~12° for real proportions, so every
     textbook squat read as excessive lean and was blamed on bracing. Lean is
-    now judged against the pitch that keeps the shoulders over midfoot."""
+    now judged against the pitch that keeps the shoulders over midfoot.
+    Lean is a side-view judgement, so these run on the triangulated rig."""
 
     def test_lean_at_balanced_pitch_does_not_fire(self):
-        result = _diagnose(_lean_set(REFERENCE_BUILD_ANTHRO, 0.0), anthro=REFERENCE_BUILD_ANTHRO)
+        result = _diagnose(
+            _lean_set(REFERENCE_BUILD_ANTHRO, 0.0), anthro=REFERENCE_BUILD_ANTHRO,
+            capture_mode=TRIANGULATED,
+        )
         assert "excessive_trunk_lean" not in _symptom_ids(result)
 
     def test_lean_just_inside_threshold_does_not_fire(self):
-        result = _diagnose(_lean_set(REFERENCE_BUILD_ANTHRO, 5.0), anthro=REFERENCE_BUILD_ANTHRO)
+        result = _diagnose(
+            _lean_set(REFERENCE_BUILD_ANTHRO, 5.0), anthro=REFERENCE_BUILD_ANTHRO,
+            capture_mode=TRIANGULATED,
+        )
         assert "excessive_trunk_lean" not in _symptom_ids(result)
 
     def test_lean_well_beyond_balance_fires_and_blames_bracing(self):
         result = _diagnose(
             _lean_set(REFERENCE_BUILD_ANTHRO, FAULTY_EXTRA_LEAN_DEG),
-            anthro=REFERENCE_BUILD_ANTHRO,
+            anthro=REFERENCE_BUILD_ANTHRO, capture_mode=TRIANGULATED,
         )
 
         assert _symptom(result, "excessive_trunk_lean").severity == pytest.approx(1.0)
@@ -385,14 +395,17 @@ class TestTrunkLeanAgainstBalanceModel:
             )
             for n in (1, 2, 3)
         ]
-        result = _diagnose(reps, anthro=REFERENCE_BUILD_ANTHRO)
+        result = _diagnose(reps, anthro=REFERENCE_BUILD_ANTHRO, capture_mode=TRIANGULATED)
 
         cause_ids = _all_cause_ids(result)
         assert "bracing_failure" not in cause_ids
         assert "limited_ankle_df" in cause_ids
 
     def test_long_femur_lean_matching_own_balance_is_anatomy(self):
-        result = _diagnose(_lean_set(LONG_FEMUR_ANTHRO, 0.0), anthro=LONG_FEMUR_ANTHRO)
+        result = _diagnose(
+            _lean_set(LONG_FEMUR_ANTHRO, 0.0), anthro=LONG_FEMUR_ANTHRO,
+            capture_mode=TRIANGULATED,
+        )
 
         # The lean exceeds the reference lifter's, so the symptom fires...
         assert "excessive_trunk_lean" in _symptom_ids(result)
@@ -407,7 +420,7 @@ class TestTrunkLeanAgainstBalanceModel:
 
     def test_anatomy_note_quotes_the_athletes_balanced_lean(self):
         reps = _lean_set(LONG_FEMUR_ANTHRO, 0.0)
-        result = _diagnose(reps, anthro=LONG_FEMUR_ANTHRO)
+        result = _diagnose(reps, anthro=LONG_FEMUR_ANTHRO, capture_mode=TRIANGULATED)
         athlete_lean = reps[0].expected_pitch_athlete
         explanation = _hypothesis(result, "anthropometric_femur_torso_ratio").explanation
         assert f"about {athlete_lean:.0f}° of forward lean" in explanation
@@ -415,8 +428,9 @@ class TestTrunkLeanAgainstBalanceModel:
 
 class TestObservability:
     """A coach who cannot see something says nothing about it: symptoms the
-    capture mode cannot measure are skipped, and side-view symptoms read from
-    one frontal camera are flagged approximate."""
+    capture mode cannot measure are skipped, side-view judgements (lean, hip
+    shoot, balance, rep speed) are rig-only, and sideways hip travel read from
+    one frontal camera is flagged approximate."""
 
     def test_heel_rise_never_fires_on_a_single_camera(self):
         result = _diagnose(_set_of(3, heel_rise_max_cm=10.0), capture_mode=SINGLE_CAMERA)
@@ -428,13 +442,17 @@ class TestObservability:
         assert heel_rise.severity > 0.0
         assert heel_rise.observability == OBSERVABLE
 
-    def test_sagittal_symptom_is_approximate_on_a_single_camera(self):
+    def test_side_view_lean_never_fires_on_a_single_camera(self):
         result = _diagnose(
             _lean_set(REFERENCE_BUILD_ANTHRO, FAULTY_EXTRA_LEAN_DEG),
             anthro=REFERENCE_BUILD_ANTHRO, capture_mode=SINGLE_CAMERA,
         )
-        assert _symptom(result, "excessive_trunk_lean").observability == APPROXIMATE
-        assert _hypothesis(result, "bracing_failure").observability == APPROXIMATE
+        assert "excessive_trunk_lean" not in _symptom_ids(result)
+        assert "bracing_failure" not in _all_cause_ids(result)
+
+    def test_lateral_travel_symptom_is_approximate_on_a_single_camera(self):
+        result = _diagnose(_set_of(3, hip_shift_ratio=HIP_SHIFT_FAULT_RATIO))
+        assert _symptom(result, "hip_shift").observability == APPROXIMATE
 
     def test_sagittal_symptom_is_observable_when_triangulated(self):
         result = _diagnose(
@@ -457,14 +475,27 @@ class TestObservability:
                 symptom_def["measurement"], TRIANGULATED
             ) == OBSERVABLE, symptom_id
 
-    def test_heel_rise_is_the_only_single_camera_blind_spot(self):
-        blind = [
+    def test_speed_loss_cannot_reach_a_cause_on_a_single_camera(self):
+        """A frontal symptom must not voice rig-only speed loss through a shared cause."""
+        reps = _set_of(
+            3, lockout_deficit_ratio=LOCKOUT_FAULT_RATIO, velocity_loss_pct=SEVERE_VELOCITY_LOSS_PCT,
+        )
+        single = _diagnose(reps, capture_mode=SINGLE_CAMERA)
+        rig = _diagnose(reps, capture_mode=TRIANGULATED)
+        assert "incomplete_lockout" in _symptom_ids(single)
+        assert "weight_too_heavy" not in _all_cause_ids(single)
+        assert "weight_too_heavy" in _all_cause_ids(rig)
+
+    def test_single_camera_blind_spots_are_heel_rise_and_side_view(self):
+        blind = {
             symptom_id
             for symptom_id, symptom_def in SYMPTOM_GRAPH.items()
             if measurement_observability(symptom_def["measurement"], SINGLE_CAMERA)
             == NOT_OBSERVABLE
-        ]
-        assert blind == ["heel_rise"]
+        }
+        assert blind == {
+            "heel_rise", "excessive_trunk_lean", "hip_shoot", "balance_forward", "velocity_loss",
+        }
 
 
 class TestMeasurementConfidence:
@@ -485,11 +516,8 @@ class TestMeasurementConfidence:
         assert result.confidence == pytest.approx(1.0, abs=CONFIDENCE_TOLERANCE)
 
     def test_approximate_symptom_halves_confidence(self):
-        result = _diagnose(
-            _lean_set(REFERENCE_BUILD_ANTHRO, FAULTY_EXTRA_LEAN_DEG),
-            anthro=REFERENCE_BUILD_ANTHRO,
-        )
-        assert _symptom_ids(result) == ["excessive_trunk_lean"]
+        result = _diagnose(_set_of(3, hip_shift_ratio=HIP_SHIFT_FAULT_RATIO))
+        assert _symptom_ids(result) == ["hip_shift"]
         assert result.confidence == pytest.approx(0.5, abs=CONFIDENCE_TOLERANCE)
 
     def test_unmeasured_knees_lower_confidence(self):
@@ -506,19 +534,16 @@ class TestMeasurementConfidence:
         assert result.confidence == pytest.approx(1.0, abs=CONFIDENCE_TOLERANCE)
 
     def test_mixed_observability_averages_the_weights(self):
-        reps = _lean_set(
-            REFERENCE_BUILD_ANTHRO, FAULTY_EXTRA_LEAN_DEG,
+        reps = _set_of(
+            3, hip_shift_ratio=HIP_SHIFT_FAULT_RATIO,
             knee_valgus_l=VALGUS_FAULT_DEG, knee_valgus_r=VALGUS_FAULT_DEG,
         )
-        result = _diagnose(reps, anthro=REFERENCE_BUILD_ANTHRO)
-        assert set(_symptom_ids(result)) == {"excessive_trunk_lean", "knee_not_tracking_toes"}
+        result = _diagnose(reps)
+        assert set(_symptom_ids(result)) == {"hip_shift", "knee_not_tracking_toes"}
         assert result.confidence == pytest.approx(0.75, abs=CONFIDENCE_TOLERANCE)
 
     def test_short_set_with_approximate_symptom_compounds(self):
-        result = _diagnose(
-            _lean_set(REFERENCE_BUILD_ANTHRO, FAULTY_EXTRA_LEAN_DEG, count=2),
-            anthro=REFERENCE_BUILD_ANTHRO,
-        )
+        result = _diagnose(_set_of(2, hip_shift_ratio=HIP_SHIFT_FAULT_RATIO))
         assert result.confidence == pytest.approx(1.0 / 3.0, abs=CONFIDENCE_TOLERANCE)
 
     def test_confidence_does_not_track_severity(self):

@@ -31,6 +31,13 @@ CATCH_UP_MARGIN_S = 0.005
 # A secondary whose newest frame trails the primary's newest by more than this is
 # treated as stalled: sets stop waiting for it (it is still used if in tolerance).
 STALE_CAMERA_S = 0.150
+# A camera with no new frame for this long is reported lost (logged and sent to
+# the agent); far longer than STALE_CAMERA_S so a slow frame never flaps it.
+CAMERA_LOST_S = 1.0
+# A failed read is retried after this pause, never in a busy loop, and logged
+# on the first failure and then once per this many.
+READ_FAILURE_BACKOFF_S = 0.05
+READ_FAILURES_PER_LOG = 100
 MIN_FPS_ELAPSED_S = 0.01
 READER_JOIN_TIMEOUT_S = 2.0
 DEFAULT_FPS = 30.0
@@ -99,6 +106,7 @@ class MultiCameraCapture:
         self._last_returned_sequence = -1
         self._clock_offset_s = 0.0
         self._start_time: float = 0.0
+        self._lost_cameras: list[str] = []
 
     def start(self) -> None:
         """Open all cameras and start reader threads."""
@@ -140,10 +148,20 @@ class MultiCameraCapture:
 
     def _reader_loop(self, cam_id: str) -> None:
         cap = self._caps[cam_id]
+        read_failures = 0
         while self._running:
             ret, frame = cap.read()
             if ret and frame is not None:
+                read_failures = 0
                 self._append_frame(cam_id, frame, self._clock_fn() + self._clock_offset_s)
+                continue
+            if read_failures % READ_FAILURES_PER_LOG == 0:
+                logger.warning(
+                    "Camera %s read failed (%d in a row) — retrying every %.0f ms",
+                    cam_id, read_failures + 1, READ_FAILURE_BACKOFF_S * MS_PER_S,
+                )
+            read_failures += 1
+            self._sleep_fn(READ_FAILURE_BACKOFF_S)
 
     def _append_frame(self, cam_id: str, frame: np.ndarray, timestamp: float) -> None:
         with self._locks[cam_id]:
@@ -212,6 +230,23 @@ class MultiCameraCapture:
             if self._clock_fn() >= deadline_s:
                 return None
             self._sleep_fn(POLL_INTERVAL_S)
+
+    def lost_cameras(self) -> list[str]:
+        """Cameras with no new frame for CAMERA_LOST_S (or none since start); logs each change."""
+        now_s = self._clock_fn() + self._clock_offset_s
+        lost: list[str] = []
+        for cam_id, buffer in self._buffers.items():
+            with self._locks[cam_id]:
+                newest_s = buffer[-1][1] if buffer else self._start_time + self._clock_offset_s
+            if now_s - newest_s > CAMERA_LOST_S:
+                lost.append(cam_id)
+        for cam_id in sorted(set(lost) - set(self._lost_cameras)):
+            primary_note = " (primary — no synced frames until it returns)" if cam_id == self._primary_id else ""
+            logger.warning("Camera %s lost: no frame for over %.1f s%s", cam_id, CAMERA_LOST_S, primary_note)
+        for cam_id in sorted(set(self._lost_cameras) - set(lost)):
+            logger.warning("Camera %s recovered", cam_id)
+        self._lost_cameras = lost
+        return list(lost)
 
     def get_fps_stats(self) -> dict[str, float]:
         """Return achieved FPS per camera since start."""

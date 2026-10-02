@@ -67,12 +67,33 @@ MAX_REP_TRAJECTORY_FRAMES = 600
 # Below the two-view confidence cap (0.3) so 2-camera rigs can measure the body.
 TWO_CAMERA_MEASUREMENT_CONFIDENCE = 0.25
 
+# Single camera: process_frame waits this long for a frame it has not processed.
+NEW_FRAME_WAIT_S = 0.1
+# A failed camera read is retried after this pause, never in a busy loop, and
+# logged on the first failure and then once per this many failures.
+READ_FAILURE_BACKOFF_S = 0.05
+READ_FAILURES_PER_LOG = 100
+# Repeated pose-estimation failures are logged at most this often.
+POSE_FAILURE_LOG_INTERVAL_S = 5.0
+# Captures kept to pair the lagged analysis frame with what was measured when
+# it was captured; more than the Kalman lag so a re-initialised lag still matches.
+RECENT_CAPTURES = 8
+# Single camera: the world frame is the camera's, so a tilted camera tilts every
+# sagittal angle and the depth reading with it. Standing upright beyond this
+# angle from the camera's vertical means the camera needs levelling.
+MAX_CAMERA_PITCH_DEG = 8.0
+
 # A stored bottom/standing frame is only useful with the whole lower body present.
 _LEG_KEYPOINTS = (
     CocoKeypoints.LEFT_HIP, CocoKeypoints.RIGHT_HIP,
     CocoKeypoints.LEFT_KNEE, CocoKeypoints.RIGHT_KNEE,
     CocoKeypoints.LEFT_ANKLE, CocoKeypoints.RIGHT_ANKLE,
 )
+_LEG_KEYPOINT_NAMES = {
+    CocoKeypoints.LEFT_HIP: "left_hip", CocoKeypoints.RIGHT_HIP: "right_hip",
+    CocoKeypoints.LEFT_KNEE: "left_knee", CocoKeypoints.RIGHT_KNEE: "right_knee",
+    CocoKeypoints.LEFT_ANKLE: "left_ankle", CocoKeypoints.RIGHT_ANKLE: "right_ankle",
+}
 
 # Depth category → the 5-class depth vocabulary the shallow-rep message speaks.
 _DEPTH_CATEGORY_CLASS = {
@@ -87,6 +108,17 @@ _DEPTH_CATEGORY_CLASS = {
 # rep extremum (bottom frame, depth class, BiLSTM window) is taken over a
 # running median of this many frames instead.
 KNEE_FLEXION_MEDIAN_FRAMES = 3
+
+
+def _standing_pitch_deg(skeleton: Skeleton3D) -> float:
+    """Forward tilt of the ankle-to-shoulder line from the camera's vertical, in degrees.
+    Positive = shoulders further from the camera than the ankles (camera pitched up)."""
+    points = skeleton.to_numpy()
+    shoulder_mid = (points[CocoKeypoints.LEFT_SHOULDER] + points[CocoKeypoints.RIGHT_SHOULDER]) / 2.0
+    ankle_mid = (points[CocoKeypoints.LEFT_ANKLE] + points[CocoKeypoints.RIGHT_ANKLE]) / 2.0
+    body_axis = shoulder_mid - ankle_mid
+    # Y-down: up the body is -y.
+    return math.degrees(math.atan2(float(body_axis[2]), float(-body_axis[1])))
 
 
 class BiomechanicsPipeline:
@@ -112,12 +144,23 @@ class BiomechanicsPipeline:
         # Load exercise profile (bundles fault rules, rep signal, cues)
         self._profile = get_profile(exercise_name)
 
-        # Layer 1: Capture (threaded — always holds the latest frame)
+        # Layer 1: Capture (threaded — always holds the latest frame, its
+        # capture time and a sequence number so no frame is processed twice)
         self._cap = None
         self._latest_frame = None
         self._frame_lock = threading.Lock()
+        self._frame_ready = threading.Condition(self._frame_lock)
+        self._capture_sequence = 0
+        self._latest_capture_time = math.nan
+        self._processed_sequence = 0
         self._capture_running = False
         self._capture_thread = None
+        self._pose_failures = 0
+        self._last_pose_failure_log_s = -math.inf
+        # (capture time, raw 2D pose, unmeasured leg keypoints) per recent capture.
+        self._recent_captures: deque[tuple[float, Skeleton2D | None, list[str]]] = deque(
+            maxlen=RECENT_CAPTURES
+        )
 
         # Multi-camera mode (env-driven)
         self._multi_camera = os.getenv("NOWVA_MULTI_CAMERA", "false").lower() == "true"
@@ -210,6 +253,12 @@ class BiomechanicsPipeline:
             min_leg_extension_ratio=rg.min_leg_extension_ratio,
             required_consecutive_frames=rg.required_consecutive_frames,
         )
+
+        # Single camera: the standing body's tilt from the camera vertical,
+        # measured each time the readiness gate latches.
+        self.camera_pitch_deg: float = math.nan
+        self._standing_pitches: deque[float] = deque(maxlen=rg.required_consecutive_frames)
+        self._camera_pitch_warned = False
 
         # Presence-only mode (rest periods / workout complete): pose
         # estimation keeps running so the user stays detected, but gates,
@@ -449,6 +498,7 @@ class BiomechanicsPipeline:
         self._idle_peak_skeleton = None
         self._rep_setup = None
         self._rep_trajectory.clear()
+        self._recent_captures.clear()
 
         if self._multi_camera_provider is not None:
             logger.info(
@@ -599,13 +649,67 @@ class BiomechanicsPipeline:
         if stage == self._preik.stage_names[0]:
             self._inspect_raw_kpts = snapshot
 
+    def _publish_frame(self, frame: np.ndarray, capture_time: float) -> None:
+        with self._frame_ready:
+            self._latest_frame = frame
+            self._latest_capture_time = capture_time
+            self._capture_sequence += 1
+            self._frame_ready.notify_all()
+
     def _capture_loop(self) -> None:
         """Continuously read frames from the camera in a background thread."""
+        read_failures = 0
         while self._capture_running:
             ret, frame = self._cap.read()
             if ret and frame is not None:
-                with self._frame_lock:
-                    self._latest_frame = frame
+                read_failures = 0
+                # read() returns when the frame arrives: the closest clock to its capture.
+                self._publish_frame(frame, time.time())
+                continue
+            if read_failures % READ_FAILURES_PER_LOG == 0:
+                logger.warning(
+                    "[PIPELINE] Camera %s read failed (%d in a row) — retrying every %.0f ms",
+                    self.config.capture.device_id, read_failures + 1, READ_FAILURE_BACKOFF_S * 1000.0,
+                )
+            read_failures += 1
+            time.sleep(READ_FAILURE_BACKOFF_S)
+
+    def _track_camera_pitch(self, raw_centred: Skeleton3D) -> None:
+        self._standing_pitches.append(_standing_pitch_deg(raw_centred))
+        if not self._readiness_gate.is_ready:
+            return
+        # The gate just latched on consecutive standing frames: those are the window.
+        self.camera_pitch_deg = float(np.median(self._standing_pitches))
+        self._standing_pitches.clear()
+        if abs(self.camera_pitch_deg) > MAX_CAMERA_PITCH_DEG and not self._camera_pitch_warned:
+            self._camera_pitch_warned = True
+            logger.warning(
+                "[PIPELINE] Standing upright reads %.0f° from the camera's vertical (limit %.0f°): "
+                "level the camera — depth and every side-view angle tilt with it",
+                self.camera_pitch_deg, MAX_CAMERA_PITCH_DEG,
+            )
+
+    def _log_pose_failure(self) -> None:
+        self._pose_failures += 1
+        clock_s = time.perf_counter()
+        if clock_s - self._last_pose_failure_log_s >= POSE_FAILURE_LOG_INTERVAL_S:
+            self._last_pose_failure_log_s = clock_s
+            logger.exception("[PIPELINE] Pose estimation failed (%d failures so far)", self._pose_failures)
+
+    @staticmethod
+    def _unmeasured_leg_keypoints(skeleton_3d: Skeleton3D | None) -> list[str]:
+        if skeleton_3d is None:
+            return list(_LEG_KEYPOINT_NAMES.values())
+        return [
+            name for idx, name in _LEG_KEYPOINT_NAMES.items()
+            if skeleton_3d.keypoints[idx].confidence < MIN_KEYPOINT_CONFIDENCE
+        ]
+
+    def _capture_at(self, timestamp: float) -> tuple[float, Skeleton2D | None, list[str]] | None:
+        for capture in self._recent_captures:
+            if capture[0] == timestamp:
+                return capture
+        return None
 
     def _record_body_measurements(self, result: PreIKResult) -> None:
         source = result.analysis_world if result.analysis_world is not None else result.analysis
@@ -635,28 +739,48 @@ class BiomechanicsPipeline:
         bar_detection: BarbellDetection | None = None
         bar_track: BarTrackState | None = None
 
+        lost_cameras: list[str] | None = None
         if self._multi_camera and self._multi_camera_provider is not None:
             t0 = time.perf_counter()
             frame, skeleton_2d, raw_3d = self._multi_camera_provider.get_pose()
             latency_ms["capture"] = 0.0
             latency_ms["pose"] = (time.perf_counter() - t0) * 1000.0
+            lost_cameras = self._multi_camera_provider.lost_cameras()
+            if frame is not None:
+                # The synced set's primary capture time: every skeleton of the
+                # set carries it, and so does a dropout predicted in its place.
+                now = self._multi_camera_provider.last_capture_timestamp
             if raw_3d is not None:
                 # The skeleton carries the primary camera's capture sequence
                 # and timestamp; never overwrite them.
                 self._frame_index = raw_3d.frame_index
         else:
-            self._frame_index += 1
             t0 = time.perf_counter()
-            with self._frame_lock:
+            with self._frame_ready:
+                if self._capture_sequence == self._processed_sequence:
+                    self._frame_ready.wait(timeout=NEW_FRAME_WAIT_S)
                 frame = self._latest_frame
+                sequence = self._capture_sequence
+                capture_time = self._latest_capture_time
             latency_ms["capture"] = (time.perf_counter() - t0) * 1000.0
+            if sequence == self._processed_sequence:
+                # The loop outran the camera: never run the same frame twice.
+                frame = None
 
             if frame is not None:
+                self._processed_sequence = sequence
+                self._frame_index = sequence
+                now = capture_time
                 t0 = time.perf_counter()
                 try:
                     skeleton_2d, raw_3d = self._pose_estimator.estimate_both(frame)
                 except Exception:
-                    pass
+                    self._log_pose_failure()
+                # Skeletons describe the moment of capture, not when inference finished.
+                for skeleton in (skeleton_2d, raw_3d):
+                    if skeleton is not None:
+                        skeleton.timestamp = capture_time
+                        skeleton.frame_index = sequence
                 latency_ms["pose"] = (time.perf_counter() - t0) * 1000.0
 
         frame_index = self._frame_index
@@ -666,9 +790,14 @@ class BiomechanicsPipeline:
                 frame_index=frame_index,
                 timestamp=now,
                 latency_ms=latency_ms,
+                lost_cameras=lost_cameras,
             )
 
         self.last_frame = frame
+        # What this capture measured, kept so the lagged analysis frame can be
+        # paired with its own 2D pose and leg measurements.
+        missing_keypoints = self._unmeasured_leg_keypoints(raw_3d)
+        self._recent_captures.append((now, skeleton_2d, missing_keypoints))
 
         # Hip-centred view of the measured skeleton for the gates and the
         # BiLSTM. Triangulated skeletons arrive in the world frame; MediaPipe
@@ -687,11 +816,12 @@ class BiomechanicsPipeline:
                 skeleton_2d=skeleton_2d,
                 skeleton_3d_raw=raw_centred,
                 latency_ms=latency_ms,
+                missing_keypoints=missing_keypoints,
+                lost_cameras=lost_cameras,
             )
 
-        # The single-camera valgus estimator reads the raw 2D pose; the
-        # display smoother must never leak into diagnosis.
-        skeleton_2d_raw = skeleton_2d
+        # The display smoother must never leak into diagnosis: the
+        # single-camera valgus estimator reads the raw 2D kept above.
         if skeleton_2d is not None and self._display_smoother is not None:
             skeleton_2d = self._display_smoother.smooth(skeleton_2d)
 
@@ -728,8 +858,11 @@ class BiomechanicsPipeline:
 
             # Standing pose gate runs every frame, unconditionally; the
             # readiness gate is per-set and resets between sets.
+            was_ready = self._readiness_gate.is_ready
             self._standing_gate.check(raw_centred)
             self._readiness_gate.check(raw_centred)
+            if not self._multi_camera and not was_ready:
+                self._track_camera_pitch(raw_centred)
 
         if not self._readiness_gate.is_ready:
             return PipelineFrame(
@@ -740,6 +873,8 @@ class BiomechanicsPipeline:
                 bar_detection=bar_detection,
                 bar_track=bar_track,
                 latency_ms=latency_ms,
+                missing_keypoints=missing_keypoints,
+                lost_cameras=lost_cameras,
             )
 
         # --- Pre-IK chain: analysis continues through short dropouts ---
@@ -747,7 +882,9 @@ class BiomechanicsPipeline:
         if raw_centred is not None:
             result = self._preik.run(raw_3d)
         else:
-            result = self._preik.predict_missing(raw_3d.timestamp if raw_3d is not None else time.time())
+            # On the capture clock: a processing-time stamp would run ahead of
+            # the next capture, and the Kalman drops that frame as out of order.
+            result = self._preik.predict_missing(now)
         latency_ms["pre_ik"] = (time.perf_counter() - t0) * 1000.0
 
         if result is None:
@@ -759,10 +896,20 @@ class BiomechanicsPipeline:
                 bar_detection=bar_detection,
                 bar_track=bar_track,
                 latency_ms=latency_ms,
+                missing_keypoints=missing_keypoints,
+                lost_cameras=lost_cameras,
             )
 
         analysis = result.analysis
         predicted_frame = raw_centred is None
+        # The analysis frame lags the capture: pair it with what was measured
+        # when it was captured. Leg keypoints the Kalman carried rather than
+        # measured make the frame a guess, which never enters the rep features.
+        analysed_capture = self._capture_at(analysis.timestamp)
+        if analysed_capture is None:
+            analysis_2d, extrapolated_keypoints = None, list(_LEG_KEYPOINT_NAMES.values())
+        else:
+            _, analysis_2d, extrapolated_keypoints = analysed_capture
 
         if not self.body_calibration.is_complete and not predicted_frame:
             self._record_body_measurements(result)
@@ -771,9 +918,9 @@ class BiomechanicsPipeline:
         t0 = time.perf_counter()
         angles = self._ik_solver.solve(analysis)
 
-        # Mode-aware valgus estimation (2D FPPA on the raw 2D pose, or 3D)
+        # Mode-aware valgus estimation (the analysed frame's raw 2D pose, or 3D)
         vr = self._valgus_estimator.estimate(
-            None if self._multi_camera else skeleton_2d_raw, analysis,
+            None if self._multi_camera else analysis_2d, analysis,
         )
         angles.knee_valgus_l = vr.valgus_l
         angles.knee_valgus_r = vr.valgus_r
@@ -804,7 +951,8 @@ class BiomechanicsPipeline:
         )
 
         # --- Buffer standing frame: last skeleton before rep starts ---
-        legs_present = self._legs_present(analysis)
+        # Stored frames (standing, setup, bottom) need legs measured, not carried.
+        legs_present = self._legs_present(analysis) and not extrapolated_keypoints
         if not self._rep_counter.in_rep:
             if legs_present:
                 self._standing_kpts = analysis.to_numpy().tolist()
@@ -820,14 +968,17 @@ class BiomechanicsPipeline:
                 self._rep_max_knee_flex = knee_flexion
             depth_ratio = sample.depth_ratio
             if math.isfinite(depth_ratio):
-                if not depth_ratio >= self._rep_min_depth_ratio:
+                # Like the trajectory, the depth gate reads measured legs only:
+                # a Kalman-carried descent overshoots the real bottom.
+                if not extrapolated_keypoints and not depth_ratio >= self._rep_min_depth_ratio:
                     self._rep_min_depth_ratio = depth_ratio
                 if depth_ratio < self._bottom_min_depth_ratio and legs_present:
                     self._bottom_min_depth_ratio = depth_ratio
                     self._bottom_kpts = analysis.to_numpy().tolist()
                     self._bottom_angles = angles.as_dict()
 
-            self._rep_trajectory.append(sample)
+            if not extrapolated_keypoints:
+                self._rep_trajectory.append(sample)
         else:
             self._rep_max_knee_flex = math.nan
 
@@ -849,12 +1000,17 @@ class BiomechanicsPipeline:
 
         # Rep counter uses profile-provided signal for state, angles for
         # metrics, and the analysis clock so velocities match the capture.
+        was_in_rep = self._rep_counter.in_rep
         rep_data, feedback = self._rep_counter.update(
             signal_value=rep_signal,
             timestamp=analysis.timestamp,
             angles=angles,
             faults=faults,
         )
+        # A rep that ended short of lockout and turned straight back down: the
+        # next rep began on this frame, and its turnaround is its setup. The
+        # ended rep may have been too short to return anything, so ask the counter.
+        next_rep_started = was_in_rep and self._rep_counter.rep_started
 
         shallow_rep_class: int | None = None
 
@@ -921,6 +1077,14 @@ class BiomechanicsPipeline:
                     )
                 )
 
+        if next_rep_started:
+            if legs_present:
+                self._track_setup(analysis, sample)
+            self._start_rep_setup()
+            self._rep_max_knee_flex = math.nan
+            if not extrapolated_keypoints:
+                self._rep_trajectory.append(sample)
+
         latency_ms["faults"] = (time.perf_counter() - t0) * 1000.0
 
         # Track max knee flexion during BiLSTM rep windows independently
@@ -934,7 +1098,11 @@ class BiomechanicsPipeline:
                 self._bilstm_max_knee_flex = knee_flexion
             if knee_flexion < self._bilstm_min_knee_flex:
                 self._bilstm_min_knee_flex = knee_flexion
-            if math.isfinite(sample.depth_ratio) and not sample.depth_ratio >= self._bilstm_min_depth_ratio:
+            if (
+                not extrapolated_keypoints
+                and math.isfinite(sample.depth_ratio)
+                and not sample.depth_ratio >= self._bilstm_min_depth_ratio
+            ):
                 self._bilstm_min_depth_ratio = sample.depth_ratio
 
         # The BiLSTM segments the movement; the athlete's depth target
@@ -1039,6 +1207,9 @@ class BiomechanicsPipeline:
             bar_detection=bar_detection,
             bar_track=bar_track,
             latency_ms=latency_ms,
+            missing_keypoints=missing_keypoints,
+            extrapolated_keypoints=extrapolated_keypoints,
+            lost_cameras=lost_cameras,
         )
 
     def release(self):

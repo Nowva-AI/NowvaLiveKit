@@ -24,7 +24,15 @@ class ScheduleMaintenanceAgent(BaseNovaAgent):
         super().__init__(state=state, userdata=userdata, instructions=instructions)
 
     async def on_enter(self):
-        """No greeting — restore turn detection so the LLM responds naturally to precaptured intent."""
+        """Speak on entry: act on the request the main menu captured, or ask what to change."""
+        handle = self.session.generate_reply(
+            instructions=(
+                "You just took over the user's schedule. If your instructions carry their "
+                "request, act on it now: a brief natural preamble, then the right tool. "
+                "Otherwise ask in one short question what they want to change. Vary the wording."
+            )
+        )
+        await handle.wait_for_playout()
         self._restore_turn_detection()
 
     # ===== NAVIGATION =====
@@ -43,12 +51,11 @@ class ScheduleMaintenanceAgent(BaseNovaAgent):
         self.state.save_state()
 
         await self._suppress_turn_detection()
-        await self._truncate_context_for_handoff()
 
         self._log_function_call("back_to_main_menu", {}, "handoff to MainMenuAgent")
 
         from agent.agents.main_menu_agent import MainMenuAgent
-        return MainMenuAgent(state=self.state, userdata=self.userdata)
+        return await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
 
     # ===== SCHEDULE MODIFICATION TOOLS =====
 

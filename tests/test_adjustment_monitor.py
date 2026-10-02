@@ -15,7 +15,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from agent.services.coaching_constants import PREEMPTIVE_TEXT
 from agent.services.coaching_orchestrator import (
     STANCE_TOLERANCE,
     TOE_OUT_TOLERANCE_DEG,
@@ -28,13 +27,15 @@ TARGET_STANCE = 1.5
 TARGET_TOE_OUT = 25.0
 
 
-def _make_orchestrator() -> CoachingOrchestrator:
+def _make_orchestrator(load: tuple | None = (0.0, None)) -> CoachingOrchestrator:
+    """Bodyweight by default: the stance monitor only runs without a load."""
     orch = CoachingOrchestrator(
         play_cached_audio_fn=AsyncMock(),
         generate_llm_reply_fn=AsyncMock(),
         get_cue_audio_fn=lambda key: bool(key),
     )
     orch._speak_adjustment_fn = AsyncMock()
+    orch._get_set_load_fn = lambda: load
     return orch
 
 
@@ -160,6 +161,27 @@ class TestMonitorTriggering:
             orch = _make_orchestrator()
             orch.record_angle_sample(_frame(stance=1.1))
             orch.set_diagnosis_data(_diagnosis_blaming("ankle_mobility"), {"mean_score": 0.7})
+            await orch._dispatch_cached_cue(_fault_cue_event())
+            assert not orch._adjustment_active
+
+        asyncio.run(_run())
+
+    def test_loaded_bar_defers_the_stance_change(self):
+        """Nobody moves their feet under a loaded bar — the recap covers it."""
+        async def _run():
+            orch = _make_orchestrator(load=(60.0, "kg"))
+            orch.record_angle_sample(_frame(stance=1.1))
+            orch.set_diagnosis_data(_diagnosis_blaming("narrow_stance"), {"mean_score": 0.7})
+            await orch._dispatch_cached_cue(_fault_cue_event())
+            assert not orch._adjustment_active
+
+        asyncio.run(_run())
+
+    def test_unknown_load_defers_the_stance_change(self):
+        async def _run():
+            orch = _make_orchestrator(load=None)
+            orch.record_angle_sample(_frame(stance=1.1))
+            orch.set_diagnosis_data(_diagnosis_blaming("narrow_stance"), {"mean_score": 0.7})
             await orch._dispatch_cached_cue(_fault_cue_event())
             assert not orch._adjustment_active
 
@@ -318,85 +340,6 @@ class TestSetBoundary:
         asyncio.run(_run())
 
 
-class TestPreemptiveOutcomeTiming:
-    """A cue fires during a rep that is already underway, so that rep's
-    faults were fixed before the lifter heard anything."""
-
-    def _armed(self, fired_at_rep: int):
-        from agent.services.coaching_orchestrator import PendingCueOutcome
-
-        orch = _make_orchestrator()
-        orch._play_raw_frames_fn = AsyncMock()
-        outcome = PendingCueOutcome(
-            fault_type="forward_lean",
-            cue_key="chest_up",
-            fired_at_rep=fired_at_rep,
-            positive_audio=["pos"],
-            negative_audio=["neg"],
-        )
-        done: asyncio.Future = asyncio.Future()
-        done.set_result(None)
-        outcome.generation_task = done
-        orch._pending_outcome = outcome
-        return orch
-
-    def test_not_judged_on_the_rep_the_cue_fired_in(self):
-        async def _run():
-            orch = self._armed(fired_at_rep=3)
-            orch._set_rep_count = 3
-            orch._resolve_pending_outcome(["forward_lean"])
-            await asyncio.sleep(0)
-            orch._play_raw_frames_fn.assert_not_awaited()
-            assert orch._pending_outcome is not None
-
-        asyncio.run(_run())
-
-    def test_negative_plays_when_fault_persists_on_the_next_rep(self):
-        async def _run():
-            orch = self._armed(fired_at_rep=3)
-            orch._set_rep_count = 4
-            orch._resolve_pending_outcome(["forward_lean"])
-            await asyncio.sleep(0)
-            orch._play_raw_frames_fn.assert_awaited_once_with(["neg"])
-            assert orch._pending_outcome is None
-
-        asyncio.run(_run())
-
-    def test_positive_plays_when_fault_is_gone_on_the_next_rep(self):
-        async def _run():
-            orch = self._armed(fired_at_rep=3)
-            orch._set_rep_count = 4
-            orch._resolve_pending_outcome(["knee_valgus"])
-            await asyncio.sleep(0)
-            orch._play_raw_frames_fn.assert_awaited_once_with(["pos"])
-
-        asyncio.run(_run())
-
-    def test_resolving_does_not_block_the_rep_count_cue(self):
-        """Playout must not be awaited inline — it delays the rep sound."""
-
-        async def _run():
-            orch = self._armed(fired_at_rep=3)
-            orch._set_rep_count = 4
-            blocked = asyncio.Event()
-
-            async def _never_finishes(audio):
-                await blocked.wait()
-
-            orch._play_raw_frames_fn = AsyncMock(side_effect=_never_finishes)
-
-            # Synchronous call: it returns before playback even starts.
-            orch._resolve_pending_outcome(["forward_lean"])
-            assert orch._pending_outcome is None
-
-            await asyncio.sleep(0)
-            orch._play_raw_frames_fn.assert_awaited_once()
-            blocked.set()
-            await asyncio.sleep(0)
-
-        asyncio.run(_run())
-
-
 class TestAdjustmentSpeech:
     """Exercises the real CoachingService method against a session double
     with livekit's actual generate_reply signature — the orchestrator tests
@@ -483,66 +426,6 @@ class TestMonitorBounds:
             assert orch._pending_outcome is None
 
         asyncio.run(_run())
-
-
-class TestPreemptiveGenerationHandoff:
-    """The TTS task must still populate the outcome it was created for,
-    even when the next rep detaches it from the orchestrator first."""
-
-    def _orchestrator(self, tts_delay: float):
-        played: list = []
-        orch = _make_orchestrator()
-
-        async def _tts(text):
-            await asyncio.sleep(tts_delay)
-            return [f"audio:{text}"]
-
-        async def _play(frames):
-            played.append(frames)
-
-        orch._generate_tts_fn = _tts
-        orch._play_raw_frames_fn = _play
-        return orch, played
-
-    def _run_cue_then_reps(self, tts_delay: float):
-        async def _run():
-            orch, played = self._orchestrator(tts_delay)
-            await orch._dispatch_cached_cue(_fault_cue_event())
-
-            orch._set_rep_count = 1  # the rep the cue played during
-            orch._resolve_pending_outcome(["hip_shoot"])
-            await asyncio.sleep(0)
-            judged_own_rep = orch._pending_outcome is None
-
-            orch._set_rep_count = 2  # first rep they could act on
-            orch._resolve_pending_outcome([])
-            await asyncio.sleep(tts_delay + 0.3)
-            return judged_own_rep, played
-
-        return asyncio.run(_run())
-
-    def test_audio_arrives_when_tts_beats_the_rep(self):
-        judged_own_rep, played = self._run_cue_then_reps(0.0)
-        assert judged_own_rep is False
-        assert played == [[f"audio:{PREEMPTIVE_TEXT['chest_up'][0]}"]]
-
-    def test_audio_still_arrives_when_tts_finishes_after_the_rep(self):
-        judged_own_rep, played = self._run_cue_then_reps(0.2)
-        assert judged_own_rep is False
-        assert played == [[f"audio:{PREEMPTIVE_TEXT['chest_up'][0]}"]]
-
-    def test_side_variant_cue_uses_its_base_outcome_lines(self):
-        async def _run():
-            orch, played = self._orchestrator(0.0)
-            await orch._dispatch_cached_cue(_fault_cue_event("knees_out_left", "knee_valgus"))
-            assert orch._pending_outcome is not None
-            orch._set_rep_count = 2
-            orch._resolve_pending_outcome([])
-            await asyncio.sleep(0.3)
-            return played
-
-        played = asyncio.run(_run())
-        assert played == [[f"audio:{PREEMPTIVE_TEXT['knees_out'][0]}"]]
 
 
 class TestUtteranceBudgetIsPerSet:

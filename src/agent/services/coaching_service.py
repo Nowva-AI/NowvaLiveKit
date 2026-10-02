@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from agent.services.assessment_logger import AssessmentLogger
+from agent.services.athlete_facts import safety_line
 from agent.services.coaching_constants import (
     ADJUSTMENT_CUES,
     ADJUSTMENT_ON_TARGET_CUE,
@@ -23,7 +24,9 @@ from agent.services.coaching_constants import (
     ADJUSTMENT_SYSTEM_PROMPT,
     COACHING_PERSONA,
     CUE_TEXT_MAP,
+    FIXED_CUE_TEXT,
 )
+from agent.services.progress_context import fault_label
 from agent.services.visual_bridge import VisualBridge
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,36 @@ LISTENER_RECONNECT_POLL_S = 1.0
 # Cue keys whose on-screen banner should read as praise, not correction
 POSITIVE_CUE_KEYS = frozenset(
     {"good_rep", "great_depth", "strong", "clean", "perfect", "adjust_good"}
+    | set(FIXED_CUE_TEXT)
 )
+
+# Chat-context items with a fixed identity: one summary, one last-set note
+SUMMARY_PREFIX = "[CONVERSATION SUMMARY]"
+LAST_SET_ITEM_ID = "nova_last_set"
+# Mid-workout the mic is off until the athlete says the wake word.
+NO_QUESTIONS_RULE = (
+    "The athlete can't answer right now — they'd have to say the wake word first — "
+    "so don't ask them anything."
+)
+
+
+def assessment_focus_line(top_cause: dict | None, body_measurement: str | None) -> str | None:
+    """The one fix an unresolved form check carries into the workout, for prompts."""
+    from biomechanics.diagnosis.demo_builder import summarize_cue_magnitude
+
+    if not top_cause:
+        return None
+    explanation = (top_cause.get("explanation") or "a form issue").rstrip(".")
+    line = f"Focus to carry into the workout: {explanation}."
+    delta = top_cause.get("parameter_delta")
+    if delta:
+        line += f" Adjustment: {summarize_cue_magnitude(top_cause.get('cause_id', ''), delta)}."
+    if body_measurement == "provisional":
+        line += (
+            " Their body measurements are only a first read so far, so give the adjustment "
+            "as a starting point, not an exact number."
+        )
+    return line
 
 
 class CoachingService:
@@ -85,6 +117,8 @@ class CoachingService:
 
         # Choreographed assessment demo fires once per session
         self._assessment_demo_played: bool = False
+        # The form check's unresolved diagnosis, carried into the first set.
+        self._carried_focus_diagnosis: dict | None = None
         self._demo_start_ack = None
 
         # Orchestrator is dormant until assessment+calibration finish
@@ -103,6 +137,9 @@ class CoachingService:
 
         # Pending on-demand demo response (request_last_rep / request_demo)
         self._pending_demo_response: dict | None = None
+
+        # Latest workout rep_complete, for "how was that one?" questions
+        self._last_rep_message: dict | None = None
 
     @property
     def _workout_active(self) -> bool:
@@ -151,6 +188,7 @@ class CoachingService:
         def _fetch():
             from db.database import SessionLocal
             from db.biomechanics_persistence import (
+                get_cue_effectiveness,
                 get_progress_baseline,
                 get_multi_session_fault_trends,
             )
@@ -158,17 +196,24 @@ class CoachingService:
             try:
                 baseline = get_progress_baseline(db, user_id)
                 fault_trends = get_multi_session_fault_trends(db, user_id)
-                return baseline, fault_trends
+                cue_effectiveness = get_cue_effectiveness(db, user_id)
+                return baseline, fault_trends, cue_effectiveness
             finally:
                 db.close()
 
         try:
-            baseline, fault_trends = await asyncio.to_thread(_fetch)
+            baseline, fault_trends, cue_effectiveness = await asyncio.to_thread(_fetch)
         except Exception:
             logger.exception("[BIOMECH DB] Progress baseline fetch failed")
             return None
         self._progress_baseline = baseline
         self._fault_trends = fault_trends
+        if self._coaching_orchestrator:
+            from agent.services.coaching_orchestrator import ineffective_cue_faults
+            ineffective = ineffective_cue_faults(cue_effectiveness)
+            self._coaching_orchestrator.ineffective_cue_faults = ineffective
+            if ineffective:
+                logger.info(f"[BIOMECH DB] Cues that haven't helped before: {sorted(ineffective)}")
         if baseline:
             if self._coaching_orchestrator:
                 self._coaching_orchestrator.progress_baseline = baseline
@@ -332,6 +377,28 @@ class CoachingService:
 
         return snapshot
 
+    def last_rep_verdict(self) -> dict | None:
+        """The latest workout rep and its faults (one per fault type), or None
+        before the first rep: {"rep_number", "faults": [{"fault_type", "side",
+        "observability"}]}."""
+        message = self._last_rep_message
+        if message is None:
+            return None
+        faults: list[dict] = []
+        seen: set[str] = set()
+        for fault in message.get("faults_detailed") or []:
+            fault_type = fault.get("fault_type")
+            if not fault_type or fault_type in seen:
+                continue
+            seen.add(fault_type)
+            details = fault.get("details") or {}
+            faults.append({
+                "fault_type": fault_type,
+                "side": details.get("side"),
+                "observability": details.get("observability", "observable"),
+            })
+        return {"rep_number": message.get("rep_number") or 0, "faults": faults}
+
     # ------------------------------------------------------------------
     # On-demand demo / last-rep replay
     # ------------------------------------------------------------------
@@ -492,6 +559,7 @@ class CoachingService:
                         severity=severity,
                         message=fault_msg,
                         observability=observability,
+                        side=message.get("side"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — fault dropped")
@@ -500,8 +568,9 @@ class CoachingService:
                 depth = message.get("depth_category", "")
                 is_clean = message.get("is_clean", False)
                 faults = message.get("faults_in_rep", [])
-                max_depth_angle = message.get("max_depth_angle", 0.0)
-                rep_duration_ms = message.get("rep_duration_ms", 0)
+                # None when no frame of the rep saw both knees (NaN on the wire)
+                max_depth_angle = message.get("max_depth_angle") or 0.0
+                rep_duration_ms = message.get("rep_duration_ms") or 0
                 ascent_time_s = float(message.get("ascent_time_s", 0.0) or 0.0)
                 logger.info(
                     f"[COACHING SERVICE] REP COMPLETE received: rep={rep} depth={depth} "
@@ -511,6 +580,8 @@ class CoachingService:
                     self._assessment_logger.on_rep_complete(message)
                 if self._workout_active and self._biomech_recorder:
                     self._biomech_recorder.record_rep(message)
+                if self._workout_active:
+                    self._last_rep_message = message
                 if not self._workout_active:
                     logger.debug("[COACHING SERVICE] rep_complete ignored — workout not active yet")
                 elif self._coaching_orchestrator:
@@ -524,6 +595,7 @@ class CoachingService:
                         ascent_time_s=ascent_time_s,
                         highlights=message.get("highlights"),
                         set_number=message.get("set_number"),
+                        faults_detailed=message.get("faults_detailed"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — rep_complete dropped")
@@ -577,36 +649,44 @@ class CoachingService:
                 )
                 if self._workout_active and self._biomech_recorder:
                     self._biomech_recorder.record_set(message)
-                if self._coaching_orchestrator:
+                if not self._workout_active:
+                    # A pre-workout diagnosis must not reach a set recap or focus
+                    logger.debug("[COACHING SERVICE] diagnosis_complete ignored — workout not active yet")
+                elif self._coaching_orchestrator:
                     self._coaching_orchestrator.set_diagnosis_data(
                         diagnosis, scoring, set_number=message.get("set_number"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — diagnosis_complete dropped")
             elif msg_type == "set_complete":
-                logger.info("[COACHING SERVICE] set_complete from pipeline (ignored — orchestrator handles via rep count)")
+                # The orchestrator ends sets itself: at the target rep count,
+                # after SET_IDLE_TIMEOUT_S without a rep, or on "I'm done".
+                logger.info("[COACHING SERVICE] set_complete from pipeline (ignored — orchestrator ends sets)")
+            elif msg_type == "tracking_quality":
+                logger.info(
+                    f"[COACHING SERVICE] TRACKING {message.get('status')} "
+                    f"missing={message.get('missing')}"
+                )
+                if self._workout_active and self._coaching_orchestrator:
+                    await self._coaching_orchestrator.on_tracking_quality(
+                        message.get("status", ""), message.get("reason", "keypoints")
+                    )
             elif msg_type == "rest_complete":
                 logger.info("[COACHING SERVICE] REST COMPLETE — firing LLM prompt for next set")
-
-                # Get set numbers from workout session
-                completed_set, next_set, total_sets = self._get_set_numbers()
-
-                instructions = (
-                    f"[REST COMPLETE] Rest is over. "
-                    f"Set {completed_set} of {total_sets} is done. Set {next_set} of {total_sets} starts now. "
-                    f"Announce it in one energetic sentence, in your own words — "
-                    f"never the same announcement twice in a session. "
-                    f"Do NOT ask if they are ready. Do NOT wait for confirmation."
-                )
-                logger.info("[COACHING SERVICE] → Calling coaching LLM for rest_complete")
-                await self._coaching_llm_reply(instructions)
-                logger.info("[COACHING SERVICE] ✓ Coaching LLM returned for rest_complete")
-
-                # Resume rep/fault processing AFTER the announcement finishes.
-                # Keeping _resting=True during speech prevents the orchestrator
-                # from dispatching cached cues that collide with the announcement.
-                if self._coaching_orchestrator:
-                    self._coaching_orchestrator.on_rest_complete()
+                # The pipeline counts reps as soon as its rest timer ends, so
+                # the orchestrator resumes now too; only cues wait for the
+                # announcement to finish.
+                orchestrator = self._coaching_orchestrator
+                if orchestrator:
+                    orchestrator.on_rest_complete()
+                    orchestrator.cues_suppressed = True
+                try:
+                    logger.info("[COACHING SERVICE] → Calling coaching LLM for rest_complete")
+                    await self._coaching_llm_reply(self._build_rest_complete_prompt())
+                    logger.info("[COACHING SERVICE] ✓ Coaching LLM returned for rest_complete")
+                finally:
+                    if orchestrator:
+                        orchestrator.cues_suppressed = False
             elif msg_type == "assessment_rep":
                 rep = message.get("rep_number", 0)
                 total = message.get("total_required", 2)
@@ -711,12 +791,19 @@ class CoachingService:
             logger.error(f"[COACHING SERVICE] TTS cache generation failed: {e}")
 
     async def _on_assessment_result(self, message: dict) -> None:
-        """Handle assessment result — choreographed demo on first failure, else spoken feedback."""
+        """Handle assessment result — choreographed demo on first failure, else spoken feedback.
+
+        After the last round the workout starts even if a cause remains
+        (proceed_anyway): that cause becomes the first set's focus instead of
+        another retry."""
         passed = message.get("passed", False)
         round_num = message.get("round", 1)
         diagnosis = message.get("diagnosis", {})
         scoring = message.get("scoring", {})
         demo = message.get("demo", {})
+        proceed_anyway = message.get("proceed_anyway", False)
+        if proceed_anyway:
+            self._carried_focus_diagnosis = diagnosis
 
         demo_was_played = False
         if not passed and demo.get("available") and not self._assessment_demo_played:
@@ -733,7 +820,11 @@ class CoachingService:
                 logger.error(f"[ASSESSMENT] on_assessment_result callback error: {e}", exc_info=True)
             return
 
-        if not passed and not demo_was_played:
+        if proceed_anyway:
+            instructions = self._build_assessment_proceed_prompt(
+                diagnosis, round_num, message.get("body_measurement"),
+            )
+        elif not passed and not demo_was_played:
             instructions = self._build_assessment_correction_prompt(
                 diagnosis, scoring, round_num,
             )
@@ -860,11 +951,37 @@ class CoachingService:
             f"This is a form check — NOT a workout set. "
             f"{context_str} "
             f"Tell the user the specific issue you found and what to adjust. "
-            f"Be specific and actionable (e.g., 'widen your stance a bit' or 'push your knees out more'). "
+            f"Be specific and actionable: name the body part and the direction to move it, in plain words. "
             f"Then tell them to try it again with that adjustment. "
             f"Keep it encouraging and brief (2-3 sentences). "
             f"Do NOT say 'assessment' — frame it as wanting to see the fix, in your own words."
         )
+
+    def _build_assessment_proceed_prompt(
+        self, diagnosis: dict, round_num: int, body_measurement: str | None,
+    ) -> str:
+        focus = assessment_focus_line(self.top_cause(diagnosis), body_measurement) or ""
+        return (
+            f"[PRE-WORKOUT FORM CHECK DONE] After {round_num} tries one thing is still off, "
+            f"and that's fine: it becomes the focus of the workout instead of another retry. "
+            f"{focus} "
+            f"Tell them the one thing to keep working on, in your own words, without asking "
+            f"them to try again. Then transition to calibration: tell them you need 5 deep "
+            f"bodyweight squats to learn how they move. Calm and brief (2-3 sentences)."
+        )
+
+    def top_cause(self, diagnosis: dict) -> dict | None:
+        """The cause to name — the same one the next set will focus on."""
+        if self._coaching_orchestrator:
+            return self._coaching_orchestrator.top_cause(diagnosis)
+        immediate = diagnosis.get("immediate_causes") or []
+        return immediate[0] if immediate else None
+
+    def _apply_carried_focus(self) -> None:
+        """Start the workout's first set on the form check's unresolved cause."""
+        if self._carried_focus_diagnosis and self._coaching_orchestrator:
+            self._coaching_orchestrator.carry_focus_from(self._carried_focus_diagnosis)
+        self._carried_focus_diagnosis = None
 
     def _build_assessment_pass_prompt(
         self, diagnosis: dict, scoring: dict, round_num: int,
@@ -909,10 +1026,10 @@ class CoachingService:
             return (
                 f"[PRE-WORKOUT ASSESSMENT PASSED] The user's squat form looks great — no issues at all! "
                 f"{context_str} "
-                f"Praise their form enthusiastically. "
+                f"Praise their form — this is earned, so let it show. "
                 f"Then transition to calibration: tell them you need 5 deep bodyweight squats "
                 f"to fine-tune your understanding of how they move. "
-                f"Keep it brief and hype (2-3 sentences)."
+                f"Keep it brief (2-3 sentences)."
             )
 
     async def _on_calibration_complete(self, message: dict):
@@ -963,7 +1080,7 @@ class CoachingService:
         # Announce calibration completion via LLM
         instructions = (
             "[CALIBRATION COMPLETE] Calibration is done — you now know exactly how they move. "
-            "Tell them you're dialed in and the workout starts now, in one short hyped sentence "
+            "Tell them you're dialed in and the workout starts now, in one short, calm sentence "
             "of your own. Don't say 'calibration'."
         )
         await self._coaching_llm_reply(instructions)
@@ -973,6 +1090,7 @@ class CoachingService:
             target_reps = self._get_current_target_reps()
             total_sets = self._get_total_sets()
             self._coaching_orchestrator.reset_set(target_reps=target_reps, total_sets=total_sets)
+            self._apply_carried_focus()
             self._workout_active = True
             logger.info("[CALIBRATION] Orchestrator reset for workout phase — workout_active=True")
 
@@ -1003,9 +1121,8 @@ class CoachingService:
             prune_context_fn=self._prune_conversation_context,
             affect_service=getattr(getattr(self._session, "userdata", None), "affect_service", None),
         )
-        self._coaching_orchestrator._generate_tts_fn = self._generate_tts_audio
-        self._coaching_orchestrator._play_raw_frames_fn = self._play_raw_audio
         self._coaching_orchestrator._speak_adjustment_fn = self._speak_adjustment_feedback
+        self._coaching_orchestrator._get_set_load_fn = self._current_set_load
 
         target_reps = self._get_current_target_reps()
         total_sets = self._get_total_sets()
@@ -1053,6 +1170,32 @@ class CoachingService:
                 return completed_set, next_set, total_sets
         return 1, 2, 3  # Safe fallback
 
+    def _safety_line(self) -> str | None:
+        return safety_line(self._state) if self._state is not None else None
+
+    def _build_rest_complete_prompt(self) -> str:
+        """The next-set line: calm, and names the set's one focus. Any reported
+        pain reaches it through the SAFETY line on every coaching prompt."""
+        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
+
+        _, next_set, total_sets = self._get_set_numbers()
+        parts = [f"[REST COMPLETE] Rest is over. Set {next_set} of {total_sets} starts now."]
+        orchestrator = self._coaching_orchestrator
+        focus = orchestrator.set_focus_fault if orchestrator else None
+        if focus:
+            parts.append(
+                f"This set's one focus: {fault_label(focus)}. Say it as the action to take — "
+                f"toward the floor, the bar or a direction — not as a fault."
+            )
+            cue_text = CUE_TEXT_MAP.get(FAULT_TO_CUE_MAP.get(focus, ""))
+            if cue_text:
+                parts.append(f"Mid-set they'll hear the cue '{cue_text}' for it.")
+        parts.append(
+            "Say it calmly in one or two short sentences, in your own words — never the same "
+            "announcement twice in a session."
+        )
+        return " ".join(parts)
+
     # ------------------------------------------------------------------
     # Set Management
     # ------------------------------------------------------------------
@@ -1076,7 +1219,11 @@ class CoachingService:
                 if self._coaching_orchestrator
                 else 0
             )
-            session.mark_set_complete(performed_reps=rep_count)
+            session.mark_set_complete(
+                performed_reps=rep_count,
+                performed_weight=completed_set.target_weight if completed_set else None,
+                rpe=completed_set.actual_rpe if completed_set else None,
+            )
 
             has_next = session.advance_to_next_set()
 
@@ -1117,46 +1264,93 @@ class CoachingService:
             return None
 
     async def force_end_current_set(self, reps: int) -> dict:
-        """Force-end the current set early (called by workout agent when user verbally stops).
+        """End the current set early (the athlete said they're done).
 
-        Puts the orchestrator into rest mode, overrides the rep count,
-        advances the WorkoutSession, and resets for the next set if any.
+        Runs the normal completion path, so the set gets its recap and the
+        rest that follows. ``status`` is "advanced" (resting before the next
+        set), "workout_complete" (the exercise recap is next) or
+        "already_resting" (no set in progress).
         """
         from agent.core.workout_session import WorkoutSession
 
         session_data = self._state.get("workout.current_session")
         if not session_data:
             return {"status": "no_session"}
+        orchestrator = self._coaching_orchestrator
+        if orchestrator is None:
+            return {"status": "no_session"}
 
         session = WorkoutSession.from_dict(session_data)
         completed_set = session.get_current_set()
         rest_seconds = completed_set.rest_seconds if completed_set else 60
 
-        if self._coaching_orchestrator:
-            self._coaching_orchestrator.resting = True
-            self._coaching_orchestrator.set_rep_count = reps
-            self._coaching_orchestrator.mark_set_ended_early()
+        if not await orchestrator.end_set_early(reps=reps):
+            return {"status": "already_resting"}
+        if orchestrator.exercise_done:
+            return {"status": "workout_complete", "recap_queued": True}
 
-        new_target = await self._advance_workout_set()
+        session = self._get_workout_session()
+        return {
+            "status": "advanced",
+            "rest_seconds": rest_seconds,
+            "next_set_description": session.get_current_exercise_description() if session else "",
+            "recap_queued": True,
+        }
 
-        if new_target is not None:
-            # There is a next set — reset orchestrator
-            if self._coaching_orchestrator:
-                self._coaching_orchestrator.reset_set(target_reps=new_target)
+    def record_set_rpe(self, rpe: float) -> None:
+        """Store the athlete's RPE on the set they finished most recently."""
+        session = self._get_workout_session()
+        last_set = session.last_completed_set() if session else None
+        if last_set is None:
+            logger.warning(f"[COACHING SERVICE] RPE {rpe} reported with no completed set — dropped")
+            return
+        last_set.actual_rpe = float(rpe)
+        self._state.set("workout.current_session", session.to_dict())
+        self._state.save_state()
+        logger.info(f"[COACHING SERVICE] RPE {rpe} recorded for set {last_set.set_number}")
 
-            session_data = self._state.get("workout.current_session")
-            next_desc = ""
-            if session_data:
-                s = WorkoutSession.from_dict(session_data)
-                next_desc = s.get_current_exercise_description()
+    def _current_set_load(self) -> tuple[float, str | None] | None:
+        """(weight, unit) of the set in progress; weight 0 is bodyweight, None unknown."""
+        session = self._get_workout_session()
+        current_set = session.get_current_set() if session else None
+        if current_set is None or current_set.target_weight is None:
+            return None
+        return float(current_set.target_weight), current_set.weight_unit
 
-            return {
-                "status": "advanced",
-                "rest_seconds": rest_seconds,
-                "next_set_description": next_desc,
-            }
+    def workout_state_line(self) -> str | None:
+        """One short line on where the workout stands, for the conversational
+        agent: set n/N, phase, last set, focus, last cue and its outcome, load."""
+        from agent.services.coaching_orchestrator import load_phrase
+
+        session = self._get_workout_session()
+        if session is None:
+            return None
+        exercise = session.get_current_exercise()
+        current_set = session.get_current_set()
+        if exercise is None or current_set is None or current_set.completed:
+            return "WORKOUT: all sets done."
+        orchestrator = self._coaching_orchestrator
+        set_label = f"{exercise.current_set_index + 1}/{len(exercise.sets)}"
+
+        if orchestrator is not None and orchestrator.resting:
+            if exercise.current_set_index == 0 and session.current_exercise_index > 0:
+                phase = f"between exercises, next {exercise.exercise_name}"
+            else:
+                phase = f"resting before set {set_label}"
+            seconds_left = orchestrator.rest_seconds_left()
+            if seconds_left is not None:
+                phase += f", about {seconds_left}s left"
         else:
-            return {"status": "workout_complete"}
+            reps = orchestrator.set_rep_count if orchestrator is not None else 0
+            phase = f"in set {set_label}, {reps} reps so far"
+
+        parts = [f"WORKOUT: {phase}"]
+        if orchestrator is not None:
+            parts.extend(orchestrator.state_fragments())
+        load = load_phrase(self._current_set_load())
+        if load:
+            parts.append(f"load {load}")
+        return " | ".join(parts)
 
     async def _on_workout_complete(self):
         """Called by orchestrator after exercise recap is spoken."""
@@ -1199,17 +1393,6 @@ class CoachingService:
         if self._audio_cue_service:
             return self._audio_cue_service.has_cue(cue_key)
         return False
-
-    async def _generate_tts_audio(self, text: str) -> list | None:
-        """Generate TTS audio frames for arbitrary text (preemptive speech)."""
-        if not self._audio_cue_service:
-            return None
-        return await self._audio_cue_service.generate_tts(text)
-
-    async def _play_raw_audio(self, frames: list) -> None:
-        """Play raw AudioFrame list through the audio cue service."""
-        if self._audio_cue_service:
-            await self._audio_cue_service.play_frames(frames)
 
     # ------------------------------------------------------------------
     # Adjustment feedback (Feature 2: after-cue coaching loop)
@@ -1332,8 +1515,13 @@ class CoachingService:
             from livekit.agents import llm
 
             items = list(ctx.items)
-            system_items = [i for i in items if hasattr(i, 'role') and i.role in ("system", "developer")]
-            non_system = [i for i in items if not (hasattr(i, 'role') and i.role in ("system", "developer"))]
+            is_system = [getattr(i, "role", None) in ("system", "developer") for i in items]
+            # Earlier summaries are replaced, never stacked
+            system_items = [
+                item for item, system in zip(items, is_system)
+                if system and not (getattr(item, "text_content", None) or "").startswith(SUMMARY_PREFIX)
+            ]
+            non_system = [item for item, system in zip(items, is_system) if not system]
             recent_items = non_system[-max_items:] if len(non_system) > max_items else non_system
 
             new_ctx = llm.ChatContext.empty()
@@ -1342,7 +1530,7 @@ class CoachingService:
 
             summary_message = llm.ChatMessage(
                 role="system",
-                content=[f"[CONVERSATION SUMMARY]\n{summary_text}"],
+                content=[f"{SUMMARY_PREFIX}\n{summary_text}"],
             )
             new_ctx.items.append(summary_message)
 
@@ -1359,7 +1547,7 @@ class CoachingService:
         except Exception as e:
             logger.warning(f"[COACHING SERVICE] Context pruning failed: {e}")
 
-    async def _coaching_llm_reply(self, instructions: str):
+    async def _coaching_llm_reply(self, instructions: str, last_set_note: str | None = None):
         """Generate coaching speech via generate_reply with SpeechHandle tracking.
 
         Sends the coaching persona as system instructions and the coaching
@@ -1368,13 +1556,21 @@ class CoachingService:
         only system instructions are provided with no user turn).
 
         Strips the user_input + assistant response from the chat context
-        after playout so ephemeral coaching calls don't bloat TTFT.
+        after playout so ephemeral coaching calls don't bloat TTFT. With a
+        ``last_set_note`` (set and exercise recaps), one fixed-id item keeps
+        what was said and why, so a follow-up question isn't answered blind.
         """
         logger.info(f"[COACHING SERVICE] → Coaching LLM | instructions[:80]={instructions[:80]}...")
         self.is_coaching_speaking = True
         try:
             agent = self._session.current_agent
             ctx_len_before = len(agent.chat_ctx.items) if agent else 0
+
+            safety = self._safety_line()
+            if safety:
+                instructions = f"{instructions}\n\n{safety}"
+            if self._workout_active:
+                instructions = f"{instructions}\n\n{NO_QUESTIONS_RULE}"
 
             if self._spoken_coaching_lines:
                 recent = " | ".join(self._spoken_coaching_lines)
@@ -1394,15 +1590,25 @@ class CoachingService:
 
             if agent and len(agent.chat_ctx.items) > ctx_len_before:
                 added = len(agent.chat_ctx.items) - ctx_len_before
+                spoken_now = []
                 for item in list(agent.chat_ctx.items)[ctx_len_before:]:
                     if getattr(item, "role", None) == "assistant":
                         spoken = getattr(item, "text_content", None)
                         if spoken:
                             self._spoken_coaching_lines.append(spoken.strip())
+                            spoken_now.append(spoken.strip())
                 from livekit.agents import llm
                 new_ctx = llm.ChatContext.empty()
                 for item in list(agent.chat_ctx.items)[:ctx_len_before]:
+                    if last_set_note and item.id == LAST_SET_ITEM_ID:
+                        continue
                     new_ctx.items.append(item)
+                if last_set_note:
+                    new_ctx.items.append(llm.ChatMessage(
+                        id=LAST_SET_ITEM_ID,
+                        role="system",
+                        content=[f"[LAST SET] {last_set_note} You told them: \"{' '.join(spoken_now)}\""],
+                    ))
                 await agent.update_chat_ctx(new_ctx)
                 logger.debug(
                     f"[COACHING SERVICE] Stripped {added} ephemeral coaching items from context"

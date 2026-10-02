@@ -2,8 +2,9 @@
 # over the set, and fires when the aggregate exceeds expected + threshold.
 #   measurement: what the feature is measured from (faults.observability) —
 #     vertical / frontal (observable on one camera), sagittal / lateral_travel
-#     (approximate on one camera), foot_contact (multi-camera only).
-#     Unobservable symptoms never fire.
+#     (approximate on one camera), side_view / foot_contact (multi-camera only).
+#     Side-view squat judgements (trunk lean, hip shoot, balance, rep speed) are
+#     rig-only by product decision. Unobservable symptoms never fire.
 #   Priors are relative weights among a symptom's candidate causes (they sum to 1);
 #   they are expert estimates pending coach-labelled reps (FINDINGS.md D6).
 
@@ -15,7 +16,7 @@ excessive_trunk_lean:
   expected_value_fn: expected_zero
   severity_scoring: relative_excess
   threshold: 6.0
-  measurement: sagittal
+  measurement: side_view
   candidate_causes:
     - { cause_id: anthropometric_femur_torso_ratio, prior: 0.25 }
     - { cause_id: limited_ankle_df, prior: 0.20 }
@@ -32,7 +33,7 @@ hip_shoot:
   expected_value_fn: expected_zero
   severity_scoring: relative_excess
   threshold: 6.0
-  measurement: sagittal
+  measurement: side_view
   candidate_causes:
     - { cause_id: quad_strength_limit, prior: 0.30 }
     - { cause_id: weight_too_heavy, prior: 0.30 }
@@ -115,7 +116,7 @@ balance_forward:
   expected_value_fn: expected_zero
   severity_scoring: relative_excess
   threshold: 0.15
-  measurement: sagittal
+  measurement: side_view
   candidate_causes:
     - { cause_id: weight_forward_cue, prior: 0.35 }
     - { cause_id: knee_dominant_initiation, prior: 0.25 }
@@ -130,7 +131,7 @@ velocity_loss:
   expected_value_fn: expected_zero
   severity_scoring: relative_excess
   threshold: 20.0
-  measurement: vertical
+  measurement: side_view
   candidate_causes:
     - { cause_id: weight_too_heavy, prior: 1.00 }
 

@@ -234,6 +234,21 @@ class SegmentLengthEstimator:
             return None
         return dict(self._athlete_params)
 
+    def provisional_athlete_params(self) -> dict | None:
+        """The best estimate so far, for a caller that cannot wait for completion
+        (the one-rep assessment). Never completes the measurement: the strict or
+        fallback result replaces it later. None until every required segment has
+        MIN_ESTIMATE_SAMPLES samples."""
+        if self._athlete_params is not None:
+            return dict(self._athlete_params)
+        counts = self._sample_counts
+        estimated = counts >= MIN_ESTIMATE_SAMPLES
+        if not estimated.any():
+            return None
+        lengths_m = np.full(len(SEGMENT_NAMES), np.nan)
+        lengths_m[estimated], _ = _robust_lengths(self._histograms[estimated], counts[estimated])
+        return _params_from_lengths(lengths_m)
+
     @classmethod
     def from_athlete_params(cls, params: dict) -> SegmentLengthEstimator:
         lengths: dict[str, float] = {}

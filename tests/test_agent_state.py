@@ -7,6 +7,7 @@ import logging
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from agent.core.agent_state import AgentState
 
 USER_ID = "test-user"
+# Captured before the autouse fixture stubs it out.
+REAL_LOAD_USER_FROM_DATABASE = AgentState._load_user_from_database
 SAVES_PER_THREAD = 25
 
 
@@ -141,3 +144,60 @@ class TestConcurrentSaves:
         saved = json.loads(_state_file(tmp_path).read_text())
         assert saved["workout"]["reps"] in (111, 222)
         assert saved["mode"] == "onboarding"
+
+
+class TestNoPersonalDataInOutput:
+    def test_update_user_does_not_print_values(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        state = _make_state(tmp_path)
+        state.update_user(name="Sam", email="sam@example.com", username="sam42")
+        output = capsys.readouterr().out
+        for value in ("Sam", "sam@example.com", "sam42"):
+            assert value not in output
+
+    def test_database_load_does_not_print_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        import db.database as database
+
+        user_row = SimpleNamespace(
+            id=USER_ID, username="sam42", name="Sam", email="sam@example.com",
+            height_cm=None, created_at=None,
+        )
+
+        class _FakeQuery:
+            def filter(self, *args):
+                return self
+
+            def first(self):
+                return user_row
+
+        class _FakeDb:
+            def query(self, model):
+                return _FakeQuery()
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(database, "SessionLocal", _FakeDb)
+        state = AgentState(state_dir=tmp_path)
+        capsys.readouterr()
+
+        REAL_LOAD_USER_FROM_DATABASE(state, USER_ID)
+
+        output = capsys.readouterr().out
+        assert state.get("user.name") == "Sam"
+        assert "Sam" not in output
+        assert "sam42" not in output
+
+
+class TestSessionScopedFlags:
+    def test_a_new_session_forgets_the_last_sessions_mode_switch(self, tmp_path: Path) -> None:
+        """Main menu re-entry lines name where the user came from — this session only."""
+        first = _make_state(tmp_path)
+        first.switch_mode("workout")
+        first.switch_mode("main_menu")
+        first.save_state()
+        assert first.get("session.last_mode_switch") is not None
+
+        second = _make_state(tmp_path)
+        assert second.get("session.last_mode_switch") is None

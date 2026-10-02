@@ -19,6 +19,10 @@ class _StubAgent:
     def __init__(self, state=None, userdata=None):
         self.state = state
         self.userdata = userdata
+        self.handed_chat_ctx = None
+
+    async def update_chat_ctx(self, chat_ctx) -> None:
+        self.handed_chat_ctx = chat_ctx
 
 
 class _StubWorkoutAgent(_StubAgent):
@@ -93,29 +97,110 @@ class TestStartWorkoutCalibrationFlag:
 
 
 class TestBuildTaskInstructions:
-    def test_nothing_prefilled_asks_for_everything(self):
-        instructions = build_task_instructions("squat", None, None, None, None)
-        assert "number of sets" in instructions
-        assert "reps per set" in instructions
-        assert "weight in lbs" in instructions
-        assert "rest between sets" in instructions
+    def test_bodyweight_asks_only_sets_and_reps(self):
+        instructions = build_task_instructions("Bodyweight Squat", None, None, None, None)
+        assert "sets and reps" in instructions
+        assert "weight on the bar" not in instructions
+        assert "Never ask about rest" in instructions
         assert "ALREADY provided" not in instructions
 
-    def test_partial_prefill_only_asks_for_missing(self):
-        instructions = build_task_instructions("squat", 2, 3, None, 30)
-        assert "number of sets = 2" in instructions
-        assert "reps per set = 3" in instructions
-        assert "rest between sets in seconds = 30" in instructions
-        assert "Do NOT ask for these again" in instructions
-        assert "Conversationally collect ONLY the remaining details" in instructions
-        assert "weight in lbs" in instructions.split("remaining details:")[1]
+    def test_loaded_lift_also_asks_weight_with_unit(self):
+        instructions = build_task_instructions("Barbell Back Squat", None, None, None, None)
+        assert "sets and reps" in instructions
+        assert "weight on the bar" in instructions
+        assert "kilograms or pounds" in instructions
 
-    def test_all_prefilled_starts_immediately(self):
-        instructions = build_task_instructions("squat", 2, 3, 0.0, 30)
+    def test_partial_prefill_only_asks_for_missing(self):
+        instructions = build_task_instructions("Bodyweight Squat", 2, None, None, 30)
+        assert "sets = 2" in instructions
+        assert "rest = 30 seconds" in instructions
+        assert "Do NOT ask for these again" in instructions
+        assert "Ask ONLY for" in instructions
+
+    def test_sets_and_reps_known_starts_immediately_for_bodyweight(self):
+        instructions = build_task_instructions("Bodyweight Squat", 2, 3, None, None)
         assert "Call the start_workout tool IMMEDIATELY" in instructions
-        assert "Conversationally collect" not in instructions
+        assert "Ask ONLY for" not in instructions
+
+    def test_loaded_weight_known_with_unit(self):
+        instructions = build_task_instructions("Barbell Back Squat", 3, 5, 60.0, None, "kg")
+        assert "weight = 60 kg" in instructions
+        assert "Call the start_workout tool IMMEDIATELY" in instructions
 
     def test_bodyweight_zero_counts_as_provided(self):
-        instructions = build_task_instructions("squat", None, None, 0.0, None)
-        assert "weight in lbs (0 for bodyweight) = 0.0" in instructions
-        assert "Do NOT ask for these again" in instructions
+        instructions = build_task_instructions("Barbell Back Squat", 3, 5, 0.0, None)
+        assert "weight = bodyweight" in instructions
+        assert "Call the start_workout tool IMMEDIATELY" in instructions
+
+
+class TestStartWorkoutParameters:
+    def test_weight_unit_and_default_rest_reach_session(
+        self, state: AgentState, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(quick_exercise_module, "WorkoutAgent", _StubWorkoutAgent)
+        monkeypatch.setattr(quick_exercise_module, "TeachingAgent", _StubTeachingAgent)
+
+        async def _fake_check(user_id: str, exercise_name: str):
+            return {"depth": {}}
+
+        monkeypatch.setattr(quick_exercise_module, "check_calibration", _fake_check)
+
+        async def _run():
+            task = CollectExerciseInfoTask(
+                exercise_name="Barbell Back Squat", user_id="test-user", state=state, userdata=object(),
+            )
+            return await task.start_workout(sets=3, reps=5, weight=60.0, weight_unit="kg")
+
+        asyncio.run(_run())
+
+        first_set = state.get("workout.current_session")["exercises"][0]["sets"][0]
+        assert first_set["target_weight"] == pytest.approx(60.0)
+        assert first_set["weight_unit"] == "kg"
+        assert first_set["rest_seconds"] == quick_exercise_module.DEFAULT_REST_SECONDS_LOADED
+
+    def test_values_given_to_main_menu_survive_a_bare_tool_call(
+        self, state: AgentState, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(quick_exercise_module, "WorkoutAgent", _StubWorkoutAgent)
+        monkeypatch.setattr(quick_exercise_module, "TeachingAgent", _StubTeachingAgent)
+
+        async def _fake_check(user_id: str, exercise_name: str):
+            return {"depth": {}}
+
+        monkeypatch.setattr(quick_exercise_module, "check_calibration", _fake_check)
+
+        async def _run():
+            task = CollectExerciseInfoTask(
+                exercise_name="Barbell Back Squat", user_id="test-user", state=state, userdata=object(),
+                weight=135.0, weight_unit="lb", rest_seconds=45,
+            )
+            return await task.start_workout(sets=3, reps=5)
+
+        asyncio.run(_run())
+
+        first_set = state.get("workout.current_session")["exercises"][0]["sets"][0]
+        assert first_set["target_weight"] == pytest.approx(135.0)
+        assert first_set["weight_unit"] == "lb"
+        assert first_set["rest_seconds"] == 45
+
+
+class TestCancel:
+    def test_cancel_returns_to_main_menu(self, state: AgentState, monkeypatch: pytest.MonkeyPatch):
+        from agent.agents.main_menu_agent import MainMenuAgent
+
+        async def _fake_check(user_id: str, exercise_name: str):
+            return None
+
+        monkeypatch.setattr(quick_exercise_module, "check_calibration", _fake_check)
+
+        async def _run():
+            task = CollectExerciseInfoTask(
+                exercise_name="Bodyweight Squat", user_id="test-user", state=state, userdata=object(),
+            )
+            return await task.cancel_exercise(shut_down=True)
+
+        result = asyncio.run(_run())
+
+        assert isinstance(result, MainMenuAgent)
+        assert result._ask_shutdown_on_entry is True
+        assert state.get_mode() != "workout"

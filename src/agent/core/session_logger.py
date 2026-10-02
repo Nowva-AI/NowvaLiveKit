@@ -13,6 +13,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import threading
 from .pricing_config import calculate_cost
 
+# Tool parameters that identify the athlete or describe their health never reach the CSV.
+PRIVATE_PARAMETER_KEYS = frozenset({"name", "email", "injury_history"})
+REDACTED = "[redacted]"
+
+
+def _redact(parameters: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: REDACTED if key in PRIVATE_PARAMETER_KEYS else value for key, value in parameters.items()}
+
 
 @dataclass
 class LogEvent:
@@ -151,7 +159,7 @@ class SessionLogger:
             cost_usd=0.0,  # Function calls don't have direct cost (included in conversation)
             details_json=json.dumps({
                 "function": function_name,
-                "parameters": parameters,
+                "parameters": _redact(parameters),
                 "result": str(result)[:500]  # Truncate long results
             }),
             transcript_user="",

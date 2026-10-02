@@ -1,7 +1,6 @@
 pipeline:
   target_fps: 30
   log_level: INFO
-  single_camera_mode: false
 
 capture:
   source: webcam
@@ -14,8 +13,7 @@ pose:
   model_complexity: 2           # 0=lite, 1=full, 2=heavy (mediapipe only)
   # model_path: src/biomechanics/pose/models/rtmpose-m-256x192.onnx  # uncomment for rtmpose
 
-triangulation:
-  enabled: true
+triangulation:                    # multi-camera mode is NOWVA_MULTI_CAMERA=true
   max_sync_delta_ms: 20.0
 
 camera_calibration:               # person-based camera calibration (multi-camera only)
@@ -28,9 +26,6 @@ camera_calibration:               # person-based camera calibration (multi-camer
   capture_timeout_s: 90.0         # then fall back to the T-pose calibration
   drift_ratio: 1.5                # refine between sets when reprojection RMS > ratio x stored
   drift_check_frames: 150
-
-kinematics:
-  backend: analytical           # analytical | opensim
 
 faults:
   depth:                          # hip height above the knee, in femur lengths (0 = parallel)
@@ -97,10 +92,6 @@ faults:
     flare_moderate_deg: 15.0
     flare_severe_deg: 22.0
 
-rep_detection:
-  entry_threshold: 30.0
-  min_rep_duration_frames: 20
-
 coaching:
   min_cue_gap_seconds: 1.0
   set_timeout_seconds: 30.0     # Pause > this = new set
@@ -118,7 +109,7 @@ kalman:                           # fixed-lag Kalman smoother — the only tempo
   measurement_std_ceiling_m: 0.08
   gate_sigma: 4.0
   gate_min_radius_m: 0.08
-  max_predicted_frames: 5         # analysis continues this many frames without a pose
+  max_prediction_s: 0.17          # analysis carries an unmeasured keypoint this long (5 frames at 30 fps)
   min_output_confidence: 0.15
 
 foot_contact:
@@ -147,7 +138,7 @@ hip_counter:
   ascending_vel_threshold: 3.0    # cm/s — vel < -this = BOTTOM→ASCENDING
   min_depth_cm: 10.0              # minimum displacement for valid rep (like prominence)
   standing_return_cm: 3.0         # must return within this of baseline to complete rep
-  min_frames_descending: 3
-  min_frames_bottom: 2
-  min_frames_ascending: 3
-  min_rep_duration_frames: 15
+  min_descending_s: 0.1           # minimum time in each state (3, 2, 3 frames at 30 fps)
+  min_bottom_s: 0.067
+  min_ascending_s: 0.1
+  min_rep_duration_s: 0.5         # 15 frames at 30 fps

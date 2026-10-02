@@ -233,16 +233,18 @@ class TestObservability:
     def test_single_camera_sees_knee_tracking_and_vertical_faults(self):
         assert fault_observability("knee_valgus", SINGLE_CAMERA) == OBSERVABLE
         assert fault_observability("depth", SINGLE_CAMERA) == OBSERVABLE
-        assert fault_observability("velocity_loss", SINGLE_CAMERA) == OBSERVABLE
+        assert fault_observability("lockout", SINGLE_CAMERA) == OBSERVABLE
 
     def test_single_camera_hip_shift_is_approximate(self):
         """Backward hip travel leaks into sideways travel through monocular depth error."""
         assert fault_observability("hip_shift", SINGLE_CAMERA) == APPROXIMATE
         assert fault_observability("hip_shift", TRIANGULATED) == OBSERVABLE
 
-    def test_single_camera_only_approximates_side_view_faults(self):
-        assert fault_observability("hip_shoot", SINGLE_CAMERA) == APPROXIMATE
-        assert fault_observability("balance", SINGLE_CAMERA) == APPROXIMATE
+    @pytest.mark.parametrize("fault_type", ["hip_shoot", "balance", "velocity_loss"])
+    def test_side_view_faults_are_rig_only(self, fault_type: str):
+        """Product decision: on one camera the coach says nothing about side-view faults."""
+        assert fault_observability(fault_type, SINGLE_CAMERA) == NOT_OBSERVABLE
+        assert fault_observability(fault_type, TRIANGULATED) == OBSERVABLE
 
     def test_heel_rise_needs_the_rig(self):
         assert fault_observability("heel_rise", SINGLE_CAMERA) == NOT_OBSERVABLE
@@ -255,10 +257,29 @@ class TestObservability:
 class TestRuleEngineRepPath:
     def test_rep_faults_are_tagged_with_observability(self):
         engine = _squat_engine(SINGLE_CAMERA)
-        faults = engine.finish_rep(_angles(), 1, _features(valgus_l=14.0, valgus_r=2.0, hip_shoot_deg=14.0))
+        faults = engine.finish_rep(_angles(), 1, _features(valgus_l=14.0, valgus_r=2.0, hip_shift_ratio=0.2))
         tags = {fault.fault_type: fault.details["observability"] for fault in faults}
         assert tags[FaultType.KNEE_VALGUS] == OBSERVABLE
-        assert tags[FaultType.HIP_SHOOT] == APPROXIMATE
+        assert tags[FaultType.HIP_SHIFT] == APPROXIMATE
+
+    def test_single_camera_never_emits_side_view_faults(self):
+        engine = _squat_engine(SINGLE_CAMERA)
+        engine.finish_rep(_angles(0.0), 1, _features(concentric_velocity_mps=0.6))
+        faults = engine.finish_rep(
+            _angles(5.0), 2,
+            _features(hip_shoot_deg=20.0, balance_ratio=0.5, concentric_velocity_mps=0.3),
+        )
+        emitted = {fault.fault_type for fault in faults}
+        assert not emitted & {FaultType.HIP_SHOOT, FaultType.BALANCE, FaultType.VELOCITY_LOSS}
+        triangulated = _squat_engine(TRIANGULATED)
+        triangulated.finish_rep(_angles(0.0), 1, _features(concentric_velocity_mps=0.6))
+        rig_faults = triangulated.finish_rep(
+            _angles(5.0), 2,
+            _features(hip_shoot_deg=20.0, balance_ratio=0.5, concentric_velocity_mps=0.3),
+        )
+        assert {FaultType.HIP_SHOOT, FaultType.BALANCE, FaultType.VELOCITY_LOSS} <= {
+            fault.fault_type for fault in rig_faults
+        }
 
     def test_reference_updates_after_judging(self):
         """A rep is judged against the bests as they stood before it."""

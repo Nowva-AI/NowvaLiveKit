@@ -73,7 +73,7 @@ class BulgarianSplitSquatProfile(ExerciseProfile):
             ascending_vel_threshold=15.0,
             min_depth_cm=40.0,
             standing_return_cm=10.0,
-            min_rep_duration_frames=18,
+            min_rep_duration_s=0.6,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:

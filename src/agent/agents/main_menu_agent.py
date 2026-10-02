@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 import re
+from typing import Literal
+
 from livekit.agents import RunContext
 from livekit.agents.llm import function_tool
 
@@ -18,17 +20,45 @@ from db.database import SessionLocal
 logger = logging.getLogger(__name__)
 
 
+def _reentry_instructions(last_mode_switch: dict | None) -> str:
+    came_from = (last_mode_switch or {}).get("from")
+    if came_from in (None, "main_menu", "onboarding"):
+        where = "The user is back at the main menu."
+    else:
+        where = f"The user just came back to the main menu from {came_from.replace('_', ' ')}."
+    return (
+        f"{where} In one short line, acknowledge what just happened if the conversation "
+        "shows it, then ask what they want to do next — or, if their last request is still "
+        "undone, ask about that. This is not a goodbye: never say goodbye or sign off. "
+        "Vary the wording every time."
+    )
+
+
 class MainMenuAgent(BaseNovaAgent):
     """Primary interaction hub: schedule management, workout start, program creation."""
 
-    def __init__(self, state, userdata) -> None:
+    def __init__(self, state, userdata, ask_shutdown_confirmation: bool = False) -> None:
         super().__init__(state=state, userdata=userdata, instructions=get_main_menu_prompt()),
         self.calibration_profile = None
+        self._ask_shutdown_on_entry = ask_shutdown_confirmation
+        # User-message count when "shut down?" was asked, so only the next reply confirms.
+        self._shutdown_asked_on_turn: int | None = None
+
+    def _user_message_count(self) -> int:
+        # Spoken and typed turns both land in the chat before a tool runs;
+        # on_user_turn_completed never sees typed ones.
+        return sum(1 for item in self.chat_ctx.items if getattr(item, "role", None) == "user")
 
     async def on_enter(self):
-        """Generate main menu greeting only on first visit or first login; silent otherwise."""
+        """Greet on first visit or first login; on every later return, one short "what next" line."""
         self._publish_visual({"type": "menu", "action": "show"})
-        if self.state.is_first_time_main_menu():
+        if self._ask_shutdown_on_entry:
+            self._shutdown_asked_on_turn = self._user_message_count()
+            await self._say(
+                "The user asked to shut down. Ask in a few words to confirm they want you to "
+                "turn off. Don't say goodbye yet. Vary the wording."
+            )
+        elif self.state.is_first_time_main_menu():
             self.state.mark_main_menu_visited()
             self.state.save_state()
             await self._say(
@@ -45,7 +75,7 @@ class MainMenuAgent(BaseNovaAgent):
                 "never a menu of options."
             )
         else:
-            self._restore_turn_detection()
+            await self._say(_reentry_instructions(self.state.get("session.last_mode_switch")))
 
     # ===== WORKOUT START TOOLS =====
 
@@ -116,7 +146,7 @@ class MainMenuAgent(BaseNovaAgent):
             # Handoff to WorkoutAgent
             await self._suppress_turn_detection()
             from agent.agents.workout_agent import WorkoutAgent
-            return WorkoutAgent(state=self.state, userdata=self.userdata)
+            return await self._carry_context_to(WorkoutAgent(state=self.state, userdata=self.userdata))
 
         except Exception as e:
             logger.exception("[WORKOUT ERROR] Failed to load workout")
@@ -135,6 +165,7 @@ class MainMenuAgent(BaseNovaAgent):
         sets: int | None = None,
         reps: int | None = None,
         weight: float | None = None,
+        weight_unit: Literal["kg", "lb"] | None = None,
         rest_seconds: int | None = None,
     ):
         """
@@ -152,16 +183,17 @@ class MainMenuAgent(BaseNovaAgent):
             exercise_name: The exercise the user wants to do (e.g., "squat", "bench press", "deadlift")
             sets: Number of sets, if the user mentioned it
             reps: Reps per set, if the user mentioned it
-            weight: Weight in lbs, if the user mentioned it. Use 0 for bodyweight.
+            weight: Load in the unit the user said, if they mentioned one. Use 0 for bodyweight.
+            weight_unit: "kg" or "lb", as the user said it, whenever weight is non-zero
             rest_seconds: Rest between sets in seconds, if the user mentioned it
         """
         exercise_name = normalize_exercise_name(exercise_name) or exercise_name
         logger.info(
             f"[MAIN MENU] User wants quick exercise: {exercise_name} "
-            f"(sets={sets}, reps={reps}, weight={weight}, rest={rest_seconds})"
+            f"(sets={sets}, reps={reps}, weight={weight}{weight_unit or ''}, rest={rest_seconds})"
         )
         self._publish_visual({"type": "menu", "action": "select", "choice": "quick_exercise"})
-        return CollectExerciseInfoTask(
+        return await self._carry_context_to(CollectExerciseInfoTask(
             exercise_name=exercise_name,
             user_id=self.user_id,
             state=self.state,
@@ -170,7 +202,8 @@ class MainMenuAgent(BaseNovaAgent):
             reps=reps,
             weight=weight,
             rest_seconds=rest_seconds,
-        )
+            weight_unit=weight_unit,
+        ))
 
     # ===== PROGRAM TOOLS =====
 
@@ -324,7 +357,7 @@ class MainMenuAgent(BaseNovaAgent):
         self._publish_visual({"type": "menu", "action": "select", "choice": "program"})
         logger.info("="*80)
         logger.info("[MAIN MENU] create_program() CALLED")
-        logger.info(f"[MAIN MENU] User request: {user_request}")
+        logger.debug(f"[MAIN MENU] User request: {user_request}")
         logger.info("="*80)
 
         user_id = self.user_id
@@ -343,11 +376,11 @@ class MainMenuAgent(BaseNovaAgent):
             # Handoff to ProgramCreationAgent
             await self._suppress_turn_detection()
             from agent.agents.program_creation_agent import ProgramCreationAgent
-            return ProgramCreationAgent(state=self.state, userdata=self.userdata)
+            return await self._carry_context_to(ProgramCreationAgent(state=self.state, userdata=self.userdata))
 
         except Exception as e:
             logger.error(f"[ERROR] Failed to enter program creation: {e}")
-            return None, f"There was an error starting program creation. Say something like: 'I'm having trouble. Let's try again.' Keep it apologetic."
+            return None, "Program setup failed to start. Tell the user briefly that you couldn't get it going and offer to try again — apologetic, one sentence, vary the wording."
         finally:
             db.close()
 
@@ -380,7 +413,7 @@ class MainMenuAgent(BaseNovaAgent):
                 # Handoff to ProgramCreationAgent (which handles updates too)
                 await self._suppress_turn_detection()
                 from agent.agents.program_creation_agent import ProgramCreationAgent
-                return ProgramCreationAgent(state=self.state, userdata=self.userdata)
+                return await self._carry_context_to(ProgramCreationAgent(state=self.state, userdata=self.userdata))
             else:
                 # Multiple programs - store list and handoff to let ProgramCreationAgent handle selection
                 self.state.set("program_update.available_programs", programs)
@@ -390,7 +423,7 @@ class MainMenuAgent(BaseNovaAgent):
 
                 await self._suppress_turn_detection()
                 from agent.agents.program_creation_agent import ProgramCreationAgent
-                return ProgramCreationAgent(state=self.state, userdata=self.userdata)
+                return await self._carry_context_to(ProgramCreationAgent(state=self.state, userdata=self.userdata))
 
         except Exception as e:
             logger.error(f"[ERROR] Failed to list programs: {e}")
@@ -540,7 +573,7 @@ class MainMenuAgent(BaseNovaAgent):
         Args:
             user_request: The user's complete original request about schedule changes
         """
-        logger.info(f"[MAIN MENU] Schedule management requested: {user_request}")
+        logger.debug(f"[MAIN MENU] Schedule management requested: {user_request}")
         self._publish_visual({"type": "menu", "action": "select", "choice": "schedule"})
 
         intent = self._classify_schedule_intent(user_request)
@@ -552,12 +585,11 @@ class MainMenuAgent(BaseNovaAgent):
         self.state.save_state()
 
         await self._suppress_turn_detection()
-        await self._truncate_context_for_handoff()
 
         self._log_function_call("manage_schedule", {"user_request": user_request, "intent": intent}, "handoff to ScheduleMaintenanceAgent")
 
         from agent.agents.schedule_agent import ScheduleMaintenanceAgent
-        return ScheduleMaintenanceAgent(state=self.state, userdata=self.userdata)
+        return await self._carry_context_to(ScheduleMaintenanceAgent(state=self.state, userdata=self.userdata))
 
     def _classify_schedule_intent(self, request: str) -> str:
         """Lightweight intent classification — fallback is 'general' (schedule agent LLM resolves)."""
@@ -654,13 +686,29 @@ class MainMenuAgent(BaseNovaAgent):
         return None, "The user wants to update their profile. Tell them profile updates are coming soon and offer to note down any specific changes they want in the meantime. One or two sentences, vary the phrasing."
 
     @function_tool
-    async def shutdown(self, context: RunContext):
+    async def shutdown(self, context: RunContext, confirmed: bool = False):
         """
         Call this when the user wants to shut down, exit, turn off, or say goodbye.
         User might say: "shut down", "turn off", "exit", "goodbye", "I'm done",
         "quit", "close", "power off", "see you later"
+        The first call only asks the user to confirm. Call again with confirmed=true
+        only when their very next reply clearly says yes.
+
+        Args:
+            confirmed: True only when the user just said yes to your shutdown question
         """
-        logger.info("[MAIN MENU] User requested shutdown")
+        # A misheard fragment ("We're gone.") once fired this tool; never shut down
+        # on one utterance. The yes must come in the turn right after the question.
+        user_turns = self._user_message_count()
+        if not (confirmed and self._shutdown_asked_on_turn == user_turns - 1):
+            self._shutdown_asked_on_turn = user_turns
+            logger.info("[MAIN MENU] Shutdown requested — asking the user to confirm")
+            return None, (
+                "Ask the user in a few words to confirm they want you to shut down. "
+                "Don't shut down or say goodbye yet. Vary the wording."
+            )
+
+        logger.info("[MAIN MENU] User confirmed shutdown")
         self._publish_visual({"type": "menu", "action": "hide"})
 
         # Signal main.py to initiate graceful shutdown

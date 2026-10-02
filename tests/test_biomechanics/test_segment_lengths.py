@@ -329,6 +329,42 @@ class TestCompletion:
         assert estimator.to_athlete_params() == params_at_completion
 
 
+# The one-rep assessment sees about this many frames before it must diagnose.
+ASSESSMENT_FRAMES = 60
+TOO_FEW_FRAMES = 10
+
+
+class TestProvisionalEstimate:
+    def test_best_estimate_before_completion(self) -> None:
+        """The assessment cannot wait for completion; it diagnoses on the best estimate so far."""
+        frames, _ = _squat_sequence(ASSESSMENT_FRAMES)
+        estimator = SegmentLengthEstimator()
+        _run_until_complete(estimator, frames, np.zeros(len(frames), dtype=int))
+        assert not estimator.is_complete
+
+        params = estimator.provisional_athlete_params()
+
+        assert params is not None
+        assert set(params) == LEGACY_ATHLETE_PARAM_KEYS
+        assert params["femur_avg_m"] == pytest.approx(FEMUR_M, abs=ACCURACY_TOLERANCE_M)
+        assert params["tibia_avg_m"] == pytest.approx(TIBIA_M, abs=ACCURACY_TOLERANCE_M)
+        # Provisional never completes the measurement or sets proportions.
+        assert not estimator.is_complete
+        assert estimator.body_proportions is None
+
+    def test_no_estimate_from_a_handful_of_frames(self) -> None:
+        frames, _ = _squat_sequence(TOO_FEW_FRAMES)
+        estimator = SegmentLengthEstimator()
+        _run_until_complete(estimator, frames, np.zeros(len(frames), dtype=int))
+
+        assert estimator.provisional_athlete_params() is None
+
+    def test_completed_measurement_is_returned_as_is(self) -> None:
+        estimator = SegmentLengthEstimator.from_athlete_params(_athlete_params())
+
+        assert estimator.provisional_athlete_params() == estimator.to_athlete_params()
+
+
 class TestAthleteParams:
     def test_to_athlete_params_uses_legacy_keys(self) -> None:
         frames, rep_counts = _squat_sequence(400)

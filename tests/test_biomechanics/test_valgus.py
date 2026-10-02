@@ -509,6 +509,58 @@ class TestSingleCameraMissingInputs:
         assert result.foot_confidence_l == 0.0
 
 
+SQUARE_YAWS_DEG = (-10.0, 0.0, 5.0, 10.0)
+TURNED_YAWS_DEG = (-30.0, 20.0, 30.0, 45.0)
+FACING_TOE_OUT_DEG = 20.0
+
+
+def _turned(skeleton_3d: Skeleton3D, yaw_deg: float) -> Skeleton3D:
+    """The pose turned about the vertical through the hip midpoint."""
+    points = skeleton_3d.to_numpy()
+    centre = (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
+    yaw = math.radians(yaw_deg)
+    offsets = points - centre
+    turned = offsets.copy()
+    turned[:, 0] = math.cos(yaw) * offsets[:, 0] + math.sin(yaw) * offsets[:, 2]
+    turned[:, 2] = -math.sin(yaw) * offsets[:, 0] + math.cos(yaw) * offsets[:, 2]
+    confidences = np.array([point.confidence for point in skeleton_3d.keypoints])
+    return Skeleton3D.from_numpy(turned + centre, confidences=confidences)
+
+
+class TestSingleCameraFacingGate:
+    """Frontal-plane knee tracking needs the athlete roughly square to the camera.
+    A turn the monocular pose only partly sees reads ~0.45° of fake cave per degree
+    of unseen turn, so a clearly turned athlete gets no knee reading at all."""
+
+    @pytest.mark.parametrize("yaw_deg", SQUARE_YAWS_DEG)
+    def test_square_athlete_is_measured(self, yaw_deg: float):
+        skeleton_3d = _turned(_squat_skeleton_3d(FACING_TOE_OUT_DEG, 0.0), yaw_deg)
+        estimator = SingleCameraValgusEstimator()
+        estimator.set_femur_length(FEMUR_M)
+        result = estimator.estimate(_project_frontal(skeleton_3d), skeleton_3d)
+        assert result.valgus_l == pytest.approx(0.0, abs=MONO_NEUTRAL_TOLERANCE_DEG)
+        assert result.valgus_r == pytest.approx(0.0, abs=MONO_NEUTRAL_TOLERANCE_DEG)
+        assert result.foot_confidence_l > 0.0
+
+    @pytest.mark.parametrize("yaw_deg", TURNED_YAWS_DEG)
+    def test_turned_athlete_gets_no_knee_reading(self, yaw_deg: float):
+        skeleton_3d = _turned(_squat_skeleton_3d(FACING_TOE_OUT_DEG, KNEE_SWIVEL_DEG), yaw_deg)
+        estimator = SingleCameraValgusEstimator()
+        estimator.set_femur_length(FEMUR_M)
+        result = estimator.estimate(_project_frontal(skeleton_3d), skeleton_3d)
+        assert math.isnan(result.valgus_l) and math.isnan(result.valgus_r)
+        assert result.foot_confidence_l == 0.0 and result.foot_confidence_r == 0.0
+
+    def test_without_shoulders_the_gate_stays_open(self):
+        """The hip line alone is biased on MediaPipe (reads ~14° on square athletes)."""
+        skeleton_3d = _squat_skeleton_3d(FACING_TOE_OUT_DEG, 0.0)
+        skeleton_3d.keypoints[CK.LEFT_SHOULDER].confidence = 0.0
+        estimator = SingleCameraValgusEstimator()
+        estimator.set_femur_length(FEMUR_M)
+        result = estimator.estimate(_project_frontal(skeleton_3d), skeleton_3d)
+        assert result.valgus_l == pytest.approx(0.0, abs=MONO_NEUTRAL_TOLERANCE_DEG)
+
+
 class TestBuildValgusEstimator:
     """Tests for the factory function."""
 

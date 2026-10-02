@@ -21,9 +21,11 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from biomechanics.config import BiomechanicsConfig
+from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
 from biomechanics.faults.fault_types import FaultType
-from biomechanics.utils.types import CocoKeypoints as CK, PipelineFrame, Skeleton3D
+from biomechanics.utils.types import (
+    NUM_DEPTH_CLASSES, CocoKeypoints as CK, Keypoint2D, PipelineFrame, RepData, Skeleton2D, Skeleton3D,
+)
 from conftest import SYNTHETIC_FPS, squat_depth_profile, world_squat_points
 
 FRAME_DT_S = 1.0 / SYNTHETIC_FPS
@@ -221,14 +223,12 @@ class TestPresenceOnlyMode:
     """Rest periods must not advance gates or collect analysis data."""
 
     def _pipeline_with_standing_pose(self, mock_video_capture_cls):
-        """Pipeline with mocked capture and a pose estimator that always
-        returns a valid standing skeleton."""
-        mock_video_capture_cls.return_value = _make_fake_capture(60)
-
+        """Pipeline with no capture thread and a pose estimator that always
+        returns a valid standing skeleton; frames are published by _next_frame."""
         from biomechanics.pipeline import BiomechanicsPipeline
 
         config = BiomechanicsConfig()
-        pipeline = BiomechanicsPipeline(config)
+        pipeline = BiomechanicsPipeline(config, defer_capture=True)
 
         points = _standing_points()
 
@@ -241,13 +241,12 @@ class TestPresenceOnlyMode:
 
         pipeline._pose_estimator = MagicMock()
         pipeline._pose_estimator.estimate_both.side_effect = fake_estimate_both
-
-        # Seed a frame directly so the first process_frame() call does not
-        # race the background capture thread.
-        with pipeline._frame_lock:
-            pipeline._latest_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-
         return pipeline
+
+    @staticmethod
+    def _next_frame(pipeline) -> PipelineFrame:
+        pipeline._publish_frame(np.zeros((720, 1280, 3), dtype=np.uint8), time.time())
+        return pipeline.process_frame()
 
     @patch("biomechanics.pipeline.cv2.VideoCapture")
     def test_presence_only_skips_gate_and_analysis(self, mock_video_capture_cls):
@@ -257,7 +256,7 @@ class TestPresenceOnlyMode:
         pipeline.presence_only = True
 
         for _ in range(10):
-            result = pipeline.process_frame()
+            result = self._next_frame(pipeline)
 
         # Presence is still tracked (raw view only — nothing was analysed)
         assert result.skeleton_3d_raw is not None
@@ -279,7 +278,7 @@ class TestPresenceOnlyMode:
         pipeline = self._pipeline_with_standing_pose(mock_video_capture_cls)
 
         for _ in range(4):
-            result = pipeline.process_frame()
+            result = self._next_frame(pipeline)
 
         assert pipeline._readiness_gate.progress[0] == 4
         assert result.joint_angles is None  # gate not yet latched
@@ -353,6 +352,8 @@ class _FakeProvider:
         self.swap_count = 0
         self.temporal_resets = 0
         self.frame = np.zeros((72, 128, 3), dtype=np.uint8)
+        self.last_capture_timestamp = math.nan
+        self.lost = []
 
     def push(self, points: np.ndarray | None, confidences: np.ndarray | None = None) -> None:
         self._queue.append((points, confidences))
@@ -360,6 +361,7 @@ class _FakeProvider:
     def get_pose(self):
         points, confidences = self._queue.pop(0)
         self.sequence += 1
+        self.last_capture_timestamp = self._clock.time()
         if points is None:
             return self.frame, None, None
         if confidences is None:
@@ -373,11 +375,14 @@ class _FakeProvider:
     def reset_temporal_state(self) -> None:
         self.temporal_resets += 1
 
+    def lost_cameras(self) -> list[str]:
+        return list(self.lost)
+
     def release(self) -> None:
         pass
 
 
-def _build_multi_camera_pipeline(monkeypatch) -> tuple:
+def _build_multi_camera_pipeline(monkeypatch, config: BiomechanicsConfig | None = None) -> tuple:
     monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
     from biomechanics import pipeline as pipeline_module
 
@@ -386,7 +391,7 @@ def _build_multi_camera_pipeline(monkeypatch) -> tuple:
         pipeline_module, "time",
         types.SimpleNamespace(time=clock.time, perf_counter=clock.perf_counter),
     )
-    pipe = pipeline_module.BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
+    pipe = pipeline_module.BiomechanicsPipeline(config or BiomechanicsConfig(), defer_capture=True)
     provider = _FakeProvider(clock)
     pipe._multi_camera_provider = provider
     # The synthetic squat bottoms ~4 cm above parallel, just past the default
@@ -703,6 +708,163 @@ class TestPerRepVerdicts:
         assert pipe._rep_setup is None
 
 
+# Piston reps turn around ~5 cm short of standing: inside the counter's top quarter.
+PISTON_TOP_DEPTH = 0.3
+PISTON_REPS = 3
+PISTON_TURN_S = 0.5
+LIVE_FPS = 12.0
+# One synthetic rep is ~1.5 s; two reps merged into one trajectory would be ~2x.
+MAX_SINGLE_REP_S = 2.2
+
+
+def _cosine_move(start: float, end: float, seconds: float, fps: float) -> list[float]:
+    frames = int(round(seconds * fps))
+    return [start + (end - start) * 0.5 * (1.0 - math.cos(math.pi * (i + 1) / frames)) for i in range(frames)]
+
+
+def _linear_move(start: float, end: float, seconds: float, fps: float) -> list[float]:
+    frames = int(round(seconds * fps))
+    return [start + (end - start) * (i + 1) / frames for i in range(frames)]
+
+
+class TestPistonReps:
+    @pytest.mark.parametrize("fps", [SYNTHETIC_FPS, LIVE_FPS])
+    def test_each_piston_rep_gets_its_own_trajectory(self, monkeypatch, fps: float):
+        """A rep that ends short of lockout and turns straight back down starts a fresh rep."""
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        depths = [0.0] * READINESS_WARM_UP_FRAMES + [0.0] * int(fps)
+        depths += _cosine_move(0.0, 1.0, 1.0, fps)
+        for _ in range(PISTON_REPS - 1):
+            depths += _cosine_move(1.0, PISTON_TOP_DEPTH, PISTON_TURN_S, fps)
+            depths += _cosine_move(PISTON_TOP_DEPTH, 1.0, 1.0, fps)
+        depths += _cosine_move(1.0, 0.0, 1.0, fps) + [0.0] * int(fps)
+
+        results = []
+        for depth in depths:
+            provider.push(world_squat_points(max(depth, MIN_DEPTH_RATIO)))
+            results.append(pipe.process_frame())
+            clock.advance(1.0 / fps)
+
+        reps = [result.rep_data for result in results if result.rep_data is not None]
+        assert [rep.rep_number for rep in reps] == list(range(1, PISTON_REPS + 1))
+        for rep in reps:
+            assert 0 < rep.features["sample_count"] <= MAX_SINGLE_REP_S * fps
+            assert math.isfinite(rep.features["depth_ratio"])
+
+    def test_a_rep_too_short_to_count_does_not_leak_into_the_next(self, monkeypatch):
+        """The turnaround that drops a too-short rep still opens the next rep's own trajectory."""
+        config = BiomechanicsConfig(hip_counter=HipPositionCounterConfig(min_rep_duration_s=TOO_SHORT_REP_S))
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch, config)
+        depths = [0.0] * READINESS_WARM_UP_FRAMES + [0.0] * int(SYNTHETIC_FPS)
+        depths += _cosine_move(0.0, 1.0, QUICK_DESCENT_S, SYNTHETIC_FPS)
+        # A sharp turnaround (no easing), so the rep cannot settle at the top first.
+        depths += _linear_move(1.0, PISTON_TOP_DEPTH, PISTON_TURN_S, SYNTHETIC_FPS)
+        depths += _linear_move(PISTON_TOP_DEPTH, SHALLOW_NEXT_REP_DEPTH, SLOW_DESCENT_S, SYNTHETIC_FPS)
+        depths += _cosine_move(SHALLOW_NEXT_REP_DEPTH, 0.0, SLOW_ASCENT_S, SYNTHETIC_FPS)
+        depths += [0.0] * int(SYNTHETIC_FPS)
+
+        results = _run_frames(pipe, provider, clock, depths)
+
+        reps = [result.rep_data for result in results if result.rep_data is not None]
+        assert len(reps) == 1
+        assert reps[0].features["sample_count"] <= MAX_SINGLE_REP_S * SYNTHETIC_FPS
+        # Its own shallow bottom, not the dropped rep's deep one.
+        assert reps[0].features["depth_ratio"] > SHALLOW_NEXT_REP_MIN_DEPTH_RATIO
+
+
+# A rep the counter drops as too short (its piston turnaround comes ~1.1 s in),
+# followed by a slow, shallower rep (~2.1 s) that is long enough to count.
+TOO_SHORT_REP_S = 1.5
+QUICK_DESCENT_S = 0.6
+SHALLOW_NEXT_REP_DEPTH = 0.6
+SLOW_DESCENT_S = 1.2
+SLOW_ASCENT_S = 1.5
+# The deep synthetic rep bottoms near 0.09 femur lengths above parallel; the
+# shallow one stays well above this.
+SHALLOW_NEXT_REP_MIN_DEPTH_RATIO = 0.3
+
+# Captures lost over the last fifth of a 12 fps descent: the Kalman carries the
+# legs on at the pre-dropout velocity, deeper than the real bottom (~0.37
+# femur lengths above parallel) — to ~0.32.
+OVERSHOOT_BOTTOM_DEPTH = 0.8
+OVERSHOOT_DROPOUT_START_FRACTION = 0.8
+OVERSHOOT_DROPOUT_FRAMES = 3
+OVERSHOOT_HOLD_S = 0.3
+# Target + tolerance (0.08) = 0.35: the carried overshoot reaches it, the measured bottom does not.
+OVERSHOOT_TARGET_RATIO = 0.27
+
+
+def _overshoot_rep(fps: float) -> tuple[list[float], set[int]]:
+    """Returns (depths, indices of the frames whose capture is lost)."""
+    depths = [0.0] * READINESS_WARM_UP_FRAMES + [0.0] * int(fps)
+    descent = _cosine_move(0.0, OVERSHOOT_BOTTOM_DEPTH, 1.0, fps)
+    dropout_start = len(depths) + int(OVERSHOOT_DROPOUT_START_FRACTION * len(descent))
+    depths += descent + [OVERSHOOT_BOTTOM_DEPTH] * int(OVERSHOOT_HOLD_S * fps)
+    depths += _cosine_move(OVERSHOOT_BOTTOM_DEPTH, 0.0, 1.0, fps) + [0.0] * int(fps)
+    return depths, set(range(dropout_start, dropout_start + OVERSHOOT_DROPOUT_FRAMES))
+
+
+def _run_with_dropouts(pipe, provider, clock, depths: list[float], dropped: set[int], fps: float) -> list[PipelineFrame]:
+    results = []
+    for index, depth in enumerate(depths):
+        provider.push(None if index in dropped else world_squat_points(max(depth, MIN_DEPTH_RATIO)))
+        results.append(pipe.process_frame())
+        clock.advance(1.0 / fps)
+    return results
+
+
+class _FakeBiLSTM:
+    """Holds a rep window open from the first frame and closes it on request."""
+
+    def __init__(self) -> None:
+        self.in_rep = True
+        self.rep_count = 0
+        self.current_depth_class = 0
+        self.current_probability = 0.0
+        self.current_class_probabilities = np.zeros(NUM_DEPTH_CLASSES)
+        self.close_window = False
+
+    def process_skeleton(self, skeleton: Skeleton3D) -> tuple:
+        if not self.close_window:
+            return None, None
+        self.close_window = False
+        self.in_rep = False
+        self.rep_count += 1
+        rep = RepData(
+            rep_number=self.rep_count, start_time=0.0, end_time=skeleton.timestamp,
+            start_frame=0, end_frame=skeleton.frame_index,
+        )
+        return rep, None
+
+    def reject_last_rep(self) -> None:
+        self.rep_count -= 1
+
+
+class TestCarriedLegsNeverSetTheRepDepth:
+    def test_hip_counter_rep_is_judged_on_measured_frames(self, monkeypatch):
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        pipe.set_depth_target(OVERSHOOT_TARGET_RATIO)
+        depths, dropped = _overshoot_rep(LIVE_FPS)
+
+        results = _run_with_dropouts(pipe, provider, clock, depths, dropped, LIVE_FPS)
+
+        assert all(result.rep_data is None for result in results)
+        assert [result for result in results if result.shallow_rep_class is not None]
+
+    def test_bilstm_rep_is_judged_on_measured_frames(self, monkeypatch):
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        pipe._bilstm = _FakeBiLSTM()
+        pipe.set_depth_target(OVERSHOOT_TARGET_RATIO)
+        depths, dropped = _overshoot_rep(LIVE_FPS)
+        _run_with_dropouts(pipe, provider, clock, depths, dropped, LIVE_FPS)
+
+        pipe._bilstm.close_window = True
+        closing = _run_with_dropouts(pipe, provider, clock, [0.0], set(), LIVE_FPS)[0]
+
+        assert closing.rep_data is None
+        assert closing.shallow_rep_class is not None
+
+
 # The synthetic squat's thigh stops 5° above horizontal: a depth ratio of
 # sin(5°) ≈ 0.087, just past the default target's 0.08 tolerance.
 SHALLOW_SYNTHETIC_DEPTH_RATIO_CEILING = 0.15
@@ -923,3 +1085,211 @@ class TestPipelineToDiagnosis:
         assert "knee_not_tracking_toes" in symptoms
         rep_messages = [message for message in client.messages if message["type"] == "rep_complete"]
         assert all(message["features"]["rep_number"] == message["rep_number"] for message in rep_messages)
+
+
+# ---------------------------------------------------------------------------
+# Single camera: capture clock, frame sequence, lag alignment, tracking status
+# ---------------------------------------------------------------------------
+
+# MediaPipe stamps skeletons after inference; the pipeline must restamp them.
+INFERENCE_DELAY_S = 0.08
+PIXELS_PER_M = 600.0
+IMAGE_CENTRE_PX = (640.0, 300.0)
+CAPTURE_FRAME = np.zeros((72, 128, 3), dtype=np.uint8)
+READ_FAILURE_WINDOW_S = 0.3
+MAX_READS_IN_WINDOW = 20
+LEG_DROPOUT_FRAMES = 3
+
+
+class _FakeSingleCameraPose:
+    """MediaPipe stand-in: hip-centred Y-down 3D plus image pixels, stamped after inference."""
+
+    def __init__(self) -> None:
+        self._queue: list[tuple[np.ndarray | None, np.ndarray | None]] = []
+        self.calls = 0
+
+    def push(self, points: np.ndarray | None, confidences: np.ndarray | None = None) -> None:
+        self._queue.append((points, confidences))
+
+    def estimate_both(self, frame: np.ndarray):
+        self.calls += 1
+        points, confidences = self._queue.pop(0)
+        if points is None:
+            return None, None
+        if confidences is None:
+            confidences = np.full(len(points), PROVIDER_CONFIDENCE)
+        stamped = time.time() + INFERENCE_DELAY_S
+        centred = points - (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
+        skeleton_3d = Skeleton3D.from_numpy(centred, confidences=confidences, timestamp=stamped, frame_index=0)
+        keypoints_2d = [
+            Keypoint2D(
+                x=IMAGE_CENTRE_PX[0] + PIXELS_PER_M * point[0],
+                y=IMAGE_CENTRE_PX[1] + PIXELS_PER_M * point[1],
+                confidence=float(confidence),
+            )
+            for point, confidence in zip(centred, confidences)
+        ]
+        return Skeleton2D(keypoints=keypoints_2d, timestamp=stamped, frame_index=0), skeleton_3d
+
+    def reset_tracking(self) -> None:
+        pass
+
+    def release(self) -> None:
+        pass
+
+
+def _build_single_camera_pipeline(monkeypatch) -> tuple:
+    monkeypatch.setenv("NOWVA_MULTI_CAMERA", "false")
+    from biomechanics.pipeline import BiomechanicsPipeline
+
+    pipe = BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
+    pose = _FakeSingleCameraPose()
+    pipe._pose_estimator = pose
+    pipe.set_depth_target(None)
+    return pipe, pose
+
+
+def _single_step(pipe, pose: _FakeSingleCameraPose, capture_time_s: float, points, confidences=None) -> PipelineFrame:
+    pose.push(points, confidences)
+    pipe._publish_frame(CAPTURE_FRAME, capture_time_s)
+    return pipe.process_frame()
+
+
+def _single_camera_run(pipe, pose, depths: list[float], start_s: float = CLOCK_START_S, fps: float = SYNTHETIC_FPS):
+    return [
+        _single_step(pipe, pose, start_s + i / fps, world_squat_points(max(depth, MIN_DEPTH_RATIO)))
+        for i, depth in enumerate(depths)
+    ]
+
+
+class TestSingleCameraCapture:
+    def test_a_frame_is_processed_once(self, monkeypatch):
+        """When the loop outruns the camera it must not re-run the same frame."""
+        pipe, pose = _build_single_camera_pipeline(monkeypatch)
+        pose.push(world_squat_points(MIN_DEPTH_RATIO))
+        pipe._publish_frame(CAPTURE_FRAME, CLOCK_START_S)
+
+        first = pipe.process_frame()
+        second = pipe.process_frame()
+
+        assert pose.calls == 1
+        assert first.skeleton_3d_raw is not None
+        assert second.skeleton_3d_raw is None and second.joint_angles is None
+
+    def test_skeletons_carry_the_capture_time_and_sequence(self, monkeypatch):
+        pipe, pose = _build_single_camera_pipeline(monkeypatch)
+        capture_times = [CLOCK_START_S + i * FRAME_DT_S for i in range(3)]
+
+        results = [_single_step(pipe, pose, t, world_squat_points(MIN_DEPTH_RATIO)) for t in capture_times]
+
+        assert [r.skeleton_3d_raw.timestamp for r in results] == capture_times
+        assert [r.timestamp for r in results] == capture_times
+        assert [r.frame_index for r in results] == [1, 2, 3]
+        assert [r.skeleton_3d_raw.frame_index for r in results] == [1, 2, 3]
+
+    @patch("biomechanics.pipeline.cv2.VideoCapture")
+    def test_failed_reads_back_off_instead_of_spinning(self, mock_video_capture_cls):
+        mock_cap = MagicMock()
+        mock_cap.isOpened.return_value = True
+        mock_cap.read.return_value = (False, None)
+        mock_video_capture_cls.return_value = mock_cap
+        from biomechanics.pipeline import BiomechanicsPipeline
+
+        pipeline = BiomechanicsPipeline(BiomechanicsConfig())
+        time.sleep(READ_FAILURE_WINDOW_S)
+        pipeline.release()
+
+        assert 0 < mock_cap.read.call_count <= MAX_READS_IN_WINDOW
+
+    def test_pose_failures_are_logged_rate_limited(self, monkeypatch, caplog):
+        import logging
+
+        pipe, pose = _build_single_camera_pipeline(monkeypatch)
+        pose.estimate_both = MagicMock(side_effect=RuntimeError("model crashed"))
+
+        with caplog.at_level(logging.WARNING, logger="biomechanics.pipeline"):
+            for i in range(3):
+                pipe._publish_frame(CAPTURE_FRAME, CLOCK_START_S + i * FRAME_DT_S)
+                pipe.process_frame()
+
+        failures = [record for record in caplog.records if "Pose estimation failed" in record.getMessage()]
+        assert len(failures) == 1
+        assert "model crashed" in caplog.text
+
+
+class TestLagAlignment:
+    def test_knee_tracking_reads_the_2d_pose_of_the_analysed_frame(self, monkeypatch):
+        """The analysis skeleton lags the capture; the 2D it is paired with must lag with it."""
+        pipe, pose = _build_single_camera_pipeline(monkeypatch)
+        pairs: list[tuple[float, float]] = []
+        real_estimate = pipe._valgus_estimator.estimate
+
+        def _recording_estimate(skeleton_2d, skeleton_3d=None):
+            pairs.append((skeleton_2d.timestamp if skeleton_2d is not None else math.nan, skeleton_3d.timestamp))
+            return real_estimate(skeleton_2d, skeleton_3d)
+
+        monkeypatch.setattr(pipe._valgus_estimator, "estimate", _recording_estimate)
+        _single_camera_run(pipe, pose, _reps(1))
+
+        assert pairs
+        assert all(two_d == three_d for two_d, three_d in pairs)
+
+
+class TestTrackingStatus:
+    def test_each_frame_reports_its_unmeasured_leg_keypoints(self, monkeypatch):
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        _run_frames(pipe, provider, clock, [0.0] * READINESS_WARM_UP_FRAMES)
+        standing = world_squat_points(MIN_DEPTH_RATIO)
+
+        measured = _step(pipe, provider, clock, standing)
+        no_knee = _step(pipe, provider, clock, standing, _confidences_without(CK.LEFT_KNEE, len(standing)))
+        gone = _step(pipe, provider, clock, None)
+
+        assert measured.missing_keypoints == []
+        assert no_knee.missing_keypoints == ["left_knee"]
+        assert set(gone.missing_keypoints) == {
+            "left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle",
+        }
+
+    def test_frames_with_extrapolated_legs_stay_out_of_the_rep_features(self, monkeypatch):
+        """The Kalman carries a lost knee for a few frames; a coach never judges a guess."""
+        clean_pipe, clean_provider, clean_clock = _build_multi_camera_pipeline(monkeypatch)
+        clean = _run_frames(clean_pipe, clean_provider, clean_clock, _reps(1))
+        clean_rep = next(result.rep_data for result in clean if result.rep_data is not None)
+
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        depths = _reps(1)
+        bottom = depths.index(1.0)
+        results = []
+        for i, depth in enumerate(depths):
+            points = world_squat_points(max(depth, MIN_DEPTH_RATIO))
+            confidences = None
+            if bottom <= i < bottom + LEG_DROPOUT_FRAMES:
+                confidences = _confidences_without(CK.LEFT_KNEE, len(points))
+            results.append(_step(pipe, provider, clock, points, confidences))
+        rep = next(result.rep_data for result in results if result.rep_data is not None)
+
+        extrapolated = [result for result in results if result.extrapolated_keypoints]
+        assert len(extrapolated) == LEG_DROPOUT_FRAMES
+        assert all(result.extrapolated_keypoints == ["left_knee"] for result in extrapolated)
+        assert rep.features["sample_count"] == clean_rep.features["sample_count"] - LEG_DROPOUT_FRAMES
+
+
+class TestDropoutClock:
+    def test_prediction_never_runs_ahead_of_the_capture_clock(self, monkeypatch):
+        """Predicting a dropout on processing time stamped it later than the next
+        capture, so the Kalman dropped the next real frame as out of order."""
+        pipe, provider, clock = _build_multi_camera_pipeline(monkeypatch)
+        _run_frames(pipe, provider, clock, [0.0] * READINESS_WARM_UP_FRAMES)
+        from biomechanics import pipeline as pipeline_module
+
+        processing_latency_s = 3 * FRAME_DT_S
+        monkeypatch.setattr(
+            pipeline_module, "time",
+            types.SimpleNamespace(time=lambda: clock.time() + processing_latency_s, perf_counter=clock.perf_counter),
+        )
+        _step(pipe, provider, clock, None)
+        after = [_step(pipe, provider, clock, world_squat_points(MIN_DEPTH_RATIO)) for _ in range(KALMAN_LAG_FRAMES + 2)]
+
+        analysed = [result.skeleton_3d.timestamp for result in after]
+        assert all(later > earlier for earlier, later in zip(analysed, analysed[1:]))

@@ -41,13 +41,15 @@ COACHING_FORWARD_TYPES = frozenset({
     'cache_cues', 'fault', 'rep_complete', 'shallow_rep', 'rest_complete', 'frame_data',
     'calibration_rep', 'calibration_complete', 'diagnosis_complete', 'rep_diagnosis',
     'assessment_ready', 'assessment_result', 'assessment_rep', 'demo_abort', 'demo_started',
-    'last_rep_snapshot', 'demo_data_ready',
+    'last_rep_snapshot', 'demo_data_ready', 'tracking_quality',
 })
 
 # Suppress SQLAlchemy INFO logs
 logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
 DEFAULT_EXERCISE_NAME = "Barbell Back Squat"
+# The display HUD's workout weight is in pounds.
+LB_PER_KG = 2.20462
 COACHING_SOCKET_PATH = "/tmp/nowva_coaching.sock"
 
 # Played via afplay when the display window opens (browser autoplay policies
@@ -64,6 +66,10 @@ TEST_ASSESS_SETS = 3
 TEST_ASSESS_REPS = 5
 TEST_ASSESS_WEIGHT_LBS = 45.0
 TEST_ASSESS_REST_SECONDS = 120
+
+
+def _weight_in_lbs(weight: float, weight_unit: str | None) -> float:
+    return weight * LB_PER_KG if weight_unit == "kg" else weight
 
 
 class _TeeStream:
@@ -567,7 +573,7 @@ class NowvaApp:
             total_sets = len(sets)
             if sets:
                 target_reps = sets[0].get("target_reps") or 0
-                weight = sets[0].get("target_weight") or 0.0
+                weight = _weight_in_lbs(sets[0].get("target_weight") or 0.0, sets[0].get("weight_unit"))
         self._publish_display({
             "type": "workout",
             "action": "start",

@@ -44,6 +44,16 @@ from biomechanics.utils.types import (
 
 logger = logging.getLogger(__name__)
 
+# Leg keypoints (hips, knees, ankles) unmeasured this long during a set mean
+# the coach cannot see the rep: the agent is told, and told again when they return.
+TRACKING_LOST_AFTER_S = 0.5
+# Lost legs are only news during a rep or this soon after one: an athlete who
+# racks the bar and walks off at the end of a set has not lost tracking.
+TRACKING_ARMED_AFTER_REP_S = 3.0
+# Legs measured again for this long before "recovered", so a flickering
+# keypoint does not toggle lost and recovered.
+TRACKING_RECOVERED_AFTER_S = 0.3
+
 
 class IPCBridge:
     """
@@ -72,6 +82,11 @@ class IPCBridge:
         self.shoulder_width_m: float = 0.0
         self._target_stance_ratio: float = 0.0
         self._target_toe_out_deg: float = 0.0
+        self._legs_missing_since: float | None = None
+        self._legs_back_since: float | None = None
+        self._last_in_rep_s: float | None = None
+        self._tracking_lost = False
+        self._lost_cameras: list[str] = []
 
     # ------------------------------------------------------------------
     # Athlete parameters
@@ -365,6 +380,63 @@ class IPCBridge:
             "depth_consistency": round(depth_consistency, 1),
             "clean_reps": sum(1 for r in reps if r.is_clean),
             "fault_summary": fault_summary,
+        })
+
+    # ------------------------------------------------------------------
+    # Tracking quality
+    # ------------------------------------------------------------------
+
+    def update_tracking_quality(self, frame: PipelineFrame, active: bool, in_rep: bool) -> None:
+        """Send tracking_quality "lost" once the legs have been out of sight for
+        TRACKING_LOST_AFTER_S during a set (active), in a rep or within
+        TRACKING_ARMED_AFTER_REP_S of one, and "recovered" once they have been back
+        for TRACKING_RECOVERED_AFTER_S. Outside a set the state clears silently."""
+        if not active:
+            self._legs_missing_since = None
+            self._legs_back_since = None
+            self._last_in_rep_s = None
+            self._tracking_lost = False
+            return
+        if in_rep:
+            self._last_in_rep_s = frame.timestamp
+        missing = frame.missing_keypoints
+        if missing is None:
+            return
+        if not missing:
+            self._legs_missing_since = None
+            if not self._tracking_lost:
+                return
+            if self._legs_back_since is None:
+                self._legs_back_since = frame.timestamp
+            if frame.timestamp - self._legs_back_since >= TRACKING_RECOVERED_AFTER_S:
+                self._tracking_lost = False
+                self._legs_back_since = None
+                self._send({"type": "tracking_quality", "status": "recovered", "reason": "keypoints", "missing": []})
+            return
+        self._legs_back_since = None
+        if self._legs_missing_since is None:
+            self._legs_missing_since = frame.timestamp
+        armed = (
+            self._last_in_rep_s is not None
+            and frame.timestamp - self._last_in_rep_s <= TRACKING_ARMED_AFTER_REP_S
+        )
+        if armed and not self._tracking_lost and frame.timestamp - self._legs_missing_since > TRACKING_LOST_AFTER_S:
+            self._tracking_lost = True
+            logger.warning("[TRACKING] Lost mid-set: %s unmeasured", ", ".join(missing))
+            self._send({"type": "tracking_quality", "status": "lost", "reason": "keypoints", "missing": list(missing)})
+
+    def update_camera_status(self, frame: PipelineFrame) -> None:
+        """Send tracking_quality with reason "camera" whenever the set of lost cameras changes."""
+        lost = frame.lost_cameras
+        if lost is None or lost == self._lost_cameras:
+            return
+        self._lost_cameras = list(lost)
+        self._send({
+            "type": "tracking_quality",
+            "status": "lost" if lost else "recovered",
+            "reason": "camera",
+            "missing": [],
+            "cameras": list(lost),
         })
 
     # ------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Speak the reviewed coaching cue lines with Cartesia Sonic-3, in Nova's live voice.
+"""Speak the reviewed coaching cue lines with ElevenLabs Flash v2.5, in Nova's live voice.
 
 Reads src/assets/cue_text/cues.json (drafted by draft_cue_text.py, then reviewed by a
 person) and writes src/assets/cues/wav/{cue_key}_{variant}.wav: 24 kHz mono 16-bit PCM,
@@ -29,7 +29,16 @@ import aiohttp
 from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
 load_dotenv(REPO_ROOT / ".env")
+
+# The live agent's neutral ElevenLabs settings, so cached cues and live speech
+# are one voice.
+from affect.tts_adapters import ELEVENLABS_DEFAULT_SIMILARITY  # noqa: E402
+from affect.voice_style import (  # noqa: E402
+    ELEVENLABS_DEFAULT_SPEED,
+    ELEVENLABS_DEFAULT_STABILITY,
+)
 
 CUES_JSON_PATH = REPO_ROOT / "src" / "assets" / "cue_text" / "cues.json"
 CUES_DIR = REPO_ROOT / "src" / "assets" / "cues"
@@ -37,12 +46,13 @@ CUES_WAV_DIR = CUES_DIR / "wav"
 MANIFEST_PATH = CUES_DIR / "manifest.json"
 REVIEW_PAGE_PATH = CUES_DIR / "review.html"
 
-CARTESIA_URL = "https://api.cartesia.ai/tts/bytes"
-CARTESIA_API_VERSION = "2025-04-16"
-TTS_MODEL = "sonic-3"
-# Same default as the live agent (voice_agent.py), so cached cues and live
-# speech are one voice.
-DEFAULT_VOICE_ID = "3e39e9a5-585c-4f5f-bac6-5e4905c51095"
+ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+TTS_MODEL = "eleven_flash_v2_5"
+# Raw 16-bit PCM at the loader's rate — no resampling.
+OUTPUT_FORMAT = "pcm_24000"
+# The ElevenLabs plugin's default, used by the live agent when
+# ELEVENLABS_VOICE_ID is unset.
+DEFAULT_VOICE_ID = "hpp4J3VqNfWAUOO0d1Us"
 DEFAULT_VARIANTS = 3
 REQUEST_TIMEOUT_S = 60
 
@@ -53,10 +63,13 @@ NUM_CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 
 
-async def _synthesize(session: aiohttp.ClientSession, api_key: str, payload: dict) -> bytes:
+async def _synthesize(
+    session: aiohttp.ClientSession, api_key: str, voice_id: str, payload: dict,
+) -> bytes:
     async with session.post(
-        CARTESIA_URL,
-        headers={"X-API-Key": api_key, "Cartesia-Version": CARTESIA_API_VERSION},
+        ELEVENLABS_TTS_URL.format(voice_id=voice_id),
+        params={"output_format": OUTPUT_FORMAT},
+        headers={"xi-api-key": api_key},
         json=payload,
         timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S),
     ) as response:
@@ -119,17 +132,15 @@ def needs_synthesis(manifest_entry: dict | None, text: str, voice_id: str, force
     )
 
 
-def build_tts_payload(text: str, voice_id: str) -> dict:
+def build_tts_payload(text: str) -> dict:
     return {
+        "text": text,
         "model_id": TTS_MODEL,
-        "transcript": text,
-        "voice": {"mode": "id", "id": voice_id},
-        "output_format": {
-            "container": "raw",
-            "encoding": "pcm_s16le",
-            "sample_rate": SAMPLE_RATE,
+        "voice_settings": {
+            "stability": ELEVENLABS_DEFAULT_STABILITY,
+            "similarity_boost": ELEVENLABS_DEFAULT_SIMILARITY,
+            "speed": ELEVENLABS_DEFAULT_SPEED,
         },
-        "language": "en",
     }
 
 
@@ -187,7 +198,7 @@ def build_review_page(
 </head>
 <body>
 <h1>Cue Audio Review</h1>
-<p>Cartesia {TTS_MODEL} · voice {html.escape(voice_id)} · {len(cue_lines)} cues · lines from
+<p>ElevenLabs {TTS_MODEL} · voice {html.escape(voice_id)} · {len(cue_lines)} cues · lines from
 src/assets/cue_text/cues.json</p>
 <div class="wrap">
 <table>
@@ -223,7 +234,7 @@ async def generate(
     manifest = _load_manifest()
     existing = [path.name for path in CUES_WAV_DIR.glob("*.wav")]
     written = skipped = failed = removed = 0
-    print(f"Cartesia {TTS_MODEL} · voice {voice_id} · {SAMPLE_RATE} Hz mono → {CUES_WAV_DIR}\n")
+    print(f"ElevenLabs {TTS_MODEL} · voice {voice_id} · {SAMPLE_RATE} Hz mono → {CUES_WAV_DIR}\n")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -239,7 +250,7 @@ async def generate(
                         skipped += 1
                         continue
                     try:
-                        pcm_bytes = await _synthesize(session, api_key, build_tts_payload(text, voice_id))
+                        pcm_bytes = await _synthesize(session, api_key, voice_id, build_tts_payload(text))
                     except Exception as error:
                         print(f"  {filename:30} FAILED — {error}")
                         failed += 1
@@ -274,11 +285,11 @@ def main() -> int:
         print(f"Not in {CUES_JSON_PATH.name}: {', '.join(unknown)}")
         return 1
 
-    api_key = os.getenv("CARTESIA_API_KEY")
+    api_key = os.getenv("ELEVEN_API_KEY")
     if not api_key:
-        print("CARTESIA_API_KEY is not set — add it to .env")
+        print("ELEVEN_API_KEY is not set — add it to .env")
         return 1
-    voice_id = os.getenv("CARTESIA_VOICE_ID", DEFAULT_VOICE_ID)
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID") or DEFAULT_VOICE_ID
 
     status = asyncio.run(generate(cue_lines, cue_keys, args.variants, voice_id, api_key, args.force))
 

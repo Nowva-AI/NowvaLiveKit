@@ -12,7 +12,10 @@ import pytest
 
 from biomechanics.pipeline_process import (
     FALLBACK_USER_HEIGHT_M,
+    MAX_ASSESSMENT_ROUNDS,
     _adopt_measured_athlete_params,
+    _adopt_provisional_athlete_params,
+    _assessment_result_message,
     _build_calibration_complete_message,
     _extract_athlete_params,
     _resolve_user_height_m,
@@ -95,6 +98,82 @@ class TestAdoptMeasuredAthleteParams:
         assert adopted is not None
         assert tracker.calls == [(adopted, BASELINE)]
         assert bridge.calls == [(adopted, BASELINE)]
+
+
+class _PartlyMeasuredBody:
+    """A body measurement still running: no final params, a provisional estimate (or none)."""
+
+    def __init__(self, provisional: dict | None) -> None:
+        self._provisional = provisional
+
+    def to_athlete_params(self) -> dict | None:
+        return None
+
+    def provisional_athlete_params(self) -> dict | None:
+        return self._provisional
+
+
+class TestAdoptProvisionalAthleteParams:
+    def test_assessment_diagnoses_on_the_best_estimate(self) -> None:
+        """A one-rep assessment that outruns body measurement once passed with an empty diagnosis."""
+        tracker = _ParamsRecorder()
+        bridge = _ParamsRecorder()
+
+        adopted = _adopt_provisional_athlete_params(
+            _StubPipeline(_PartlyMeasuredBody(ATHLETE_PARAMS)), tracker, bridge, BASELINE,
+        )
+
+        assert adopted == ATHLETE_PARAMS
+        assert tracker.calls == [(ATHLETE_PARAMS, BASELINE)]
+        assert bridge.calls == [(ATHLETE_PARAMS, BASELINE)]
+
+    def test_nothing_measured_touches_nothing(self) -> None:
+        tracker = _ParamsRecorder()
+        bridge = _ParamsRecorder()
+
+        adopted = _adopt_provisional_athlete_params(
+            _StubPipeline(_PartlyMeasuredBody(None)), tracker, bridge, BASELINE,
+        )
+
+        assert adopted is None
+        assert tracker.calls == [] and bridge.calls == []
+
+
+DIAGNOSIS = {"confidence": 0.8, "immediate_causes": [{"cause_id": "stance_toe_mismatch"}]}
+SCORING = {"mean_score": 0.7}
+DEMO = {"available": False, "cues": []}
+
+
+class TestAssessmentResultMessage:
+    def test_clean_round_passes_and_ends_the_assessment(self) -> None:
+        message = _assessment_result_message(1, False, DIAGNOSIS, SCORING, DEMO, body_measurement="complete")
+
+        assert message["type"] == "assessment_result"
+        assert message["passed"] is True
+        assert message["final_round"] is True
+        assert message["proceed_anyway"] is False
+
+    def test_issues_before_the_cap_ask_for_another_round(self) -> None:
+        message = _assessment_result_message(1, True, DIAGNOSIS, SCORING, DEMO, body_measurement="complete")
+
+        assert message["passed"] is False
+        assert message["final_round"] is False
+        assert message["proceed_anyway"] is False
+
+    def test_issues_on_the_last_round_proceed_to_the_workout(self) -> None:
+        """Real data: 28% of sessions never passed; the top cue is carried into the set instead."""
+        message = _assessment_result_message(
+            MAX_ASSESSMENT_ROUNDS, True, DIAGNOSIS, SCORING, DEMO, body_measurement="provisional",
+        )
+
+        assert message["passed"] is False
+        assert message["final_round"] is True
+        assert message["proceed_anyway"] is True
+        assert message["round"] == MAX_ASSESSMENT_ROUNDS
+        assert message["diagnosis"] == DIAGNOSIS
+        assert message["scoring"] == SCORING
+        assert message["demo"] == DEMO
+        assert message["body_measurement"] == "provisional"
 
 
 class TestCalibrationCompleteMessage:

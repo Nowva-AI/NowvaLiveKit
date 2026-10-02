@@ -29,16 +29,23 @@ DEFAULT_FLUX_MODEL = "flux-general-en"
 # Deepgram's default endpoint is US-hosted (~120 ms round trip from Europe, against ~25 ms
 # for the EU one). Every audio packet and transcript pays that, and STT is the first link
 # of the serial chain: measured from France, the EU endpoint returns the final transcript
-# ~100 ms sooner. Same API key. Set STT_BASE_URL to the region nearest the rack.
+# ~100 ms sooner. Same API key. The EU endpoint is the default; set STT_BASE_URL to the
+# region nearest the rack.
 DEEPGRAM_US_URL = "https://api.deepgram.com/v1/listen"
 DEEPGRAM_EU_URL = "https://api.eu.deepgram.com/v1/listen"
 DEFAULT_EAGER_EOT_THRESHOLD = 0.5
 DEFAULT_EOT_THRESHOLD = 0.7
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
-DEFAULT_TTS_BACKEND = "inference"
-DEFAULT_TTS_MODEL = "cartesia/sonic-3"
+# Nova's product voice is ElevenLabs Flash v2.5: both Cartesia paths (LiveKit Inference
+# gateway and the direct account) are out of credits, and Flash measured ~172 ms TTFB.
+DEFAULT_TTS_BACKEND = "elevenlabs"
+DEFAULT_TTS_MODEL = "eleven_flash_v2_5"
+DEFAULT_ELEVENLABS_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
+INFERENCE_TTS_MODEL = "cartesia/sonic-3"
+CARTESIA_TTS_MODEL = "sonic-3"
 DEFAULT_VOICE_ID = "3e39e9a5-585c-4f5f-bac6-5e4905c51095"
-DEFAULT_ENDPOINTING_MIN_DELAY_S = 0.3
+DEFAULT_SILERO_MIN_SILENCE_S = 0.35
+DEFAULT_ENDPOINTING_MIN_DELAY_S = 0.2
 # What the shipped agent ran with: it never set max_delay, and LiveKit's default for a
 # transcript-based turn detector is 3.0. This is how long Nova waits when the detector
 # thinks the user is mid-thought, so lowering it trades patience for speed — measure
@@ -80,18 +87,18 @@ def build_stt():
         model=os.getenv("STT_MODEL", DEFAULT_STT_MODEL),
         language="en",
         keyterm=STT_KEYTERMS,
-        base_url=os.getenv("STT_BASE_URL", DEEPGRAM_US_URL),
+        base_url=os.getenv("STT_BASE_URL", DEEPGRAM_EU_URL),
     )
 
 
 def build_vad():
-    """Silero (0.55s silence floor) or the LiveKit native VAD (0.25s)."""
+    """Silero (0.35s silence floor) or the LiveKit native VAD (0.25s)."""
     if os.getenv("VAD_BACKEND", DEFAULT_VAD).strip().lower() == "inference":
         return inference.VAD(
             min_silence_duration=_env_float("VAD_MIN_SILENCE", 0.25),
         )
     return silero.VAD.load(
-        min_silence_duration=_env_float("VAD_MIN_SILENCE", 0.55),
+        min_silence_duration=_env_float("VAD_MIN_SILENCE", DEFAULT_SILERO_MIN_SILENCE_S),
     )
 
 
@@ -137,26 +144,25 @@ def build_llm():
 
 
 def build_tts():
-    """Cartesia over LiveKit Inference (LiveKit credits) or direct (Cartesia key).
+    """ElevenLabs (the default), or Cartesia over LiveKit Inference or direct.
 
-    Direct also reports aligned transcripts, which is what adaptive
-    interruption detection needs.
+    TTS_BACKEND=inference uses LiveKit credits, cartesia the Cartesia key.
     """
     voice = os.getenv("TTS_VOICE_ID") or os.getenv("CARTESIA_VOICE_ID", DEFAULT_VOICE_ID)
     backend = os.getenv("TTS_BACKEND", DEFAULT_TTS_BACKEND).strip().lower()
     if backend == "elevenlabs":
         return elevenlabs.TTS(
-            model=os.getenv("TTS_MODEL", "eleven_flash_v2_5"),
-            voice_id=os.getenv("ELEVENLABS_VOICE_ID"),
+            model=os.getenv("TTS_MODEL", DEFAULT_TTS_MODEL),
+            voice_id=os.getenv("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID,
         )
     if backend == "cartesia":
         return cartesia.TTS(
-            model=os.getenv("TTS_MODEL", "sonic-3"),
+            model=os.getenv("TTS_MODEL", CARTESIA_TTS_MODEL),
             voice=voice,
             language="en",
         )
     return inference.TTS(
-        model=os.getenv("TTS_MODEL", DEFAULT_TTS_MODEL),
+        model=os.getenv("TTS_MODEL", INFERENCE_TTS_MODEL),
         voice=voice,
         language="en",
     )
@@ -177,6 +183,7 @@ def build_turn_detector():
 
 
 LIVEKIT_BOUNDARY_END_S = 1.0
+DEFAULT_REPLY_START_VAD_WINDOW_S = 0.0
 
 
 def _interruption_options() -> dict:
@@ -188,13 +195,13 @@ def _interruption_options() -> dict:
     >= 0.5 s", and speech_duration still counts the user's own utterance if their VAD
     segment has not closed, as well as any of Nova's voice the echo canceller lets through.
     A fast reply lands inside that window and she cuts herself off; a slow one does not.
-    0 hands the whole reply to the adaptive detector: barge-in still works, no latency added.
-    Unset keeps LiveKit's default.
+    0 (the default, confirmed live 2026-09-21) hands the whole reply to the adaptive
+    detector: barge-in still works, no latency added. 1.0 restores LiveKit's default.
+    The adaptive detector only runs in console/dev mode (or with LIVEKIT_REMOTE_EOT_URL);
+    under `start` this window is a no-op and raw VAD stays armed for the whole reply.
     """
-    raw = os.getenv("REPLY_START_VAD_WINDOW")
-    if raw is None or raw == "":
-        return {}
-    return {"interruption": {"backchannel_boundary": (float(raw), LIVEKIT_BOUNDARY_END_S)}}
+    window = _env_float("REPLY_START_VAD_WINDOW", DEFAULT_REPLY_START_VAD_WINDOW_S)
+    return {"interruption": {"backchannel_boundary": (window, LIVEKIT_BOUNDARY_END_S)}}
 
 
 def build_turn_handling() -> TurnHandlingOptions:

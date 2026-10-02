@@ -20,7 +20,6 @@ class PipelineConfig(BaseModel):
     """Top-level pipeline configuration."""
     target_fps: int = 30
     log_level: str = "INFO"
-    single_camera_mode: bool = True
 
 
 class CaptureConfig(BaseModel):
@@ -40,8 +39,7 @@ class PoseConfig(BaseModel):
 
 
 class TriangulationConfig(BaseModel):
-    """Stereo triangulation configuration."""
-    enabled: bool = False
+    """Stereo triangulation configuration (multi-camera mode is NOWVA_MULTI_CAMERA)."""
     device_ids: List[int] = [0, 1, 2]
     primary_camera: int = 0
     max_sync_delta_ms: float = 20.0
@@ -68,11 +66,6 @@ class CameraCalibrationConfig(BaseModel):
     # Drift monitor: refine between sets when health exceeds drift_ratio x the stored RMS.
     drift_ratio: float = 1.5
     drift_check_frames: int = 150
-
-
-class KinematicsConfig(BaseModel):
-    """Inverse kinematics configuration."""
-    backend: str = "analytical"  # analytical | opensim
 
 
 class DepthFaultConfig(BaseModel):
@@ -253,12 +246,6 @@ class BarbellTrackingConfig(BaseModel):
     tilt_asym_severe_cm: float = 10.0
 
 
-class RepDetectionConfig(BaseModel):
-    """Rep detection configuration."""
-    entry_threshold: float = 30.0
-    min_rep_duration_frames: int = 20
-
-
 class HipPositionCounterConfig(BaseModel):
     """Hip-position-based rep counter thresholds.
 
@@ -274,13 +261,14 @@ class HipPositionCounterConfig(BaseModel):
     min_depth_cm: float = 10.0              # minimum displacement for valid rep (prominence)
     standing_return_cm: float = 3.0         # must return within this of baseline
 
-    # Minimum frames in each state (prevents noise flipping)
-    min_frames_descending: int = 3
-    min_frames_bottom: int = 2
-    min_frames_ascending: int = 3
+    # Minimum time in each state (prevents noise flipping): 3, 2 and 3 frames
+    # at 30 fps. Seconds, not frames, so 12 fps capture keeps the same timing.
+    min_descending_s: float = 0.1
+    min_bottom_s: float = 0.067
+    min_ascending_s: float = 0.1
 
     # Rep validation
-    min_rep_duration_frames: int = 15       # ~0.5s at 30fps
+    min_rep_duration_s: float = 0.5         # 15 frames at 30 fps
 
 
 class CoachingConfig(BaseModel):
@@ -307,7 +295,8 @@ class KalmanSmootherConfig(BaseModel):
     measurement_std_ceiling_m: float = 0.08
     gate_sigma: float = 4.0
     gate_min_radius_m: float = 0.08
-    max_predicted_frames: int = 5
+    # Analysis carries an unmeasured keypoint this long (5 frames at 30 fps).
+    max_prediction_s: float = 0.17
     min_output_confidence: float = 0.15
 
 
@@ -362,9 +351,7 @@ class BiomechanicsConfig(BaseModel):
     pose: PoseConfig = Field(default_factory=PoseConfig)
     triangulation: TriangulationConfig = Field(default_factory=TriangulationConfig)
     camera_calibration: CameraCalibrationConfig = Field(default_factory=CameraCalibrationConfig)
-    kinematics: KinematicsConfig = Field(default_factory=KinematicsConfig)
     faults: FaultsConfig = Field(default_factory=FaultsConfig)
-    rep_detection: RepDetectionConfig = Field(default_factory=RepDetectionConfig)
     coaching: CoachingConfig = Field(default_factory=CoachingConfig)
     ipc: IPCConfig = Field(default_factory=IPCConfig)
     bilstm: BiLSTMConfig = Field(default_factory=BiLSTMConfig)
@@ -458,16 +445,10 @@ def load_pipeline_config(path: Optional[str] = None) -> BiomechanicsConfig:
     if "camera_calibration" in raw_config:
         config_dict["camera_calibration"] = CameraCalibrationConfig(**raw_config["camera_calibration"])
 
-    if "kinematics" in raw_config:
-        config_dict["kinematics"] = KinematicsConfig(**raw_config["kinematics"])
-
     if "faults" in raw_config:
         # Validated as one nested model, so a new fault's YAML block can never
         # be silently dropped by a hand-written field list.
         config_dict["faults"] = FaultsConfig(**raw_config["faults"])
-
-    if "rep_detection" in raw_config:
-        config_dict["rep_detection"] = RepDetectionConfig(**raw_config["rep_detection"])
 
     if "coaching" in raw_config:
         config_dict["coaching"] = CoachingConfig(**raw_config["coaching"])

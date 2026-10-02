@@ -10,8 +10,9 @@ variant each time for natural-sounding playback.
 Playback routes through LiveKit's session.say() so audio reaches the user
 via the WebRTC track.
 
-Fallback: if no pre-generated files exist for a cue, generates audio on
-the fly via the OpenAI TTS API and plays it through session.say().
+Fallback: when the pipeline's cue list names a cue with no file on disk,
+cache_cues() generates it once via the OpenAI TTS API at workout start.
+Nothing is synthesized during a set: a cue without audio is skipped.
 """
 
 import asyncio
@@ -42,9 +43,8 @@ TTS_VOICE = os.getenv("REALTIME_VOICE", "cedar")
 TTS_SPEED = 1.1
 TTS_FORMAT = "pcm"  # 24kHz 16-bit mono PCM
 TTS_INSTRUCTIONS = (
-    "You are an energetic gym coach giving real-time cues during a workout. "
-    "Speak with high energy, urgency, and motivation — like you're right next "
-    "to the lifter on the gym floor. Short, punchy, and commanding."
+    "You are a calm, direct strength coach giving short cues mid-set. "
+    "Clear and steady, like you're right next to the lifter — firm, never shouting."
 )
 
 # Audio format constants
@@ -58,7 +58,8 @@ class AudioCueService:
     Indexes pre-generated WAV cue files from disk with random variant selection.
     Plays cues through LiveKit's session.say() for WebRTC delivery.
 
-    Falls back to runtime TTS generation for any cues missing on disk.
+    Cues in the pipeline's list that are missing on disk get a one-time TTS
+    fallback in cache_cues(); nothing is synthesized during a set.
     """
 
     def __init__(self, session) -> None:
@@ -260,7 +261,7 @@ class AudioCueService:
         logger.info(f"[AUDIO CUE] Pre-loaded {mem_count} WAV variants into memory")
 
     def _validate_expected_cues(self) -> None:
-        """Log warnings for expected cue keys missing from disk (will use slow TTS fallback)."""
+        """Log expected cue keys missing from disk."""
         missing = [
             k for k in CUE_TEXT_MAP
             if not k.startswith("rep_")
@@ -269,8 +270,8 @@ class AudioCueService:
         ]
         if missing:
             logger.warning(
-                f"[AUDIO CUE] {len(missing)} cues missing from disk — "
-                f"will use TTS fallback (~500ms each): {missing}"
+                f"[AUDIO CUE] {len(missing)} cues missing from disk — pipeline-listed ones "
+                f"get a TTS fallback at workout start, the rest are skipped: {missing}"
             )
 
     async def cache_cues(self, cues: Dict[str, str]) -> None:
@@ -382,44 +383,6 @@ class AudioCueService:
             return
 
         logger.warning(f"[AUDIO CUE] No audio available for cue: {cue_key}")
-
-    async def generate_tts(self, text: str) -> List[rtc.AudioFrame]:
-        """Generate TTS audio for arbitrary text and return as AudioFrame list."""
-        client = self._get_client()
-        response = await client.audio.speech.create(
-            model=TTS_MODEL,
-            voice=TTS_VOICE,
-            input=text,
-            instructions=TTS_INSTRUCTIONS,
-            response_format=TTS_FORMAT,
-            speed=TTS_SPEED,
-        )
-        pcm_bytes = response.read()
-        bytes_per_sample = 2
-        chunk_bytes = SAMPLES_PER_CHUNK * NUM_CHANNELS * bytes_per_sample
-        frames: List[rtc.AudioFrame] = []
-        for offset in range(0, len(pcm_bytes), chunk_bytes):
-            chunk = pcm_bytes[offset:offset + chunk_bytes]
-            samples = len(chunk) // (NUM_CHANNELS * bytes_per_sample)
-            frames.append(rtc.AudioFrame(
-                data=chunk,
-                sample_rate=SAMPLE_RATE,
-                num_channels=NUM_CHANNELS,
-                samples_per_channel=samples,
-            ))
-        return frames
-
-    async def play_frames(self, frames: List[rtc.AudioFrame]) -> None:
-        """Play raw AudioFrame list through session.say()."""
-        if not frames:
-            return
-        handle = self._session.say(
-            "",
-            audio=self._frames_to_async_gen(frames),
-            allow_interruptions=False,
-            add_to_chat_ctx=False,
-        )
-        await handle.wait_for_playout()
 
     @staticmethod
     async def _frames_to_async_gen(

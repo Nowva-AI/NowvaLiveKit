@@ -80,7 +80,7 @@ class SkullCrusherProfile(ExerciseProfile):
             ascending_vel_threshold=40.0,
             min_depth_cm=70.0,
             standing_return_cm=10.0,
-            min_rep_duration_frames=15,
+            min_rep_duration_s=0.5,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:

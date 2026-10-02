@@ -52,7 +52,7 @@ _SUMMARY_FEATURE_KEYS = (
 def mediapipe_to_viewer_coords(kpts: list[list[float]]) -> list[list[float]]:
     """Transform MediaPipe world coords → visualizer coords.
 
-    MediaPipe: X=subject's left, Y=down, Z=toward camera.
+    MediaPipe: X=subject's left, Y=down, +Z=subject's back (away from the camera).
     Visualizer: vis_x=mp_z, vis_y=-mp_y, vis_z=-mp_x.
 
     compute_foot_direction_angle measures against forward=[-1,0] in this

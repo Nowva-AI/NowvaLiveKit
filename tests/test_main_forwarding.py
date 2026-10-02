@@ -9,6 +9,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 SRC = Path(__file__).parent.parent / "src"
 # Handled by the coaching service only to log that it is ignored.
 DELIBERATELY_UNFORWARDED = {"set_complete"}
@@ -44,3 +46,41 @@ class TestCoachingForwarding:
     def test_depth_rejected_reps_reach_the_agent(self):
         """A rep the depth gate refuses is announced only as shallow_rep."""
         assert "shallow_rep" in _forwarded_types()
+
+    def test_tracking_loss_reaches_the_agent(self):
+        assert "tracking_quality" in _forwarded_types()
+
+
+KG_TARGET = 60.0
+LB_TARGET = 135.0
+LB_PER_KG = 2.20462
+WEIGHT_TOLERANCE_LB = 0.01
+
+
+def _main_function(name: str):
+    """Compile one top-level function (and the module constants it reads) from main.py."""
+    source = (SRC / "main.py").read_text()
+    tree = ast.parse(source)
+    namespace: dict = {}
+    for node in tree.body:
+        is_constant = isinstance(node, ast.Assign) and all(
+            isinstance(target, ast.Name) and target.id.isupper() and isinstance(node.value, ast.Constant)
+            for target in node.targets
+        )
+        if is_constant or (isinstance(node, ast.FunctionDef) and node.name == name):
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "main.py", "exec"), namespace)
+    return namespace[name]
+
+
+class TestWorkoutStartWeight:
+    def test_kg_target_is_shown_in_pounds(self):
+        """The display's weight_lbs once showed a 60 kg target as 60 lb."""
+        weight_in_lbs = _main_function("_weight_in_lbs")
+        assert weight_in_lbs(KG_TARGET, "kg") == pytest.approx(KG_TARGET * LB_PER_KG, abs=WEIGHT_TOLERANCE_LB)
+
+    def test_pound_and_unitless_targets_pass_through(self):
+        weight_in_lbs = _main_function("_weight_in_lbs")
+        assert weight_in_lbs(LB_TARGET, "lb") == LB_TARGET
+        assert weight_in_lbs(LB_TARGET, None) == LB_TARGET
+        assert weight_in_lbs(0.0, "kg") == 0.0
+
