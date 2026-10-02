@@ -1,6 +1,6 @@
 # Plan — Soulevé de terre conventionnel (deadlift) — v1
 
-Statut : proposition, à valider par Ambaka. Version 7 du document.
+Statut : proposition, à valider par Ambaka. Version 8 du document.
 
 ## 0. Décisions déjà prises (ne pas rediscuter)
 
@@ -72,7 +72,7 @@ Option matérielle à discuter : un accéléromètre (~1 $) dans le boîtier.
 - inclinaison : un monde synthétique incliné de 3° et 5° avec la gravité fournie reste exact à ±2 mm et ±0,5° ;
 - repli : l'erreur est rapportée et les seuils sont élargis ;
 - cohérence : une caméra « déplacée » de 2° est exclue ;
-- **test statique** (sur l'arbre syntaxique) : aucune soustraction de `.y`/`.z` ni indexation `[..., 1]`/`[..., 2]` sur les **tableaux 3D du monde** dans `src/biomechanics/deadlift/`, sauf dans `frame.py`. Les tableaux 3D du monde portent un suffixe de nom imposé (`*_world`) : c'est ce qui rend le test précis. Les fichiers qui manipulent des pixels ou des confiances (`bar_detector.py`, DLT) sont sur une liste d'exceptions explicite.
+- **test statique** (sur l'arbre syntaxique) : aucune soustraction de `.y`/`.z` ni indexation `[..., 1]`/`[..., 2]` sur les **tableaux 3D du monde** dans `src/biomechanics/deadlift/`, sauf dans `frame.py`. Les tableaux 3D du monde portent un suffixe de nom imposé (`*_world`) : c'est ce qui rend le test précis. Un second contrôle de l'arbre syntaxique impose cette convention : tout résultat de triangulation, du tracker de barre ou de `get_frames_and_pose()` doit être affecté à un nom en `*_world`. Les fichiers qui manipulent des pixels ou des confiances (`bar_detector.py`, DLT) figurent sur une liste d'exceptions explicite.
 
 ## 3. Isolation du squat (contrainte dure)
 
@@ -103,15 +103,15 @@ Le package est construit **par composition**. Il n'hérite pas de `BiomechanicsP
 **Calibration caméra du deadlift : une copie séparée, jamais d'écriture dans les fichiers du squat.**
 
 `CameraCalibrationSession` écrit les fichiers du rig à quatre endroits :
-- calibration initiale (`pipeline_process.py:681`) ;
+- calibration initiale à partir du lifter (`pipeline_process.py:681`, via `_save_and_install`) ;
 - T-pose (`:712`) ;
-- `_refined` après un affinage entre deux séries (`:741`) ;
-- `_refined` après un ré-ancrage du monde (`:787`).
+- la sauvegarde générique `_save_and_install` (`:741`), utilisée aussi bien par l'amorçage que par l'affinage ;
+- l'appel unique de fin d'affinage (`:787`, vers `_refined`), commun à l'affinage de dérive et au ré-ancrage du monde.
 
 Un affinage pendant une séance deadlift (positions penchées, pieds masqués par les disques) produirait un `_refined` que `select_calibration_file` chargerait ensuite **pour le squat**. Comme le constructeur reçoit `factory_path` en paramètre (`pipeline_process.py:495-505`), le deadlift lui passe ses propres chemins :
 - `factory_path = ~/.nowva/deadlift/rig_calibration_cams_<ids>.json`, avec son `_refined` à côté ;
 - **amorçage par paire** : si le fichier deadlift n'existe pas, on **copie** en lecture seule le fichier d'usine du squat **et** son `_refined`, en conservant leurs champs `timestamp` / `source_timestamp`. `select_calibration_file` (`pipeline_process.py:367-381`) choisit le `_refined` seulement si son `source_timestamp` égale le `timestamp` du fichier d'usine. Copier un `_refined` seul comme fichier d'usine casserait ce lien : les affinages deadlift, sauvés avec `source_timestamp` = l'horodatage d'usine (`:549`, `:733-734`), seraient ignorés à chaque séance. En copiant la paire, `establish()` reprend la même chaîne et les affinages deadlift suivants sont bien rechargés. Un test vérifie que l'affinage deadlift d'une séance est celui chargé à la séance suivante ;
-- **ré-amorçage** : `~/.nowva/deadlift/seed.json` mémorise l'horodatage du fichier d'usine squat copié. Si cet horodatage change (caméras recalibrées côté squat) ou si le contrôle de cohérence de la gravité échoue, la copie deadlift est jetée et refaite. S'il n'y a aucun fichier squat, la calibration à partir du lifter écrit dans le dossier deadlift, et le ré-amorçage ne s'applique pas ;
+- **ré-amorçage** : `~/.nowva/deadlift/seed.json` mémorise l'horodatage du fichier d'usine squat copié. On ré-amorce **uniquement** quand cet horodatage change (caméras recalibrées côté squat). Un échec du contrôle de cohérence de la gravité signifie qu'une caméra a bougé physiquement. Re-copier la calibration squat, peut-être tout aussi périmée, n'y changerait rien. La caméra est donc exclue (§2.2 b) et Nova demande une recalibration puis une nouvelle mesure de gravité. S'il n'y a aucun fichier squat, la calibration à partir du lifter écrit dans le dossier deadlift, et le ré-amorçage ne s'applique pas ;
 - affinages, ré-ancrages et sauvegardes se font uniquement dans `~/.nowva/deadlift/`.
 
 Conséquence acceptée : les calibrations squat et deadlift peuvent diverger avec le temps, chacune avec son propre contrôle de dérive. Partager un jour la calibration du rig sera une décision d'Ambaka.
@@ -242,8 +242,8 @@ Le comptage est **piloté par la barre** ; la posture est jugée par les fautes.
 | `TIRAGE → HAUT` | Barre ≥ hauteur de haut attendue − 8 cm, \|v\| < 0,05 m/s pendant ≥ 3 frames, tronc à moins de 35° de la verticale |
 | `TIRAGE → AU SOL` sans passer par `HAUT` | **Rep ratée** (la barre redescend sous la hauteur de haut − 8 cm) : événement, non comptée |
 | `HAUT → DESCENTE` | Vitesse < −0,10 m/s |
-| `DESCENTE → AU SOL` | Barre ≤ repos + 3 cm → **rep comptée et analysée** |
-| `DESCENTE → TIRAGE` | Touch-and-go : la vitesse redevient positive à moins de 5 cm du sol |
+| `DESCENTE → AU SOL` | **Arrêt au sol** : barre ≤ repos + 2 cm et \|v\| < 0,02 m/s pendant ≥ 3 frames → **rep comptée et analysée** |
+| `DESCENTE → TIRAGE` | **Touch-and-go** : point bas de la barre à moins de 5 cm de son repos, puis remontée de plus de 3 cm au-dessus de ce point bas, vitesse positive soutenue ≥ 100 ms, mains sur la barre → **la rep qui s'achève est comptée et analysée à cet instant** (`dl_diagnosis_update`, puis `rep_complete`). La rep suivante commence, avec pour décollage le point bas |
 | **`AU SOL → PLACEMENT`** | **Arrêt complet** : mains toujours sur la barre, immobiles ≥ 0,3 s. Nouveau placement analysé : F1, F8 et F9 sont remesurées |
 | **`AU SOL → TIRAGE`** | **Relance rapide sans pause** : même déclencheur que `PLACEMENT → TIRAGE`. Le placement est mesuré sur les 0,2 s qui précèdent le décollage, ou marqué « non mesuré » si c'est trop court |
 | `AU SOL → POSITION` / `APPROCHE` | Le lifter se relève, lâche la barre ou recule (fin de série possible) |
@@ -251,9 +251,9 @@ Le comptage est **piloté par la barre** ; la posture est jugée par les fautes.
 Précisions :
 - **Décollage daté au début réel du mouvement.** Sur un tirage lent, le déclencheur (3 cm et 0,10 m/s) arrive ≈ 150 ms après le vrai début. On remonte donc dans un tampon de 0,5 s jusqu'à la dernière frame où la barre était à moins de 0,5 cm de son repos avec une vitesse < 0,02 m/s. C'est cet instant qui sert de décollage pour l'événement, pour la fenêtre de F2 et pour la durée du tirage.
 - La marge de 8 cm sert à compter les lockouts mous ou en hyperextension, que F4/F5 signalent ensuite. Une rep bloquée aux genoux n'est pas comptée. La marge est validée sur données réelles (§8).
-- Comptage au sol, avec un seul message `rep_complete` (§9.2). En touch-and-go, la rep est comptée au contact du sol.
+- Une rep est comptée **une seule fois**, par l'une de deux transitions : `DESCENTE → AU SOL` (arrêt au sol) ou `DESCENTE → TIRAGE` (touch-and-go). Chacune émet un seul `rep_complete` (§9.2). Un rebond de bumper (≤ 3 cm) ne déclenche pas de touch-and-go : la barre finit par s'arrêter et la rep est comptée en `AU SOL`. Si le lifter enchaîne un vrai tirage juste après un rebond, la rep est comptée une seule fois, par `DESCENTE → TIRAGE`, car l'arrêt au sol n'a jamais été validé.
 - Barre lâchée depuis le haut : rep comptée, pas de faute. Ajustements de la barre au sol de moins de 3 cm : ignorés.
-- **Hystérésis au sol** : le retour au sol se valide à repos + 2 cm avec une vitesse ≈ 0 pendant ≥ 3 frames, le décollage à + 3 cm. Un rebond de bumper (1–3 cm, sans mains qui tirent) n'est pas un décollage : il faut une vitesse montante soutenue ≥ 100 ms, mains sur la barre. Une « rep ratée » n'est enregistrée que si la barre est montée d'au moins 10 cm.
+- **Hystérésis au sol** : l'arrêt au sol se valide à repos + 2 cm avec \|v\| < 0,02 m/s pendant ≥ 3 frames ; le décollage se déclenche à + 3 cm. Un rebond de bumper (1–3 cm, sans mains qui tirent) n'est pas un décollage : il faut une vitesse montante soutenue ≥ 100 ms, mains sur la barre. Une « rep ratée » n'est enregistrée que si la barre est montée d'au moins 10 cm.
 - Fin de série : `set_timeout_seconds` (30 s) en `AU SOL` ou `APPROCHE`, « j'ai fini », ou décision de la voix (§9.3).
 - La hauteur de repos est la médiane pendant `POSITION`/`PLACEMENT`, recalculée à chaque série.
 - En touch-and-go, aucune correction entre deux reps.
@@ -516,7 +516,7 @@ Sources : coaching classique et manuels de préparation physique. Revue par Amba
 On étend `.claude/preik-audit/harness/preik_harness/` :
 - corriger les chemins en dur (`__init__.py:13`) et rendre `runner.py:404` paramétrable ;
 - écrire un générateur deadlift : départ au sol, mains sur la barre, barre au sol (aujourd'hui, `barbell.py` la place sur le dos), occultation par les disques, monde incliné, caméra déplacée ;
-- scénarios : F1–F9, lockouts mous comptés, rep bloquée, arrêt complet, relance rapide, touch-and-go, barre lâchée, re-placement, plusieurs morphologies.
+- scénarios : F1–F9, lockouts mous comptés, rep bloquée, arrêt complet, relance rapide, touch-and-go (séries de 5 et 10 reps), rebond de bumper, barre lâchée, re-placement, plusieurs morphologies. **Assertion : 100 % des reps comptées exactement une fois, touch-and-go compris.**
 
 Ces données ne servent **jamais** à fixer les seuils finaux.
 
@@ -615,7 +615,7 @@ Ces données ne servent **jamais** à fixer les seuils finaux.
 - **`workout_complete`** : finalise la série en cours (`diagnosis_complete`, `set_complete`), vide les messages, ferme les caméras et sort proprement, comme le bloc `finally` de `pipeline_process.py:1965-2043`.
 - **Métadonnées de séance** : type de prise (double, mixte ou crochet), diamètre des disques (45 cm par défaut), ceinture, chaussures. Elles doivent arriver **avant l'ouverture des caméras**, car le sous-processus est lancé dès le passage en mode séance (`main.py:918-1099`) :
   - **parcours rapide** : demandées par la branche deadlift de `CollectExerciseInfoTask`, avant le changement de mode ;
-  - **séance programmée** : demandées par la branche deadlift du `WorkoutAgent` pendant l'accueil, avant que `workout.greeting_done` soit posé ;
+  - **séance programmée** : demandées pendant l'accueil, avant que `workout.greeting_done` soit posé. Pour un utilisateur connu, par la branche deadlift du `WorkoutAgent` (`greeting_done` posé à `workout_agent.py:194`). Pour une première fois, par l'agent d'apprentissage deadlift (le pendant de `teaching_agent.py:122`, où l'agent squat pose `greeting_done`) ;
   - la branche deadlift de `main.py` joint ces valeurs, lues dans l'état, au message `start_capture` envoyé après `greeting_done` (`main.py:1104-1118`) ; `deadlift/process.py` les lit à la réception de ce message ;
   - si l'utilisateur ne sait pas : prise double, disques de 45 cm ;
   - pas de changement en cours de séance en v1.
@@ -638,7 +638,7 @@ Estimations pour 1 ingénieur à temps plein. À 2, J2 et J4 peuvent avancer en 
 | **J0 — Filet squat** | `requirements.lock` ; golden masters pipeline et voix ; prompts ; alias ; manifeste de gel ; test « aucune écriture squat » (avec affinage forcé) ; drapeau sans effet ; `.claude/rules/deadlift.md` ; CI (si validée) ; décision sur la licence YOLO | Tout vert sur `main`. Une modification volontaire d'un seuil squat ou d'un texte de cue squat fait échouer le bon test | — | 4–6 j |
 | **J1 — Fondations** | Enregistreur + rejeu ; outil de gravité + repère lifter ; `KNOWLEDGE.md` ; modèle de placement (2 résolutions) ; capture round 1 (avec mesure de ρ) ; mesure Jetson ; évaluation des poids existants | Revue signée ; tests de signe, d'inclinaison, de cohérence et test statique verts ; ≥ 1 h de capture brute ; keypoints de barre décidés ; chiffres Jetson | J0 | 2 sem. |
 | **J2 — Simulateur deadlift** | Générateur, scénarios | Chaque scénario produit sa vérité terrain | J1 | 1 sem. |
-| **J3 — Cœur deadlift + squelette de bout en bout** | Fournisseur caméra ; `DeadliftPipeline` (contrats) ; calibration caméra séparée ; machine à états (arrêt complet, relance, décollage daté) ; métriques F1–F9 ; golden master deadlift. **Tranche fine de bout en bout, derrière le drapeau** : bifurcation dans `main.py`, processus deadlift, `rep_complete` → la voix compte les reps sur le rack | Simulateur : 100 % des reps comptées, événements ≤ 100 ms, chaque faute injectée détectée, scénario propre sans faute. Sur le rack : « deadlift » → reps comptées à voix haute | J2 | 2,5 sem. |
+| **J3 — Cœur deadlift + squelette de bout en bout** | Fournisseur caméra ; `DeadliftPipeline` (contrats) ; calibration caméra séparée ; machine à états (arrêt complet, relance, décollage daté) ; métriques F1–F9 ; golden master deadlift. **Tranche fine de bout en bout, derrière le drapeau** : bifurcation dans `main.py`, processus deadlift, `rep_complete` → la voix compte les reps sur le rack | Simulateur : 100 % des reps comptées exactement une fois (arrêt au sol, relance, touch-and-go, rebond de bumper), événements ≤ 100 ms, chaque faute injectée détectée, scénario propre sans faute. Sur le rack : « deadlift » → reps comptées à voix haute | J2 | 2,5 sem. |
 | **J4 — Barre 3D** | Annotation, entraînement, export ; tracker 3D ; association multi-vues ; vérité terrain ArUco | Rappel ≥ 95 % ; erreur 3D statique ≤ 1 cm et dynamique ≤ 1,5 cm ; budget Jetson tenu ou mode dégradé validé | J1, décision de licence | 2–3 sem. |
 | **J5 — Intégration complète** | Contrat §9.2–9.3 ; fichiers du §3.3 ; audio deadlift ; affichage ; base de données ; guidage ; récap | Séance complète en parcours rapide et programmé (première fois et utilisateur connu) ; liaison cue ↔ rep en base ; provenance ; isolation des données ; zéro synthèse de clip en séance ; affinage deadlift rechargé à la séance suivante ; aucune écriture squat ; golden masters squat identiques, drapeau éteint et allumé | J0, J3, J4 | 2 sem. |
 | **J6 — Validation réelle** | Round 1 → seuils, budget d'erreur, marges, ρ ; round 2 → jeu de test | Porte démo du §1 sur ≥ 10 lifters (effet de grappe, bootstrap par lifter, séries naturelles à part) ; κ ≥ 0,6 ; statut fixé pour chaque faute | J5 | 3–4 sem. |
