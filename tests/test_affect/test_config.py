@@ -19,7 +19,7 @@ class TestDefaults:
         assert config.enabled is True
         assert config.audio.model_sample_rate == 16000
         assert config.state.enter_z > config.state.exit_z
-        assert config.style.adapter == "cartesia_inline"
+        assert config.style.adapter == "auto"
 
     def test_repo_yaml_matches_schema(self) -> None:
         assert DEFAULT_CONFIG_PATH.exists()

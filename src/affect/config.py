@@ -23,7 +23,7 @@ ENV_INJECT_AS = "AFFECT_INJECT_AS"
 ENV_PROVIDERS = "AFFECT_PROVIDERS"
 
 InjectMode = Literal["system", "user_prefix"]
-AdapterName = Literal["cartesia_inline", "cartesia_extra", "qwen3", "none"]
+AdapterName = Literal["auto", "cartesia_inline", "cartesia_extra", "elevenlabs_settings", "qwen3", "none"]
 ProviderName = Literal["tensorrt", "cuda", "coreml", "cpu"]
 
 
@@ -78,7 +78,9 @@ class StateConfig(BaseModel):
 
 
 class StyleConfig(BaseModel):
-    adapter: AdapterName = "cartesia_inline"
+    # "auto" picks the adapter from the TTS actually in use, so swapping the voice
+    # provider can never send one engine another engine's markup.
+    adapter: AdapterName = "auto"
     speed_min: float = 0.9
     speed_max: float = 1.1
     volume_min: float = 0.9

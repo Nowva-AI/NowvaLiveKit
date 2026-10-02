@@ -9,6 +9,7 @@ from typing import Any
 from livekit.agents import Agent, RunContext, function_tool, llm
 
 from affect.state import STATE_ITEM_PREFIX, AthleteState
+from agent.services.chat_template_compat import normalize_for_strict_template, requires_strict_template
 from agent.services.tts_normalizer import normalize_stream
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,9 @@ class AffectNodesMixin:
             except Exception:  # noqa: BLE001 — affect must never break a reply
                 logger.exception("[AFFECT] llm_node injection failed; continuing without state")
                 ctx = chat_ctx
+        # Last, so the athlete line injected above is reshaped along with everything else.
+        if requires_strict_template():
+            ctx = normalize_for_strict_template(ctx)
         async for chunk in Agent.default.llm_node(self, ctx, tools, model_settings):
             yield chunk
 

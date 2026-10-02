@@ -35,6 +35,15 @@ _DIGIT_X_DIGIT_RE = re.compile(r"(?<=\d)x(?=\d)")
 _SCORE_RE = re.compile(r"(?<=\d)/(?=100\b|10\b)")
 _ARROW_RE = re.compile(r"\s*(?:->|→|⇒)\s*")
 
+# Models occasionally emit asides like "[no further response]" or "(pauses)".
+# Anything bracketed that is not an allowed inline tag would be spoken aloud.
+_ALLOWED_TAGS = ("laughter", "laughs", "sigh", "breath")
+MAX_HELD_MARKUP_CHARS = 80
+_BRACKET_ASIDE_RE = re.compile(
+    r"\[(?!\s*(?:" + "|".join(_ALLOWED_TAGS) + r")\s*\])[^\]]{0,80}\]",
+    re.IGNORECASE,
+)
+
 
 def normalize_tts_text(text: str) -> str:
     # Symbol expansions first, while the surrounding digits are intact.
@@ -52,6 +61,7 @@ def normalize_tts_text(text: str) -> str:
     text = text.replace("**", "").replace("*", "").replace("`", "")
     text = re.sub(r"(?<=\w)_(?=\w)", " ", text)
 
+    text = _BRACKET_ASIDE_RE.sub("", text)
     text = _EMOJI_RE.sub("", text)
     text = _EMOTICON_RE.sub("", text)
 
@@ -62,8 +72,30 @@ def normalize_tts_text(text: str) -> str:
     return text
 
 
+def _unclosed_markup_index(text: str) -> int | None:
+    for opener, closer in (("[", "]"), ("<", ">")):
+        index = text.rfind(opener)
+        if index != -1 and closer not in text[index:]:
+            return index
+    return None
+
+
 async def normalize_stream(text: AsyncIterable[str]) -> AsyncIterable[str]:
+    # A model streams "[no further response]" as "[", "no", " further", ... and no
+    # single chunk matches the aside pattern. Hold text back only from an unclosed
+    # bracket, and only briefly, so ordinary speech is never delayed and tags like
+    # [laughter] or <break .../> reach the voice adapters in one piece.
+    held = ""
     async for chunk in text:
-        cleaned = normalize_tts_text(chunk)
+        held += chunk
+        cut = _unclosed_markup_index(held)
+        if cut is not None and len(held) - cut <= MAX_HELD_MARKUP_CHARS:
+            ready, held = held[:cut], held[cut:]
+        else:
+            ready, held = held, ""
+        cleaned = normalize_tts_text(ready)
         if cleaned:
             yield cleaned
+    cleaned = normalize_tts_text(held)
+    if cleaned:
+        yield cleaned
