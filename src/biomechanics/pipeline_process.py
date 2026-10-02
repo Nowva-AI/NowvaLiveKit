@@ -281,6 +281,24 @@ def _extract_athlete_params(pipeline) -> dict | None:
     return pipeline.body_calibration.to_athlete_params()
 
 
+def _switch_exercise(
+    pipeline: BiomechanicsPipeline,
+    session_tracker: SessionTracker,
+    bridge: IPCBridge,
+    exercise_name: str,
+) -> None:
+    """Move the running pipeline to another exercise between sets.
+
+    The new profile's rules and rep counting take over, the diagnosis engine
+    only runs for exercises it models, and the voice agent gets the new
+    exercise's cues, which also tells it which profile is active.
+    """
+    pipeline.set_exercise(exercise_name)
+    session_tracker.on_exercise_changed(pipeline.profile.uses_diagnosis_engine)
+    bridge.prepare_exercise(exercise_name)
+    print(f"[PIPELINE] Exercise set to {exercise_name} ({pipeline.profile.name})")
+
+
 def _adopt_measured_athlete_params(pipeline, session_tracker, bridge, baseline: dict) -> dict | None:
     athlete_params = _extract_athlete_params(pipeline)
     if athlete_params is not None:
@@ -941,6 +959,7 @@ def run_biomechanics_pipeline(
 
         bridge = IPCBridge(ipc_client)
         session_tracker = SessionTracker(bridge, config=config.coaching)
+        session_tracker.diagnosis_enabled = pipeline.profile.uses_diagnosis_engine
 
         # Pre-cache coaching cues for the exercise
         bridge.prepare_exercise(exercise_name)
@@ -1019,8 +1038,13 @@ def run_biomechanics_pipeline(
             print(f"[CALIBRATION] Failed to load calibration file: {e}")
 
     # --- Assessment + Calibration phase (if no existing calibration) ---
+    # Only exercises the diagnosis engine models are calibrated. Calibrating
+    # anything else would store its reps as the athlete's squat calibration.
+    movement_pattern = get_movement_pattern(exercise_name)
+    if calibration_mode and movement_pattern is None:
+        print(f"[CALIBRATION] {exercise_name} has no calibration — skipping assessment and calibration")
+        calibration_mode = False
     if calibration_mode:
-        movement_pattern = get_movement_pattern(exercise_name) or "squat"
 
         # ============================================================
         #  PHASE 1: PRE-WORKOUT FORM ASSESSMENT (2-rep loop)
@@ -1629,6 +1653,12 @@ def run_biomechanics_pipeline(
                         camera_calibration.on_rest_start()
 
                     print(f"[REST] Starting {rest_seconds}s rest timer")
+                elif incoming.get("type") == "set_exercise":
+                    # Sent during rest, after rest_start finalized the last set
+                    # of the previous exercise.
+                    exercise_name = incoming.get("exercise_name") or exercise_name
+                    _switch_exercise(pipeline, session_tracker, bridge, exercise_name)
+                    set_collector.thresholds = extract_thresholds_from_rule_engine(pipeline._rule_engine)
                 elif incoming.get("type") == "assessment_mode":
                     session_tracker.set_assessment_mode(incoming.get("enabled", False))
                     print(f"[PIPELINE] Assessment mode {'enabled' if incoming.get('enabled') else 'disabled'}")

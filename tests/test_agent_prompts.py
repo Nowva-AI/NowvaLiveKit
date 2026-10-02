@@ -18,6 +18,7 @@ from agent.agents.prompts import (
     get_workout_prompt,
 )
 from agent.agents.prompts.base_prompt import NOVA_IDENTITY
+from agent.agents.prompts.main_menu_prompt import coachable_exercises_text
 from agent.agents.prompts.program_creation_prompt import MAX_USER_VALUE_CHARS
 from agent.agents.prompts.schedule_prompt import MAX_USER_REQUEST_CHARS
 
@@ -104,18 +105,22 @@ class TestSchedulePrompt:
 
 
 class TestMainMenuPrompt:
-    def test_only_squats_supported(self):
+    def test_only_coaching_ready_exercises_are_offered(self):
         prompt = get_main_menu_prompt()
         lowered = prompt.lower()
+        assert f"coach these on camera: {coachable_exercises_text()}." in prompt
+        assert "squat" in coachable_exercises_text()
         assert "deadlift" not in lowered
         assert "bench" not in lowered
         assert "overhead press" not in lowered
-        assert "squat" in lowered
 
 
 class TestNovaIdentity:
     def test_base_prompt_contains_identity(self):
         assert NOVA_IDENTITY in BASE_PROMPT
+
+    def test_identity_does_not_make_nova_a_squat_only_coach(self):
+        assert "squat" not in NOVA_IDENTITY.lower()
 
 
 class TestEnglishRuleComposition:

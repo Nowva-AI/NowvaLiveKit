@@ -10,30 +10,22 @@ within a session (faults.session_reference).
 
 import math
 import statistics
-from typing import Dict, Optional
+from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Exercise -> Movement Pattern mapping
+# Exercise -> calibration row
 # ---------------------------------------------------------------------------
-
-EXERCISE_TO_MOVEMENT_PATTERN: Dict[str, str] = {
-    # Squat variants
-    "Barbell Back Squat": "squat",
-    "Barbell Front Squat": "squat",
-    "Goblet Squat": "squat",
-    # Hip hinge variants (future)
-    "Barbell Deadlift": "hip_hinge",
-    "Romanian Deadlift": "hip_hinge",
-    "Sumo Deadlift": "hip_hinge",
-    # Push variants (future)
-    "Barbell Bench Press": "horizontal_push",
-    "Barbell Overhead Press": "vertical_push",
-}
-
 
 def get_movement_pattern(exercise_name: str) -> Optional[str]:
-    """Return the movement pattern for an exercise, or None if not mapped."""
-    return EXERCISE_TO_MOVEMENT_PATTERN.get(exercise_name)
+    """The movement pattern whose calibration an exercise reads and writes,
+    or None when the exercise has no calibration. Only exercises the
+    diagnosis engine models are calibrated, which today means squats."""
+    from biomechanics.profiles import find_profile_class
+
+    profile_class = find_profile_class(exercise_name)
+    if profile_class is None or not profile_class.uses_diagnosis_engine:
+        return None
+    return profile_class.movement_pattern
 
 
 # ---------------------------------------------------------------------------

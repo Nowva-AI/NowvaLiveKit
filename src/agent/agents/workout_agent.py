@@ -916,10 +916,15 @@ class WorkoutAgent(BaseNovaAgent):
 
             exercise_name = current_exercise.exercise_name
 
-            session.skip_current_exercise(reason=reason)
+            moved_on = session.skip_current_exercise(reason=reason)
 
             self.state.set("workout.current_session", session.to_dict())
             self.state.save_state()
+
+            # The pipeline and the orchestrator follow the plan to the next exercise
+            coaching = self.userdata.coaching_service
+            if moved_on and coaching:
+                coaching.start_current_exercise()
 
             next_exercise = session.get_current_exercise()
             if next_exercise:

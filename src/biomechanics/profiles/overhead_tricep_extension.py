@@ -98,10 +98,10 @@ class OverheadTricepExtensionProfile(ExerciseProfile):
             return angles.avg_shoulder_flexion > 150.0
         return _overhead_ready
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "lockout": "Extend fully at the top",
-            "range_of_motion": "Lower the weight deeper behind your head",
-            "shoulder_stability": "Keep elbows pinned overhead — don't let them drift",
-            "bilateral_asymmetry": "Even out left and right",
+            "lockout": "triceps_lockout",
+            "range_of_motion": "triceps_deeper",
+            "shoulder_stability": "triceps_elbows",
+            "bilateral_asymmetry": "triceps_even",
         }

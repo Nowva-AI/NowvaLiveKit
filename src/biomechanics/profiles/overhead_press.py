@@ -89,10 +89,10 @@ class OverheadPressProfile(ExerciseProfile):
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"wrist_height": abs(angles.wrist_y_l - angles.wrist_y_r)}
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "lockout": "Lock out overhead — fully extend arms",
-            "elbow_flare": "Tuck elbows slightly at the bottom",
-            "bar_path": "Press straight up — keep bar path vertical",
-            "bilateral_asymmetry": "Even out left and right",
+            "lockout": "press_lockout",
+            "elbow_flare": "press_elbows",
+            "bar_path": "press_bar_path",
+            "bilateral_asymmetry": "press_even",
         }

@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 @register_profile(
     "lunge", "walking_lunge", "reverse_lunge", "stationary_lunge",
     "barbell_lunge", "dumbbell_lunge",
+    # A split squat is a stationary lunge; without this "squat" would claim it.
+    "split_squat",
 )
 class LungeProfile(ExerciseProfile):
     """Profile for all lunge variants."""
@@ -86,10 +88,10 @@ class LungeProfile(ExerciseProfile):
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"knee": angles.knee_asymmetry}
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "range_of_motion": "Step deeper — front knee to 90°",
-            "knee_valgus": "Push front knee out — don't let it cave",
-            "forward_lean": "Stay upright — chest up",
-            "bilateral_asymmetry": "Balance both legs evenly",
+            "range_of_motion": "lunge_deeper",
+            "knee_valgus": "lunge_knee_out",
+            "forward_lean": "lunge_chest_up",
+            "bilateral_asymmetry": "lunge_even",
         }

@@ -96,6 +96,8 @@ class IPCBridge:
         self._send({
             "type": "cache_cues",
             "exercise_name": exercise_name,
+            # The agent learns the active exercise profile from this message.
+            "profile": self.cue_cache.profile_name,
             "cues": cues,
         })
         return cues

@@ -259,3 +259,161 @@ class TestPipelineMessageWiring:
         }))
         assert orchestrator._pending_diagnosis_set_number == 3
         assert service.get_top_cause_id() == "narrow_stance"
+
+
+class _FakeCoachingIPC:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    def send_message(self, message: dict) -> None:
+        self.messages.append(message)
+
+
+class _FakeAudioCueService:
+    session = object()
+    rep_track_ready = False
+
+    async def cache_cues(self, cues: dict) -> None:
+        pass
+
+
+def _two_exercise_session_dict(first_sets: int = 1) -> dict:
+    """A squat then a press, as main_menu_agent stores a scheduled workout."""
+    from agent.core.workout_session import WorkoutSession
+
+    squat = WorkoutSession.create_quick_session("u1", "Barbell Back Squat", sets=first_sets, reps=5, rest_seconds=90)
+    press = WorkoutSession.create_quick_session("u1", "Barbell Overhead Press", sets=3, reps=8, weight=95.0)
+    session = squat.to_dict()
+    second = press.to_dict()["exercises"][0]
+    second["order_number"] = 2
+    session["exercises"].append(second)
+    return session
+
+
+def _service_on_last_squat_set() -> tuple[CoachingService, CoachingOrchestrator, _FakeCoachingIPC, _StubState]:
+    state = _StubState("u1")
+    state.set("workout.current_session", _two_exercise_session_dict())
+    state.set("workout.exercise_name", "Barbell Back Squat")
+    service, orchestrator, _ = _wired_service()
+    service._state = state
+    ipc = _FakeCoachingIPC()
+    service._coaching_ipc = ipc
+    return service, orchestrator, ipc, state
+
+
+class TestExerciseSwitch:
+    def test_finishing_an_exercise_closes_its_set_before_switching(self):
+        """rest_start must reach the pipeline first so the squat's last set
+        and diagnosis are finalized under the squat profile."""
+        service, orchestrator, ipc, state = _service_on_last_squat_set()
+
+        new_target = asyncio.run(service._advance_workout_set())
+
+        assert new_target == 8
+        assert [m["type"] for m in ipc.messages] == ["rest_start", "set_exercise"]
+        switch = ipc.messages[1]
+        assert switch["exercise_name"] == "Barbell Overhead Press"
+        assert switch["total_sets"] == 3
+        assert switch["target_reps"] == 8
+        assert switch["weight_lbs"] == 95.0
+        assert state.get("workout.exercise_name") == "Barbell Overhead Press"
+        assert orchestrator.next_exercise_pending
+
+    def test_next_set_of_the_same_exercise_does_not_switch(self):
+        service, orchestrator, ipc, state = _service_on_last_squat_set()
+        state.set("workout.current_session", _two_exercise_session_dict(first_sets=2))
+
+        asyncio.run(service._advance_workout_set())
+
+        assert [m["type"] for m in ipc.messages] == ["rest_start"]
+        assert not orchestrator.next_exercise_pending
+
+    def test_skipping_to_the_next_exercise_starts_it_now(self):
+        from agent.core.workout_session import WorkoutSession
+
+        service, orchestrator, ipc, state = _service_on_last_squat_set()
+        session = WorkoutSession.from_dict(state.get("workout.current_session"))
+        session.skip_current_exercise()
+        state.set("workout.current_session", session.to_dict())
+
+        service.start_current_exercise()
+
+        assert [m["type"] for m in ipc.messages] == ["set_exercise"]
+        assert not orchestrator.next_exercise_pending
+        assert orchestrator._total_sets == 3
+        assert orchestrator._set_target_reps == 8
+
+    def test_cues_for_a_new_exercise_open_a_new_db_session(self, monkeypatch):
+        service, orchestrator, _, _ = _service_on_last_squat_set()
+        service._audio_cue_service = _FakeAudioCueService()
+        service._biomech_recorder.exercise = "squat"
+        calls: list[str] = []
+
+        async def _close() -> None:
+            calls.append("close")
+
+        monkeypatch.setattr(service, "_close_biomech_recording", _close)
+        monkeypatch.setattr(service, "_start_biomech_recording", lambda: calls.append("start"))
+
+        asyncio.run(service._on_cache_cues({
+            "type": "cache_cues", "exercise_name": "Barbell Overhead Press",
+            "profile": "overhead_press", "cues": {"press_lockout": "press_lockout", "good_rep": "good_rep"},
+        }))
+
+        assert calls == ["close", "start"]
+        assert orchestrator._exercise_name == "Barbell Overhead Press"
+        assert not orchestrator._is_squat
+
+    def test_db_session_is_tagged_with_the_exercise_profile(self, monkeypatch):
+        import db.biomechanics_persistence as persistence
+
+        created: list[dict] = []
+
+        class _Recorder:
+            session_id = "s1"
+
+            def __init__(self, **kwargs) -> None:
+                created.append(kwargs)
+
+            def start(self) -> None:
+                pass
+
+        monkeypatch.setattr(persistence, "BiomechanicsRecorder", _Recorder)
+        state = _StubState("u1")
+        state.set("workout.exercise_name", "Barbell Romanian Deadlift")
+        service = CoachingService(session=None, state=state)
+
+        async def _no_baseline(user_id):
+            return None
+
+        monkeypatch.setattr(service, "_fetch_progress_baseline", _no_baseline)
+
+        async def _run() -> None:
+            service._start_biomech_recording()
+
+        asyncio.run(_run())
+        assert created[0]["exercise"] == "romanian_deadlift"
+
+
+class TestCalibrationNeedsAPattern:
+    def test_calibration_without_movement_pattern_is_not_saved(self, monkeypatch):
+        """It used to default to "squat" and overwrite the athlete's squat calibration."""
+        import types
+
+        class _Session:
+            def query(self, model):
+                raise AssertionError("nothing may be written without a movement pattern")
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(sys.modules, "db.database", types.SimpleNamespace(SessionLocal=_Session))
+        service = CoachingService(session=None, state=_StubState("u1"))
+
+        async def _no_reply(instructions):
+            return None
+
+        monkeypatch.setattr(service, "_coaching_llm_reply", _no_reply)
+        asyncio.run(service._on_calibration_complete({
+            "type": "calibration_complete", "peaks": {}, "thresholds": {},
+        }))

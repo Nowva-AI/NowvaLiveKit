@@ -116,9 +116,9 @@ async def check_calibration(user_id: str, exercise_name: str) -> Optional[dict]:
     canonical = normalize_exercise_name(exercise_name) or exercise_name
     pattern = get_movement_pattern(canonical)
     if not pattern:
-        logger.warning(
-            f"[CALIBRATION] No movement pattern for exercise_name={exercise_name!r} "
-            f"(canonical={canonical!r}) — calibration lookup skipped"
+        logger.info(
+            f"[CALIBRATION] {exercise_name!r} (canonical={canonical!r}) is not "
+            f"calibrated — calibration lookup skipped"
         )
         return None
 
@@ -130,6 +130,17 @@ async def check_calibration(user_id: str, exercise_name: str) -> Optional[dict]:
             db.close()
 
     return await asyncio.to_thread(_query)
+
+
+def calibration_exercise(exercise_names: list[str]) -> Optional[str]:
+    """The first exercise in a workout that is calibrated (a squat), or None.
+
+    Its stored calibration, body measurements included, serves the whole
+    workout. Assessment only runs when this is also the first exercise.
+    """
+    from biomechanics.calibration import get_movement_pattern
+
+    return next((name for name in exercise_names if get_movement_pattern(name)), None)
 
 
 def start_calibration_mode(state, exercise_name: str, pending_workout: dict):

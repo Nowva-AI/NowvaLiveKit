@@ -13,8 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from biomechanics.coaching.cue_cache import (
-    DEADLIFT_CUES,
-    DEFAULT_CUES,
+    GENERIC_POSITIVE_CUE_KEYS,
     POSITIVE_CUE_KEYS,
     SQUAT_CUES,
     CueCache,
@@ -119,28 +118,39 @@ class TestCueCache:
         assert cue_cache.current_exercise == "squat"
 
     def test_prepare_barbell_back_squat(self, cue_cache):
-        """'Barbell Back Squat' normalizes to 'barbell_back_squat' — not in map, gets DEFAULT_CUES.
-        But 'Back Squat' normalizes to 'back_squat' which IS in the map."""
-        cues = cue_cache.prepare_for_exercise("Back Squat")
-        assert "knees_out" in cues  # SQUAT_CUES
-        assert cue_cache.current_exercise == "back_squat"
+        """Every squat name resolves to the squat profile's cues."""
+        cues = cue_cache.prepare_for_exercise("Barbell Back Squat")
+        assert cues == SQUAT_CUES
+        assert cue_cache.profile_name == "squat"
+        assert cue_cache.current_exercise == "barbell_back_squat"
 
-    def test_prepare_deadlift(self, cue_cache):
-        """Should load DEADLIFT_CUES for deadlift variants."""
-        cues = cue_cache.prepare_for_exercise("romanian_deadlift")
-        assert "lockout" in cues
-        assert "chest_up" in cues
+    def test_prepare_romanian_deadlift_gets_its_own_cues(self, cue_cache):
+        """The program library's name resolves to the RDL profile, whose cues
+        are its own: nothing borrowed from the squat."""
+        cues = cue_cache.prepare_for_exercise("Barbell Romanian Deadlift")
+        assert cue_cache.profile_name == "romanian_deadlift"
+        assert "rdl_flat_back" in cues
         assert "knees_out" not in cues
-        # No fault produces these, so they were dropped
-        assert "hips_through" not in cues
-        assert "flat_back" not in cues
+        assert "chest_up" not in cues
+        assert "great_depth" not in cues
 
-    def test_prepare_unknown_exercise_gets_defaults(self, cue_cache):
-        """Unknown exercise should fall back to DEFAULT_CUES."""
-        cues = cue_cache.prepare_for_exercise("overhead_press")
-        assert "good_rep" in cues
+    def test_prepare_overhead_press_gets_press_cues(self, cue_cache):
+        cues = cue_cache.prepare_for_exercise("Barbell Overhead Press")
+        assert {"press_lockout", "press_elbows", "press_bar_path", "press_even"} <= set(cues)
         assert "knees_out" not in cues
         assert "rep_1" in cues
+
+    def test_overhead_press_lockout_fault_gets_the_press_cue(self, cue_cache):
+        """The squat also has a lockout fault; the press must not say "stand tall"."""
+        cue_cache.prepare_for_exercise("Barbell Overhead Press")
+        assert cue_cache.get_cue_for_fault("lockout", 10.0) == "press_lockout"
+
+    def test_prepare_untracked_exercise_gets_only_praise_and_counts(self, cue_cache):
+        cues = cue_cache.prepare_for_exercise("Barbell Bench Press")
+        assert cue_cache.profile_name == "untracked"
+        corrections = {key for key in cues if not key.startswith("rep_")}
+        assert corrections == set(GENERIC_POSITIVE_CUE_KEYS)
+        assert cue_cache.get_cue_for_fault("knee_valgus", 10.0) is None
 
     def test_get_cue_for_fault_mapping(self, cue_cache):
         """Should map fault types to correct cue keys."""
@@ -199,10 +209,10 @@ class TestCueCache:
         assert positive in POSITIVE_CUE_KEYS
 
     def test_get_positive_cue_deadlift(self, cue_cache):
-        """Deadlift has fewer positive cues — should still work."""
+        """Deadlift praise never includes the squat-only great_depth."""
         cue_cache.prepare_for_exercise("deadlift")
         positive = cue_cache.get_positive_cue()
-        assert positive in {"good_rep", "strong"}
+        assert positive in GENERIC_POSITIVE_CUE_KEYS
 
     def test_returned_dict_is_copy(self, cue_cache):
         """Returned dict should not mutate internal state."""
@@ -734,6 +744,47 @@ class TestDiagnosisIntegration:
         types = [m["type"] for m in mock_ipc_client.messages]
         assert "set_complete" in types
         assert "diagnosis_complete" not in types
+
+
+class TestExerciseChange:
+    def _squat_rep(self, session_tracker, rep_number: int, start_time: float) -> None:
+        session_tracker.on_rep_complete(
+            make_rep(rep_number, start_time=start_time),
+            bottom_kpts=_squat_bottom_kpts_mediapipe(),
+            bottom_angles=_squat_bottom_angles(),
+        )
+
+    def test_exercise_without_diagnosis_sends_no_diagnosis(self, session_tracker, mock_ipc_client):
+        """The squat diagnosis engine must not judge an overhead press."""
+        session_tracker.set_athlete_params(_default_athlete_params(), {})
+        session_tracker.on_exercise_changed(diagnosis_enabled=False)
+
+        self._squat_rep(session_tracker, 1, start_time=0.0)
+        session_tracker.force_end_set()
+
+        types = [m["type"] for m in mock_ipc_client.messages]
+        assert "set_complete" in types
+        assert "diagnosis_complete" not in types
+        assert session_tracker.build_on_demand_demo() is None
+
+    def test_switch_mid_set_closes_the_old_exercise_set(self, session_tracker, mock_ipc_client):
+        self._squat_rep(session_tracker, 1, start_time=0.0)
+        session_tracker.on_exercise_changed(diagnosis_enabled=False)
+
+        set_msgs = [m for m in mock_ipc_client.messages if m["type"] == "set_complete"]
+        assert len(set_msgs) == 1
+        assert not session_tracker.set_active
+        assert session_tracker.get_last_rep_snapshot() is None
+
+    def test_set_numbers_restart_for_the_new_exercise(self, session_tracker, mock_ipc_client):
+        self._squat_rep(session_tracker, 1, start_time=0.0)
+        session_tracker.force_end_set()
+        session_tracker.on_exercise_changed(diagnosis_enabled=True)
+
+        self._squat_rep(session_tracker, 1, start_time=60.0)
+
+        rep_msgs = [m for m in mock_ipc_client.messages if m["type"] == "rep_complete"]
+        assert rep_msgs[-1]["set_number"] == 1
 
 
 class TestBottomFrameTracking:

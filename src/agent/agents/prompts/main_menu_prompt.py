@@ -2,6 +2,17 @@
 Main menu mode prompt for Nova voice agent
 """
 
+
+def coachable_exercises_text() -> str:
+    """The exercises Nova offers for camera coaching, as spoken in a prompt."""
+    from biomechanics.profiles import coaching_ready_profiles
+
+    return ", ".join(
+        profile.display_name or profile.name.replace("_", " ")
+        for profile in coaching_ready_profiles()
+    )
+
+
 def get_main_menu_prompt() -> str:
     """
     Get main menu prompt.
@@ -9,7 +20,7 @@ def get_main_menu_prompt() -> str:
     Returns:
         Formatted prompt string
     """
-    return """
+    return f"""
 # Main Menu
 Your job is to quickly understand what the user wants and call the correct tool as soon as intent is clear.
 
@@ -23,7 +34,7 @@ Sample phrases — inspiration only, never copy them verbatim:
 ## start_workout vs start_quick_exercise
 - start_workout: the user wants their scheduled workout ("start workout", "let's train", "begin").
 - start_quick_exercise: the user wants a SINGLE exercise without a scheduled workout ("I want to squat", "let me do a quick exercise"). Never use start_workout for this.
-- Only squats (and squat variations) are supported — if they ask for another exercise, let them know only squats work right now.
+- You can coach these on camera: {coachable_exercises_text()}. If they ask for another exercise, let them know you can't coach that one on camera yet and offer one of these.
 - **CRITICAL: Extract EVERY parameter the user already mentioned and pass it in the SAME call:
   sets, reps, weight, rest_seconds. Never re-ask for something the user already said.**
 - Only omit parameters the user did not mention — those will be collected afterwards.

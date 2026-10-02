@@ -29,10 +29,12 @@ class _StubTeachingAgent(_StubAgent):
     pass
 
 
-def _run_start_workout(state: AgentState, calibration_profile: dict | None):
+def _run_start_workout(
+    state: AgentState, calibration_profile: dict | None, exercise_name: str = "squat",
+):
     async def _run():
         task = CollectExerciseInfoTask(
-            exercise_name="squat",
+            exercise_name=exercise_name,
             user_id="test-user",
             state=state,
             userdata=object(),
@@ -90,6 +92,24 @@ class TestStartWorkoutCalibrationFlag:
         assert isinstance(result, _StubTeachingAgent)
         assert state.get("calibration.active") is True
         assert state.get_mode() == "workout"
+
+    def test_uncalibrated_exercise_skips_squat_teaching_and_calibration(
+        self, state: AgentState, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Calibrating an overhead press would store its reps as the squat calibration."""
+        state.set("calibration.active", True)
+        monkeypatch.setattr(quick_exercise_module, "WorkoutAgent", _StubWorkoutAgent)
+        monkeypatch.setattr(quick_exercise_module, "TeachingAgent", _StubTeachingAgent)
+        fake_check, run = _run_start_workout(
+            state, calibration_profile=None, exercise_name="Barbell Overhead Press",
+        )
+        monkeypatch.setattr(quick_exercise_module, "check_calibration", fake_check)
+
+        result = asyncio.run(run())
+
+        assert isinstance(result, _StubWorkoutAgent)
+        assert not state.get("calibration.active")
+        assert state.get("workout.exercise_name") == "Barbell Overhead Press"
 
 
 class TestBuildTaskInstructions:

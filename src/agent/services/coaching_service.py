@@ -36,6 +36,16 @@ POSITIVE_CUE_KEYS = frozenset(
     {"good_rep", "great_depth", "strong", "clean", "perfect", "adjust_good"}
 )
 
+# What main.py launches the pipeline with when no exercise is set
+DEFAULT_EXERCISE_NAME = "Barbell Back Squat"
+
+
+def _profile_name(exercise_name: str) -> str:
+    """The biomechanics profile coaching an exercise ("squat", "overhead_press", "untracked")."""
+    from biomechanics.profiles import UntrackedProfile, find_profile_class
+
+    return (find_profile_class(exercise_name) or UntrackedProfile).name
+
 
 class CoachingService:
     """
@@ -129,6 +139,7 @@ class CoachingService:
             self._biomech_recorder = BiomechanicsRecorder(
                 user_id=user_id,
                 calibration_snapshot=self._state.get("workout.calibration_profile"),
+                exercise=_profile_name(self._current_exercise_name()),
             )
             self._biomech_recorder.start()
             if self._coaching_orchestrator:
@@ -214,6 +225,9 @@ class CoachingService:
         except asyncio.TimeoutError:
             pass
         return self._progress_baseline, self._fault_trends
+
+    def _current_exercise_name(self) -> str:
+        return self._state.get("workout.exercise_name") or DEFAULT_EXERCISE_NAME
 
     async def _close_biomech_recording(self) -> None:
         if self._biomech_recorder is None:
@@ -699,7 +713,17 @@ class CoachingService:
 
         cues = message.get("cues", {})
         exercise = message.get("exercise_name", "unknown")
-        logger.info(f"[COACHING SERVICE] Pre-caching {len(cues)} cues for {exercise}")
+        profile = message.get("profile") or _profile_name(exercise)
+        logger.info(f"[COACHING SERVICE] Pre-caching {len(cues)} cues for {exercise} ({profile})")
+
+        if self._coaching_orchestrator:
+            self._coaching_orchestrator.set_exercise(exercise, is_squat=profile == "squat")
+        # One DB session per exercise. The pipeline sends this after the
+        # previous exercise's last set and diagnosis, so those stay with it.
+        recorder = self._biomech_recorder
+        if recorder is not None and recorder.exercise != profile:
+            await self._close_biomech_recording()
+            self._start_biomech_recording()
 
         try:
             await self._audio_cue_service.cache_cues(cues)
@@ -920,7 +944,7 @@ class CoachingService:
         from db.database import SessionLocal
         from db.calibration_utils import save_user_calibration
 
-        movement_pattern = message.get("movement_pattern", "squat")
+        movement_pattern = message.get("movement_pattern")
         peaks = message.get("peaks", {})
         thresholds = message.get("thresholds", {})
         athlete_params = message.get("athlete_params")
@@ -934,7 +958,10 @@ class CoachingService:
 
         # Save calibration to database
         user_id = self._state.get("user.id")
-        if user_id:
+        if not movement_pattern:
+            # Saving without a pattern would overwrite the athlete's squat calibration
+            logger.error("[CALIBRATION] calibration_complete has no movement_pattern — not saved")
+        elif user_id:
             db = SessionLocal()
             try:
                 save_user_calibration(
@@ -1007,6 +1034,10 @@ class CoachingService:
         self._coaching_orchestrator._play_raw_frames_fn = self._play_raw_audio
         self._coaching_orchestrator._speak_adjustment_fn = self._speak_adjustment_feedback
 
+        exercise_name = self._current_exercise_name()
+        self._coaching_orchestrator.set_exercise(
+            exercise_name, is_squat=_profile_name(exercise_name) == "squat",
+        )
         target_reps = self._get_current_target_reps()
         total_sets = self._get_total_sets()
         self._coaching_orchestrator.reset_set(target_reps=target_reps, total_sets=total_sets)
@@ -1078,6 +1109,7 @@ class CoachingService:
             )
             session.mark_set_complete(performed_reps=rep_count)
 
+            previous_exercise_index = session.current_exercise_index
             has_next = session.advance_to_next_set()
 
             self._state.set("workout.current_session", session.to_dict())
@@ -1098,6 +1130,10 @@ class CoachingService:
                     except Exception as e:
                         logger.error(f"[COACHING SERVICE] Failed to send rest_start: {e}")
 
+                if session.current_exercise_index != previous_exercise_index:
+                    # After rest_start, so the pipeline closes the old exercise's last set first
+                    self._switch_exercise(session)
+
                 return new_target
             else:
                 logger.info("[COACHING SERVICE] Workout complete — no more sets")
@@ -1115,6 +1151,43 @@ class CoachingService:
         except Exception:
             logger.exception("[COACHING SERVICE] Failed to advance workout set")
             return None
+
+    def _switch_exercise(self, session) -> None:
+        """Point the state, the orchestrator and the pipeline at the session's
+        current exercise. The orchestrator starts it once the current set is
+        wrapped up (begin_next_exercise)."""
+        exercise = session.get_current_exercise()
+        if exercise is None:
+            return
+        first_set = session.get_current_set()
+        self._state.set("workout.exercise_name", exercise.exercise_name)
+        self._state.save_state()
+        if self._coaching_orchestrator:
+            self._coaching_orchestrator.set_next_exercise(exercise.exercise_name, len(exercise.sets))
+        if self._coaching_ipc:
+            try:
+                self._coaching_ipc.send_message({
+                    "type": "set_exercise",
+                    "exercise_name": exercise.exercise_name,
+                    "total_sets": len(exercise.sets),
+                    "target_reps": first_set.target_reps if first_set else 0,
+                    "weight_lbs": first_set.target_weight if first_set else 0.0,
+                })
+                logger.info(f"[COACHING SERVICE] Sent set_exercise ({exercise.exercise_name})")
+            except Exception as e:
+                logger.error(f"[COACHING SERVICE] Failed to send set_exercise: {e}")
+
+    def start_current_exercise(self) -> None:
+        """Start the session's current exercise right away (the lifter skipped to it)."""
+        session = self._get_workout_session()
+        if session is None or session.get_current_exercise() is None:
+            return
+        self._switch_exercise(session)
+        if self._coaching_orchestrator:
+            current_set = session.get_current_set()
+            self._coaching_orchestrator.begin_next_exercise(
+                current_set.target_reps if current_set else None
+            )
 
     async def force_end_current_set(self, reps: int) -> dict:
         """Force-end the current set early (called by workout agent when user verbally stops).
@@ -1142,7 +1215,10 @@ class CoachingService:
         if new_target is not None:
             # There is a next set — reset orchestrator
             if self._coaching_orchestrator:
-                self._coaching_orchestrator.reset_set(target_reps=new_target)
+                if self._coaching_orchestrator.next_exercise_pending:
+                    self._coaching_orchestrator.begin_next_exercise(new_target)
+                else:
+                    self._coaching_orchestrator.reset_set(target_reps=new_target)
 
             session_data = self._state.get("workout.current_session")
             next_desc = ""

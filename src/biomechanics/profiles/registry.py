@@ -1,16 +1,17 @@
 """
 Exercise Profile Registry
 
-Maps exercise names and movement patterns to ExerciseProfile subclasses.
+Maps exercise names to ExerciseProfile subclasses.
 Use @register_profile("name") to register a profile, and get_profile()
 to look one up by exercise name.
 """
 
 import logging
-from typing import Dict, Type
+import re
+from typing import Dict, List, Optional, Type
 
 from biomechanics.profiles.base import ExerciseProfile
-from biomechanics.calibration import EXERCISE_TO_MOVEMENT_PATTERN
+from biomechanics.profiles.untracked import UntrackedProfile
 
 logger = logging.getLogger(__name__)
 
@@ -32,56 +33,50 @@ def register_profile(*names: str):
     return decorator
 
 
-def get_profile(exercise_name: str) -> ExerciseProfile:
-    """Look up and instantiate a profile for the given exercise.
+def _normalize(exercise_name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", exercise_name.lower()).strip("_")
 
-    Resolution order:
-    1. Normalized exact match (e.g. "barbell_back_squat")
-    2. Movement pattern fallback (e.g. "squat" for any squat variant)
-    3. Substring match (e.g. exercise contains "squat")
-    4. Default: "squat" profile
 
-    Args:
-        exercise_name: Exercise name (e.g. "Barbell Back Squat").
+def find_profile_class(exercise_name: str) -> Optional[Type[ExerciseProfile]]:
+    """The profile class for an exercise name, or None when no profile models it.
 
-    Returns:
-        An instantiated ExerciseProfile.
+    An exact registered name wins. Otherwise the longest registered name
+    that appears in the exercise name as whole words, so
+    "Barbell Romanian Deadlift" is a Romanian deadlift rather than a deadlift
+    and "Barbell Bench Press" matches nothing.
     """
-    normalized = exercise_name.lower().replace(" ", "_")
-
-    # 1. Direct match
+    normalized = _normalize(exercise_name)
     if normalized in PROFILE_REGISTRY:
-        logger.info("[PROFILES] Matched '%s' directly", normalized)
-        return PROFILE_REGISTRY[normalized]()
+        return PROFILE_REGISTRY[normalized]
+    padded = f"_{normalized}_"
+    matches = [key for key in PROFILE_REGISTRY if f"_{key}_" in padded]
+    if not matches:
+        return None
+    return PROFILE_REGISTRY[max(matches, key=len)]
 
-    # 2. Movement pattern fallback
-    pattern = EXERCISE_TO_MOVEMENT_PATTERN.get(exercise_name)
-    if pattern and pattern in PROFILE_REGISTRY:
-        logger.info(
-            "[PROFILES] Matched '%s' via movement pattern '%s'",
-            exercise_name, pattern,
-        )
-        return PROFILE_REGISTRY[pattern]()
 
-    # 3. Substring match
-    for key, cls in PROFILE_REGISTRY.items():
-        if key in normalized:
-            logger.info(
-                "[PROFILES] Matched '%s' via substring '%s'",
-                exercise_name, key,
-            )
-            return cls()
+def get_profile(exercise_name: str) -> ExerciseProfile:
+    """Instantiate the profile for an exercise.
 
-    # 4. Default fallback
-    if "squat" in PROFILE_REGISTRY:
+    An exercise no profile models gets UntrackedProfile: the camera still
+    runs, but no reps are counted and no faults fire. It never borrows the
+    squat's rules.
+    """
+    profile_class = find_profile_class(exercise_name)
+    if profile_class is None:
         logger.warning(
-            "[PROFILES] No profile for '%s' — falling back to squat",
+            "[PROFILES] No profile for '%s' — untracked: no rep counting or faults",
             exercise_name,
         )
-        return PROFILE_REGISTRY["squat"]()
+        return UntrackedProfile()
+    logger.info("[PROFILES] '%s' -> %s", exercise_name, profile_class.__name__)
+    return profile_class()
 
-    logger.warning(
-        "[PROFILES] No profile for '%s' and no squat fallback — using base",
-        exercise_name,
-    )
-    return ExerciseProfile()
+
+def coaching_ready_profiles() -> List[Type[ExerciseProfile]]:
+    """Profiles Nova offers for camera coaching, in registration order."""
+    ready: List[Type[ExerciseProfile]] = []
+    for profile_class in PROFILE_REGISTRY.values():
+        if profile_class.coaching_ready and profile_class not in ready:
+            ready.append(profile_class)
+    return ready
