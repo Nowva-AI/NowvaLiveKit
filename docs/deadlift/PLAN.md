@@ -1,6 +1,6 @@
 # Plan — Soulevé de terre conventionnel (deadlift) — v1
 
-Statut : proposition, à valider par Ambaka. Version 6 du document.
+Statut : proposition, à valider par Ambaka. Version 7 du document.
 
 ## 0. Décisions déjà prises (ne pas rediscuter)
 
@@ -30,7 +30,7 @@ Fautes « héros » (démo) : F1, F2, F3, F8. Les autres fautes v1 sont « provi
 | Rappel par faute héros | ≥ 0,70 ; borne basse ≥ 0,55 | borne basse ≥ 0,60 |
 | Fausses corrections sur reps propres | ≤ 1 pour 10 reps | idem |
 | Erreur de mesure | ≤ 1/3 du seuil du niveau cué (§5.6) | idem |
-| Latence d'un cue | audio pré-enregistré, local, aucun appel TTS dans le cloud | idem |
+| Latence d'un cue | clips pré-générés, joués en local ; aucune synthèse de clip pendant la séance (`generate_tts` / `_generate_single_cue`) | idem |
 | Squat | golden masters pipeline **et** voix identiques ; aucun fichier d'état squat écrit | idem |
 | Edge | ≤ 33 ms/frame sur Jetson Orin Nano Super, ou mode dégradé défini (§10) | idem |
 
@@ -44,7 +44,7 @@ Fautes « héros » (démo) : F1, F2, F3, F8. Les autres fautes v1 sont « provi
   - `README.md:325` écrit « Z-forward ».
 - **L'axe Y du monde n'est pas la gravité.** `world_frame_from_standing` (`person_calibration.py:734-752`) prend pour Y la direction médiane hanche → cheville en position debout, ce qui peut s'écarter de 2–4° de la verticale. Sur 55 cm de course de barre, 3° d'écart créent ≈ 2,9 cm de fausse dérive avant/arrière, soit le seuil de F3.
 
-**Livrable J0** : une règle `.claude/rules/deadlift.md`, limitée à `src/biomechanics/deadlift/**` et `tests/test_deadlift/**`. Elle rétablit les bons axes et fixe les conventions du package : les règles de fautes vont dans `deadlift/rules/` et non dans `faults/rules/`, et le repère passe par `frame.py`. En parallèle, on propose à Ambaka de corriger la ligne fausse de `biomechanics.md` (documentation seulement, sans effet sur le code squat).
+**Livrable J0** : une règle `.claude/rules/deadlift.md`, limitée à `src/biomechanics/deadlift/**` et `tests/test_deadlift/**`. `biomechanics.md` (glob `src/biomechanics/**`) s'applique aussi au package : `deadlift.md` dit donc explicitement qu'elle **remplace** sa ligne sur l'axe Y et ses conventions `faults/rules/`. Elle rétablit les bons axes et fixe les conventions du package : les règles de fautes vont dans `deadlift/rules/` et non dans `faults/rules/`, et le repère passe par `frame.py`. En parallèle, on propose à Ambaka de corriger la ligne fausse de `biomechanics.md` (documentation seulement, sans effet sur le code squat).
 
 ### 2.2 Repère du lifter
 
@@ -72,7 +72,7 @@ Option matérielle à discuter : un accéléromètre (~1 $) dans le boîtier.
 - inclinaison : un monde synthétique incliné de 3° et 5° avec la gravité fournie reste exact à ±2 mm et ±0,5° ;
 - repli : l'erreur est rapportée et les seuils sont élargis ;
 - cohérence : une caméra « déplacée » de 2° est exclue ;
-- **test statique** (sur l'arbre syntaxique) : aucune indexation `[..., 1]`/`[..., 2]` ni soustraction de `.y`/`.z` dans `src/biomechanics/deadlift/`, sauf dans `frame.py`.
+- **test statique** (sur l'arbre syntaxique) : aucune soustraction de `.y`/`.z` ni indexation `[..., 1]`/`[..., 2]` sur les **tableaux 3D du monde** dans `src/biomechanics/deadlift/`, sauf dans `frame.py`. Les tableaux 3D du monde portent un suffixe de nom imposé (`*_world`) : c'est ce qui rend le test précis. Les fichiers qui manipulent des pixels ou des confiances (`bar_detector.py`, DLT) sont sur une liste d'exceptions explicite.
 
 ## 3. Isolation du squat (contrainte dure)
 
@@ -110,7 +110,8 @@ Le package est construit **par composition**. Il n'hérite pas de `BiomechanicsP
 
 Un affinage pendant une séance deadlift (positions penchées, pieds masqués par les disques) produirait un `_refined` que `select_calibration_file` chargerait ensuite **pour le squat**. Comme le constructeur reçoit `factory_path` en paramètre (`pipeline_process.py:495-505`), le deadlift lui passe ses propres chemins :
 - `factory_path = ~/.nowva/deadlift/rig_calibration_cams_<ids>.json`, avec son `_refined` à côté ;
-- **amorçage** : si ce fichier n'existe pas, on **copie** en lecture seule le fichier que le squat chargerait (`select_calibration_file(<chemin squat>)`) vers le dossier deadlift. S'il n'y a aucun fichier, la calibration à partir du lifter écrit dans le dossier deadlift ;
+- **amorçage par paire** : si le fichier deadlift n'existe pas, on **copie** en lecture seule le fichier d'usine du squat **et** son `_refined`, en conservant leurs champs `timestamp` / `source_timestamp`. `select_calibration_file` (`pipeline_process.py:367-381`) choisit le `_refined` seulement si son `source_timestamp` égale le `timestamp` du fichier d'usine. Copier un `_refined` seul comme fichier d'usine casserait ce lien : les affinages deadlift, sauvés avec `source_timestamp` = l'horodatage d'usine (`:549`, `:733-734`), seraient ignorés à chaque séance. En copiant la paire, `establish()` reprend la même chaîne et les affinages deadlift suivants sont bien rechargés. Un test vérifie que l'affinage deadlift d'une séance est celui chargé à la séance suivante ;
+- **ré-amorçage** : `~/.nowva/deadlift/seed.json` mémorise l'horodatage du fichier d'usine squat copié. Si cet horodatage change (caméras recalibrées côté squat) ou si le contrôle de cohérence de la gravité échoue, la copie deadlift est jetée et refaite. S'il n'y a aucun fichier squat, la calibration à partir du lifter écrit dans le dossier deadlift, et le ré-amorçage ne s'applique pas ;
 - affinages, ré-ancrages et sauvegardes se font uniquement dans `~/.nowva/deadlift/`.
 
 Conséquence acceptée : les calibrations squat et deadlift peuvent diverger avec le temps, chacune avec son propre contrôle de dérive. Partager un jour la calibration du rig sera une décision d'Ambaka.
@@ -128,10 +129,12 @@ Autres points :
 
 `NOWVA_ENABLE_DEADLIFT` (défaut `false`). Drapeau éteint, les fichiers partagés se comportent exactement comme aujourd'hui, prompts et cas d'erreur compris. Par exemple, « deadlift » lance aujourd'hui le pipeline squat avec le profil placeholder : c'est conservé.
 
-**Retour arrière** (drapeau éteint après usage du deadlift) : une ligne `hip_hinge` marquée `dl_v1` ne doit rien casser dans le chemin placeholder.
-- Les seuils deadlift sont rangés sous des clés `dl_*`, que `apply_calibration_to_rule_engine` ignore.
-- `athlete_params` côté deadlift contient au moins toutes les clés du squat.
-- Un test le vérifie.
+**Retour arrière** (drapeau éteint après usage du deadlift) : avec une ligne `hip_hinge` marquée `dl_v1`, le chemin placeholder ne doit pas se dégrader.
+- `apply_calibration_to_rule_engine` exige les clés des règles du placeholder (ex. `profile["bilateral_asymmetry"]` pour sa `SymmetryRule`, `calibration.py:124-128`).
+- Une erreur `KeyError` serait attrapée à `pipeline_process.py:1066`, mais elle sauterait aussi le chargement des mesures corporelles du même bloc (`:1050-1056`).
+- Les lignes `dl_v1` contiennent donc, en plus des clés `dl_*`, les clés attendues par le placeholder, **avec les valeurs par défaut qu'il utiliserait** (`bilateral_asymmetry` etc.).
+- `athlete_params` deadlift contient au moins toutes les clés du squat.
+- Test : drapeau éteint + ligne `dl_v1` ⇒ pas d'exception, seuils et mesures corporelles chargés.
 
 ### 3.3 Fichiers partagés modifiés : liste complète
 
@@ -140,14 +143,14 @@ Pour établir cette liste, on a suivi chaque message (dans les deux sens), chaqu
 | Fichier | Changement |
 |---|---|
 | `src/main.py` ~452 | Choix du script de sous-processus. Le nom, parfois brut (« Barbell Conventional Deadlift » en séance programmée, `main_menu_agent.py:85`), est reconnu par `names.py` |
-| `src/main.py` ~1060-1125 | Branche deadlift du lancement : charge les mesures corporelles **dans tous les cas**, première fois comprise. Aujourd'hui `_load_athlete_calibration` n'est appelée que pour un utilisateur connu (`:1074-1081`). Source : ligne `hip_hinge` `dl_v1`, sinon `athlete_params` de la ligne `squat` en lecture seule. Ajoute aussi les métadonnées de séance (§9.3) au fichier de lancement |
+| `src/main.py` ~1060-1125 | Branche deadlift du lancement : charge les mesures corporelles **dans tous les cas**, première fois comprise. Aujourd'hui `_load_athlete_calibration` n'est appelée que pour un utilisateur connu (`:1074-1081`). Source : ligne `hip_hinge` `dl_v1`, sinon `athlete_params` de la ligne `squat` en lecture seule. Joint les métadonnées de séance (§9.3) au message `start_capture` (`:1104-1118`), envoyé après `workout.greeting_done` |
 | `src/main.py` ~989-1035 | Branche d'affichage pour les messages qui portent `exercise`. Transfert vers la voix de `dl_cue`, `dl_diagnosis_update`, et de `assessment_ready` **seulement s'il porte `exercise`** |
 | `src/visual/display.html` ~963, 1223, 1317, 1422 | Tuiles et libellés deadlift si `exercise` est présent |
 | `src/agent/agents/prompts/main_menu_prompt.py:26` | Texte « squats et deadlift conventionnel » si drapeau |
 | `src/agent/agents/main_menu_agent.py` | Si drapeau : `start_quick_exercise` refuse les variantes non prises en charge ; branche deadlift (`names.py`) qui passe le nom canonique `"Barbell Deadlift"` à `check_calibration` / `start_calibration_mode` et vérifie la provenance ; `start_workout` (~84-119) passe d'abord par l'apprentissage deadlift si c'est la première fois ; texte de progression (~640) adapté à l'exercice |
-| `src/agent/agents/quickExerciseAgent.py` | `:211` passe `exercise=` ; branche deadlift à la décision de calibration (`:177-190`, provenance) |
+| `src/agent/agents/quickExerciseAgent.py` | `:211` passe `exercise=` ; branche deadlift à la décision de calibration (`:177-190`, provenance) ; branche deadlift de `CollectExerciseInfoTask` (`:76`) qui demande aussi le type de prise et de disques (§9.3) |
 | `src/agent/agents/teaching_agent.py`, `calibration_agent.py`, `workout_agent.py` | Retour anticipé vers `deadlift/voice/` si l'exercice est le deadlift ; code squat ni modifié ni réindenté |
-| `src/agent/services/coaching_service.py` | **Enregistrement** : dans `_start_biomech_recording` (~113-147), si drapeau et `workout.exercise_name` reconnu comme deadlift, `BiomechanicsRecorder(exercise="conventional_deadlift")`. Le squat ne passe rien (défaut `"squat"`), donc rien ne change ; le paramètre existe déjà (`biomechanics_persistence.py:290`). **Messages** : branches `rep_complete` / `diagnosis_complete` / `calibration_complete` / `assessment_ready` quand `exercise` est présent ; nouveaux gestionnaires `dl_cue` (plafond compté sur les cues réellement joués, §9.1) et `dl_diagnosis_update`. **Progression** : requêtes avec `exercise="conventional_deadlift"` (~159-160). **Prompts** deadlift |
+| `src/agent/services/coaching_service.py` | **Enregistrement** : dans `_start_biomech_recording` (~113-147), si drapeau et `workout.exercise_name` reconnu comme deadlift, `BiomechanicsRecorder(exercise="conventional_deadlift")`. Le squat ne passe rien (défaut `"squat"`), donc rien ne change ; le paramètre existe déjà (`biomechanics_persistence.py:290`). **Messages** : branches `rep_complete` / `diagnosis_complete` / `calibration_complete` / `assessment_ready` quand `exercise` est présent. Nouveaux gestionnaires `dl_cue` (plafond compté sur les cues réellement joués, §9.1 ; publie lui-même le bandeau d'écran avec le texte deadlift, car `_publish_cue_banner` lit `CUE_TEXT_MAP`, `:1178`) et `dl_diagnosis_update` (appelle `set_diagnosis_data` **avant tout `await`**, chaque message IPC tournant dans sa propre tâche). **Progression** : requêtes avec `exercise="conventional_deadlift"` (~159-160). **Prompts** deadlift |
 | `src/agent/services/coaching_orchestrator.py` | Nouvelle méthode publique `play_cached_cue(cue_key, priority, data)`, qui place un événement `cached_cue` dans la file existante ; jamais appelée par le squat. `_dispatch_cached_cue` **n'est pas modifié**, y compris l'abandon des cues de plus d'1 s (`:966`). Branches de récap deadlift (~1227-1251, 1388-1390, 1407, ligne d'ajustement ~1424-1428, 1510). Le chiffre de la correction est formaté par `deadlift/diagnosis/parameter_deltas.py`, car `summarize_cue_magnitude` renvoie un texte générique pour les causes `dl_*` (`demo_builder.py:77-79`) |
 | `src/agent/services/audio_cue_service.py` | Nouvelle méthode `load_extra_cues(directory, texts)`, appelée **seulement en séance deadlift**. Elle charge les clips de `src/assets/cues/wav_deadlift/` et leurs textes. Les clips deadlift ne sont donc pas préchargés pendant les séances squat (`_load_from_disk`), et `CUE_TEXT_MAP` / `_validate_expected_cues` ne changent pas |
 | `src/agent/services/progress_context.py` | Libellés et filtre par exercice |
@@ -190,7 +193,7 @@ Pour établir cette liste, on a suivi chaque message (dans les deux sens), chaqu
 4. **Alias** : alias squat → `SquatProfile` et motif `squat` ; avec le drapeau, sumo refusé.
 5. **Manifeste de gel** (`tests/test_squat_freeze.py`) : SHA-256 de la liste « Jamais modifiés ».
 6. **Aucune écriture d'état squat** :
-   - une séance deadlift complète est rejouée dans un `HOME` temporaire, **avec un affinage de dérive et un ré-ancrage forcés** ; l'empreinte et la date de modification de tous les fichiers de `~/.nowva/` hors `deadlift/` doivent rester identiques ;
+   - une séance deadlift complète est rejouée dans un `HOME` temporaire, **avec un affinage de dérive et un ré-ancrage forcés**. L'empreinte et la date de modification de tous les fichiers de `~/.nowva/` hors `deadlift/` doivent rester identiques, ainsi que celles de `config.triangulation.calibration_file` quand il est défini ;
    - variante base de données : avec des séances squat et deadlift en base, le contexte squat (accueil, progression, récap) est identique à celui d'une base squat seule ;
    - variante drapeau éteint avec une ligne `dl_v1` : pas de plantage, chemin placeholder inchangé.
 7. **Rejeu de vraies séances squat** : dès que l'enregistreur existe (J1), 3–5 séances squat brutes sont rejouées dans le pipeline squat inchangé, via un fournisseur de rejeu injecté dans le test. Aujourd'hui, `user_test_runs/` ne contient que des sorties.
@@ -250,6 +253,7 @@ Précisions :
 - La marge de 8 cm sert à compter les lockouts mous ou en hyperextension, que F4/F5 signalent ensuite. Une rep bloquée aux genoux n'est pas comptée. La marge est validée sur données réelles (§8).
 - Comptage au sol, avec un seul message `rep_complete` (§9.2). En touch-and-go, la rep est comptée au contact du sol.
 - Barre lâchée depuis le haut : rep comptée, pas de faute. Ajustements de la barre au sol de moins de 3 cm : ignorés.
+- **Hystérésis au sol** : le retour au sol se valide à repos + 2 cm avec une vitesse ≈ 0 pendant ≥ 3 frames, le décollage à + 3 cm. Un rebond de bumper (1–3 cm, sans mains qui tirent) n'est pas un décollage : il faut une vitesse montante soutenue ≥ 100 ms, mains sur la barre. Une « rep ratée » n'est enregistrée que si la barre est montée d'au moins 10 cm.
 - Fin de série : `set_timeout_seconds` (30 s) en `AU SOL` ou `APPROCHE`, « j'ai fini », ou décision de la voix (§9.3).
 - La hauteur de repos est la médiane pendant `POSITION`/`PLACEMENT`, recalculée à chaque série.
 - En touch-and-go, aucune correction entre deux reps.
@@ -530,8 +534,8 @@ Ces données ne servent **jamais** à fixer les seuils finaux.
 ### 9.1 Parcours utilisateur
 
 **Entrées possibles**
-- Exercice rapide (« on fait du deadlift »), ou séance programmée dont le **premier** exercice est un deadlift.
-- Le sous-processus est lancé une fois par séance, avec le premier exercice (`main.py:1065-1099`). Dans une séance mixte qui commence par un deadlift, seul le deadlift est analysé en v1, et l'agent le dit. Une séance qui commence par un squat est inchangée.
+- Exercice rapide (« on fait du deadlift »), ou séance programmée composée **uniquement** de deadlifts.
+- Le sous-processus est lancé une fois par séance, avec le premier exercice (`main.py:1065-1099`). **En v1, une séance programmée n'est prise en charge pour le deadlift que si tous ses exercices sont des deadlifts.** Si une séance mélange les exercices et commence par un deadlift, Nova propose de faire le deadlift en séance rapide, et le programme reste inchangé. Une séance qui commence par un squat est inchangée.
 - Changer d'exercice en cours de séance (redémarrage du sous-processus) : v1.1, avec l'accord d'Ambaka.
 - Sumo, RDL et autres variantes sont refusés par le code.
 
@@ -543,7 +547,7 @@ Ces données ne servent **jamais** à fixer les seuils finaux.
   3. tibias contre la barre ;
   4. épaules au-dessus de la barre, dos plat ;
   5. mise en tension, puis pousser le sol.
-- L'agent demande aussi le **type de prise** et les **disques** utilisés (§9.3).
+- Le **type de prise** et les **disques** sont demandés **avant** l'ouverture des caméras (§9.3).
 - Quand le pipeline suit le lifter et la barre, il envoie `assessment_ready` avec `exercise`. Le callback existant (`coaching_service.py:609-620`) lance alors « vas-y, première rep ».
 - Suivent 2–3 reps à la barre vide, avec un guidage en boucle fermée de F1, F8 et F9 (sans danger à vide), puis la mesure du bruit.
 - La phase se termine par `calibration_complete` (`dl_v1`), qui active la séance (`coaching_service.py:963-968`).
@@ -569,8 +573,9 @@ Ces données ne servent **jamais** à fixer les seuils finaux.
 
 **Audio**
 - Cues directionnels à deux intensités. Les clips sont pré-générés dans `wav_deadlift/` et chargés seulement en séance deadlift.
-- **Aucun repli TTS dans le cloud** : à J5, on vérifie qu'aucun appel TTS n'a lieu pendant une séance deadlift.
-- Les chiffres (« 4 cm ») sont dits par le LLM local dans le récap.
+- **Aucune synthèse de clip pendant la séance** : à J5, on vérifie qu'aucun appel à `generate_tts` / `_generate_single_cue` n'a lieu pendant une séance deadlift (tous les clips existent).
+- Les chiffres (« 4 cm ») sont dits par le LLM conversationnel dans le récap.
+- **Honnêteté sur la pile vocale** : aujourd'hui, la couche conversationnelle est **dans le cloud** (Deepgram STT, LLM OpenAI `gpt-5.4-mini` par défaut, Cartesia via LiveKit Inference ; `voice_agent.py:132-161`), ce qui va contre le garde-fou n°1. Le deadlift n'ajoute **aucune** dépendance cloud et garde des sorties à la taille d'un petit modèle local, prêtes pour la migration. Cette migration ne fait pas partie de ce plan (§14).
 
 **Récap**
 - Déclenché par le compte de reps de l'orchestrateur, comme pour le squat.
@@ -608,7 +613,12 @@ Ces données ne servent **jamais** à fixer les seuils finaux.
 - **Arguments et poignée de main** : `deadlift/process.py` accepte exactement les arguments que `main.py` passe à `pipeline_process.py` (`cam0 cam1 exercise`, fichier de calibration, mode calibration, préchargement ; `main.py:1088-1125`). Il reproduit la poignée de main du préchargement : chargement des modèles, attente de `start_capture` (`pipeline_process.py:895-905`), puis ouverture des caméras.
 - **Exercice connu dès l'activation** : la voix lit `workout.exercise_name` dans l'état (reconnu par `names.py`) au moment où l'enregistreur est créé (§3.3). Elle n'attend pas un premier message portant `exercise`.
 - **`workout_complete`** : finalise la série en cours (`diagnosis_complete`, `set_complete`), vide les messages, ferme les caméras et sort proprement, comme le bloc `finally` de `pipeline_process.py:1965-2043`.
-- **Métadonnées de séance** : type de prise (double, mixte ou crochet), diamètre des disques (45 cm par défaut), ceinture, chaussures. Demandées par l'agent deadlift en début de séance, puis rangées dans l'état. La branche deadlift de `main.py` les écrit dans le fichier de lancement, avec le même mécanisme que pour le fichier de calibration. Pas de changement en cours de séance en v1.
+- **Métadonnées de séance** : type de prise (double, mixte ou crochet), diamètre des disques (45 cm par défaut), ceinture, chaussures. Elles doivent arriver **avant l'ouverture des caméras**, car le sous-processus est lancé dès le passage en mode séance (`main.py:918-1099`) :
+  - **parcours rapide** : demandées par la branche deadlift de `CollectExerciseInfoTask`, avant le changement de mode ;
+  - **séance programmée** : demandées par la branche deadlift du `WorkoutAgent` pendant l'accueil, avant que `workout.greeting_done` soit posé ;
+  - la branche deadlift de `main.py` joint ces valeurs, lues dans l'état, au message `start_capture` envoyé après `greeting_done` (`main.py:1104-1118`) ; `deadlift/process.py` les lit à la réception de ce message ;
+  - si l'utilisateur ne sait pas : prise double, disques de 45 cm ;
+  - pas de changement en cours de séance en v1.
 
 ## 10. Edge (Jetson)
 
@@ -617,7 +627,7 @@ Ces données ne servent **jamais** à fixer les seuils finaux.
 - **Mode dégradé**, dans l'ordre :
   1. pose à 30 Hz, barre à 15 Hz avec Kalman ;
   2. sinon, tout à 15 Hz (à vérifier pour le chronométrage du décollage).
-- Rien de nouveau ne dépend du cloud pendant une séance, et le repli TTS cloud est exclu en deadlift. Annotation et entraînement se font hors ligne.
+- Le deadlift n'ajoute aucune dépendance cloud et ne synthétise aucun clip en séance. La couche conversationnelle existante est encore dans le cloud (§9.1) ; la migrer vers un modèle local est hors de ce plan. Annotation et entraînement se font hors ligne.
 
 ## 11. Jalons, critères d'acceptation, estimations
 
@@ -630,7 +640,7 @@ Estimations pour 1 ingénieur à temps plein. À 2, J2 et J4 peuvent avancer en 
 | **J2 — Simulateur deadlift** | Générateur, scénarios | Chaque scénario produit sa vérité terrain | J1 | 1 sem. |
 | **J3 — Cœur deadlift + squelette de bout en bout** | Fournisseur caméra ; `DeadliftPipeline` (contrats) ; calibration caméra séparée ; machine à états (arrêt complet, relance, décollage daté) ; métriques F1–F9 ; golden master deadlift. **Tranche fine de bout en bout, derrière le drapeau** : bifurcation dans `main.py`, processus deadlift, `rep_complete` → la voix compte les reps sur le rack | Simulateur : 100 % des reps comptées, événements ≤ 100 ms, chaque faute injectée détectée, scénario propre sans faute. Sur le rack : « deadlift » → reps comptées à voix haute | J2 | 2,5 sem. |
 | **J4 — Barre 3D** | Annotation, entraînement, export ; tracker 3D ; association multi-vues ; vérité terrain ArUco | Rappel ≥ 95 % ; erreur 3D statique ≤ 1 cm et dynamique ≤ 1,5 cm ; budget Jetson tenu ou mode dégradé validé | J1, décision de licence | 2–3 sem. |
-| **J5 — Intégration complète** | Contrat §9.2–9.3 ; fichiers du §3.3 ; audio deadlift ; affichage ; base de données ; guidage ; récap | Séance complète en parcours rapide et programmé (première fois et utilisateur connu) ; liaison cue ↔ rep en base ; provenance ; isolation des données ; zéro appel TTS ; aucune écriture squat ; golden masters squat identiques, drapeau éteint et allumé | J0, J3, J4 | 2 sem. |
+| **J5 — Intégration complète** | Contrat §9.2–9.3 ; fichiers du §3.3 ; audio deadlift ; affichage ; base de données ; guidage ; récap | Séance complète en parcours rapide et programmé (première fois et utilisateur connu) ; liaison cue ↔ rep en base ; provenance ; isolation des données ; zéro synthèse de clip en séance ; affinage deadlift rechargé à la séance suivante ; aucune écriture squat ; golden masters squat identiques, drapeau éteint et allumé | J0, J3, J4 | 2 sem. |
 | **J6 — Validation réelle** | Round 1 → seuils, budget d'erreur, marges, ρ ; round 2 → jeu de test | Porte démo du §1 sur ≥ 10 lifters (effet de grappe, bootstrap par lifter, séries naturelles à part) ; κ ≥ 0,6 ; statut fixé pour chaque faute | J5 | 3–4 sem. |
 | **J7 — Diagnostic deadlift** | Graphe statique, score, récap chiffré | La cause n°1 correspond à l'annotation du coach dans ≥ 70 % des séries | J6 | 1–1,5 sem. |
 | **J8 — Démo** | Scénario héros : boucle fermée F1, puis correction de F8, F2 ou F3 à la rep suivante. Plan B : F1 + F3 | 10 démos consécutives sans erreur ; budget Jetson tenu | J7 | 1 sem. |
@@ -642,7 +652,7 @@ Total : ≈ 17–19 semaines pour 1 personne, ≈ 10–11 semaines pour 2. La ca
 | Risque | Parade |
 |---|---|
 | Toucher au squat par accident | Sous-processus séparé, composition, drapeau, golden masters pipeline et voix, manifeste de gel, CI |
-| Écrire un état squat (calibration caméra, base) | Calibration caméra copiée dans `~/.nowva/deadlift/` ; outil de gravité dédié ; test « aucune écriture » avec affinage forcé ; isolation des données |
+| Écrire un état squat (calibration caméra, base) | Calibration caméra copiée par paire dans `~/.nowva/deadlift/`, ré-amorcée si le squat recalibre ; outil de gravité dédié ; test « aucune écriture » avec affinage forcé ; isolation des données |
 | Vertical faux / caméra déplacée | Gravité mesurée par caméra + contrôle de cohérence ; tests d'inclinaison ; repli à seuils élargis |
 | Règle `.claude` fausse sur les axes | `.claude/rules/deadlift.md` + test statique sur Y/Z |
 | Dos rond non mesurable | Proxys, vocabulaire comportemental, signaux expérimentaux soumis aux données |
@@ -660,7 +670,7 @@ Total : ≈ 17–19 semaines pour 1 personne, ≈ 10–11 semaines pour 2. La ca
 
 ## 13. Hors périmètre v1
 
-Sumo, RDL et autres variantes ; changement d'exercice en cours de séance ; apprentissage des probabilités ou du LLM ; fantôme animé ; ML pour le dos rond ; VBT complet ; rejeu de la dernière rep deadlift ; toute modification d'un fichier squat.
+Sumo, RDL et autres variantes ; changement d'exercice en cours de séance ; séances programmées mixtes ; migration de la couche conversationnelle vers un modèle local ; apprentissage des probabilités ou du LLM ; fantôme animé ; ML pour le dos rond ; VBT complet ; rejeu de la dernière rep deadlift ; toute modification d'un fichier squat.
 
 ## 14. Questions pour Ambaka
 
@@ -677,4 +687,5 @@ Sumo, RDL et autres variantes ; changement d'exercice en cours de séance ; appr
     - l'axe vertical du monde n'est pas la gravité (§2.1) ;
     - `main.py:1035` ne transfère pas `assessment_ready` ni `shallow_rep`, alors que la voix les gère (`coaching_service.py:524, 609`) ;
     - drapeau éteint, un programme « Barbell Conventional Deadlift » n'est pas normalisé, et sa calibration est écrite sous la ligne **squat** (`pipeline_process.py:1073`) ;
-    - le récap squat peut partir avant son `diagnosis_complete` (`_consume_diagnosis` n'attend pas, `coaching_orchestrator.py:369-375`).
+    - le récap squat peut partir avant son `diagnosis_complete` (`_consume_diagnosis` n'attend pas, `coaching_orchestrator.py:369-375`) ;
+    - **la couche conversationnelle est dans le cloud** (Deepgram, OpenAI, Cartesia via LiveKit Inference ; `voice_agent.py:132-161`), contrairement au garde-fou n°1 de `CLAUDE.md`.
