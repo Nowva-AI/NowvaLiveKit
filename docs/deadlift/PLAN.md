@@ -1,6 +1,6 @@
 # Plan — Soulevé de terre conventionnel (deadlift) — v1
 
-Statut : proposition, à valider par Ambaka. Version 3 du document.
+Statut : proposition, à valider par Ambaka. Version 4 du document.
 
 ## 0. Décisions déjà prises (ne pas rediscuter)
 
@@ -26,8 +26,8 @@ Fautes « héros » (démo, certifiées) : F1, F2, F3, F8. Les autres fautes v1 
 |---|---|
 | Comptage des reps | ≥ 99 %, 0 rep fantôme sur séries propres |
 | Événements (décollage, passage genoux, lockout, sol) | erreur médiane ≤ 100 ms |
-| Précision par faute héros | ≥ 0,85, borne basse de Wilson à 95 % ≥ 0,75 |
-| Rappel par faute héros | ≥ 0,70, borne basse de Wilson ≥ 0,60 |
+| Précision par faute héros | ≥ 0,85 ; borne basse à 95 % (bootstrap par lifter) ≥ 0,75 ; aucun lifter de test < 0,70 ; ≥ 0,80 sur les séries naturelles |
+| Rappel par faute héros | ≥ 0,70 ; borne basse à 95 % (bootstrap par lifter) ≥ 0,60 |
 | Fausses corrections sur reps propres | ≤ 1 pour 10 reps (≥ 300 reps propres de test) |
 | Erreur de mesure | ≤ 1/3 du seuil du niveau cué (§5.6) |
 | Latence d'un cue | identique au squat (audio pré-enregistré) |
@@ -123,23 +123,30 @@ On accepte la duplication (boucle de session, ≈ 150 lignes de calcul bayésien
 |---|---|
 | `src/main.py` ~452 | Choix du script de sous-processus |
 | `src/main.py` ~386-430 (`_load_athlete_calibration`) | Branche deadlift : si la ligne `hip_hinge` n'a pas de mesures corporelles, lecture seule de la ligne `squat` comme point de départ |
-| `src/main.py` ~989-1035 | Branche d'affichage pour les messages portant `exercise` ; ajout de `dl_cue` à la liste de transfert vers la voix (~1035) |
+| `src/main.py` ~989-1035 | Branche d'affichage pour les messages portant `exercise` ; transfert vers la voix (~1035) de `dl_cue`, et de `assessment_ready` **seulement s'il porte `exercise`** (le message squat sans ce champ reste non transféré, comme aujourd'hui) |
 | `src/main.py` ~601-603 | Aucun changement : les messages voix → pipeline existants sont gérés par le processus deadlift (§9.2) |
 | `src/visual/display.html` ~963, 1223, 1317, 1422 | Tuiles et libellés deadlift si `exercise` est présent ; tuiles squat inchangées |
 | `src/agent/agents/prompts/main_menu_prompt.py:26` | Texte « squats et deadlift conventionnel » si drapeau |
-| `src/agent/agents/main_menu_agent.py` | `start_quick_exercise` : refus codé des exercices non pris en charge si drapeau ; branche deadlift qui passe le nom canonique `"Barbell Deadlift"` à `check_calibration` et `start_calibration_mode` (y compris en séance programmée, où le nom vient brut de la base) ; texte de progression (~640) selon l'exercice |
-| `src/agent/agents/shared/helpers.py:94-99` | **Alias seulement** (« conventional deadlift », « barbell conventional deadlift » → `"Barbell Deadlift"`). Les fonctions `check_calibration` / `start_calibration_mode` ne changent pas |
-| `src/agent/agents/quickExerciseAgent.py:211` | Passe `exercise=` au `TeachingAgent`. Les appels de `:112` et `:186` reçoivent déjà le nom normalisé par `main_menu_agent.py:158` |
+| `src/agent/agents/main_menu_agent.py` | Si drapeau : `start_quick_exercise` refuse les exercices non pris en charge ; branche deadlift qui reconnaît le nom brut avec `deadlift/voice/names.py` (« deadlift », « conventional deadlift », « Barbell Conventional Deadlift » de la bibliothèque de programmes) et passe le nom canonique `"Barbell Deadlift"` à `check_calibration` / `start_calibration_mode` ; test de provenance de la calibration (§3.3, motif) ; texte de progression (~640) selon l'exercice |
+| `src/agent/agents/quickExerciseAgent.py` | `:211` passe `exercise=` au `TeachingAgent` ; branche deadlift à la décision de calibration (~:175-190) qui applique le test de provenance. Les appels de `:112` et `:186` reçoivent le nom canonique fourni par la branche deadlift de `main_menu_agent` |
 | `src/agent/agents/teaching_agent.py`, `calibration_agent.py`, `workout_agent.py` | Retour anticipé vers `deadlift/voice/` si exercice = deadlift ; code squat ni modifié ni réindenté |
-| `src/agent/services/coaching_service.py` | Branche si `exercise` présent dans `rep_complete` / `diagnosis_complete` / `calibration_complete` ; nouveau gestionnaire `dl_cue` ; `BiomechanicsRecorder(exercise="conventional_deadlift")` (~129, déjà supporté par `db/biomechanics_persistence.py:290`) ; requêtes de progression filtrées par exercice (~159-160) ; prompts deadlift |
-| `src/agent/services/coaching_orchestrator.py` | Nouvelle méthode publique `play_cached_cue(cue_key, priority)` (ajout, jamais appelée par le squat) ; branches de récap deadlift (~1227-1251, 1388-1390, 1407, 1510) |
+| `src/agent/services/coaching_service.py` | Branche si `exercise` présent dans `rep_complete` / `diagnosis_complete` / `calibration_complete` / `assessment_ready` ; nouveau gestionnaire `dl_cue` ; `BiomechanicsRecorder(exercise="conventional_deadlift")` (~129, déjà supporté par `db/biomechanics_persistence.py:290`) ; requêtes de progression appelées avec `exercise="conventional_deadlift"` dans la branche deadlift (~159-160 ; les fonctions acceptent déjà ce paramètre) ; prompts deadlift |
+| `src/agent/services/coaching_orchestrator.py` | Nouvelle méthode publique `play_cached_cue(cue_key, priority, max_age_s, data)` qui place un événement `cached_cue` dans la file existante (`_dispatch_cached_cue`, ~961-1021 : lecture via `session.say(allow_interruptions=False)`, accusé de livraison automatique si `data.fault_type` est présent). Ajout, jamais appelée par le squat. Branches de récap deadlift (~1227-1251, 1388-1390, 1407, 1510) |
 | `src/agent/services/coaching_constants.py` | Clés `dl_*` ajoutées **après** la génération de leur audio. Sinon `_validate_expected_cues` (`audio_cue_service.py:260-272`) journaliserait des avertissements pendant les séances squat |
 | `src/agent/services/progress_context.py` | Libellés et filtre par exercice |
 | `scripts/tools/generate_cue_audio.py` | Prompts audio `dl_*` ajoutés |
 
-**Jamais modifiés** : `pipeline.py`, `pipeline_process.py`, `profiles/*`, `diagnosis/*`, `faults/*`, `coaching/{cue_cache,ipc_bridge,session_tracker}.py`, `calibration.py`, `utils/foot_contact.py`, `pose/multi_camera.py`, `barbell_tracking/*`, `config/biomechanics.yaml`, `db/biomechanics_persistence.py`, `scripts/tools/calibrate_cameras.py`.
+**Jamais modifiés** : `pipeline.py`, `pipeline_process.py`, `profiles/*`, `diagnosis/*`, `faults/*`, `coaching/{cue_cache,ipc_bridge,session_tracker}.py`, `calibration.py`, `utils/foot_contact.py`, `pose/multi_camera.py`, `barbell_tracking/*`, `config/biomechanics.yaml`, `db/biomechanics_persistence.py`, `scripts/tools/calibrate_cameras.py`, `agent/agents/shared/helpers.py` (les noms deadlift sont reconnus par `deadlift/voice/names.py`, appelé seulement dans les branches deadlift : drapeau éteint, « conventional deadlift » se comporte exactement comme aujourd'hui).
 
 **Motif de mouvement** : le deadlift utilise la clé existante `hip_hinge`, déjà associée à `"Barbell Deadlift"` (`calibration.py:28`). Les recherches de calibration existantes (`check_calibration`, `start_calibration_mode`, `_load_athlete_calibration`) marchent donc sans modifier `calibration.py`. Le RDL et le sumo partagent cette clé mais sont refusés en v1. S'ils sont ajoutés un jour, il faudra une clé distincte et une migration.
+
+**Provenance de la calibration `hip_hinge`.** Aujourd'hui, drapeau éteint, « deadlift », « RDL » ou un programme « Barbell Conventional Deadlift » lancent le pipeline squat avec le profil placeholder. En mode calibration, celui-ci écrit sous `hip_hinge` un profil **de forme squat** (`pipeline_process.py:1073, 1499`). Le deadlift ne doit donc pas faire confiance à une ligne `hip_hinge` existante :
+- chaque calibration écrite par le deadlift porte `thresholds.schema = "dl_v1"` ;
+- une ligne sans ce marqueur est traitée comme **« pas de calibration deadlift »** : l'apprentissage et la mesure du bruit ont lieu. Seules ses mesures corporelles (`athlete_params`) servent de point de départ ; ses seuils et pics sont ignorés ;
+- la fonction `deadlift/voice/calibration.py::is_deadlift_calibration(row)` est appelée par les branches deadlift de `main_menu_agent`, `quickExerciseAgent` et `main._load_athlete_calibration` ;
+- tests : une ligne `hip_hinge` de forme squat ⇒ parcours « première fois » ; une ligne `dl_v1` ⇒ parcours « utilisateur connu ».
+
+**Isolation des données.** Les lectures utilisées par le squat filtrent déjà sur `exercise="squat"` (`get_last_completed_session`, `get_progress_baseline`, `get_score_progress`, `get_multi_session_fault_trends` dans `db/biomechanics_persistence.py:738-830, 922+`). Les séances deadlift, enregistrées avec `exercise="conventional_deadlift"`, n'entrent donc jamais dans le contexte squat. Les fonctions non filtrées (`get_fault_progress`, `get_rep_kinematics_history`, `get_cue_effectiveness`) n'ont aucun appelant aujourd'hui ; tout futur appelant devra filtrer par exercice. `rep_kinematic_summary` deadlift porte `dl_schema: 1` et `exercise`.
 
 **Préfixe `dl_`** sur tous les types de faute et toutes les clés de cue deadlift, pour éviter les collisions avec `PREEMPTIVE_TEXT["chest_up"]`, avec `END_OF_REP_FAULT_TYPES` (qui contient déjà `lockout`) et avec les requêtes non filtrées (`get_fault_progress`, `get_cue_effectiveness`). Les types `dl_*` ne sont **pas** ajoutés à `END_OF_REP_FAULT_TYPES` : ils sont émis avec le numéro de la rep courante avant `rep_complete`, donc la liaison cue ↔ rep et l'évaluation « rep suivante corrigée » (`biomechanics_persistence.py:467-489`) fonctionnent normalement.
 
@@ -155,7 +162,7 @@ On accepte la duplication (boucle de session, ≈ 150 lignes de calcul bayésien
 **2. Golden master voix squat** — `tests/test_coaching_squat_golden.py` (même niveau que `tests/test_coaching_service.py`, qui construit déjà `CoachingService(session=None, state=None)`) :
 - Le flux IPC capturé au point 1 est rejoué dans `CoachingService` + `CoachingOrchestrator`, avec TTS, LLM et base simulés.
 - On capture la séquence des cues joués, le texte exact des prompts de récap et les opérations de l'enregistreur (`_ops_*`, fonctions pures).
-- `time.monotonic` remplacé dans l'orchestrateur ; ordre des tâches asyncio maîtrisé (on attend que la file soit vide entre deux messages).
+- `time.monotonic` remplacé dans l'orchestrateur ; `random` initialisé (choix des variantes audio, `audio_cue_service.py:344`) ; ordre des tâches asyncio maîtrisé (on attend que la file soit vide entre deux messages).
 - Drapeau éteint et allumé. C'est le filet qui couvre les fichiers voix du §3.3.
 
 **3. Golden master des prompts** : texte des agents squat (menu drapeau éteint, apprentissage, calibration, séance).
@@ -164,7 +171,7 @@ On accepte la duplication (boucle de session, ≈ 150 lignes de calcul bayésien
 
 **5. Manifeste de gel** : `tests/test_squat_freeze.py` vérifie l'empreinte SHA-256 de la liste « Jamais modifiés ». Le mettre à jour exige l'accord d'Ambaka.
 
-**6. Test « aucune écriture squat »** : les outils et le processus deadlift (gravité, enregistreur, séance) tournent dans un `HOME` temporaire ; on vérifie qu'aucun fichier `rig_calibration_*`, `intrinsics_*` ou état squat n'est créé ou modifié.
+**6. Test « aucune écriture squat »** : les outils et le processus deadlift (gravité, enregistreur, séance) tournent dans un `HOME` temporaire ; on vérifie qu'aucun fichier `rig_calibration_*`, `intrinsics_*` ou état squat n'est créé ou modifié. Variante base de données : avec une base qui contient des séances squat **et** deadlift, le contexte squat (accueil, progression, récap) est identique à celui d'une base qui ne contient que les séances squat.
 
 **7. Rejeu de vraies séances squat** : impossible aujourd'hui (`user_test_runs/` ne contient que des sorties). Dès que l'enregistreur existe (J1), on enregistre 3 à 5 séances squat brutes et on les rejoue dans le pipeline squat inchangé, via un fournisseur de rejeu injecté dans le test. Snapshot des sorties.
 
@@ -297,7 +304,7 @@ La rotation du tronc est retirée de F6 en v1, car une prise mixte la déclenche
 **Validation et critère d'usage :**
 - tests sur géométrie connue ;
 - cohérence : fémurs longs ou bras courts ⇒ dos plus horizontal ;
-- comparaison avec les placements annotés « bons » par le coach. **F8 n'est cuée au niveau modéré que si l'erreur de hauteur de hanche du modèle est ≤ 2,3 cm au 95e percentile** (1/3 du seuil modéré de 7 cm). Si l'erreur est ≤ 3,3 cm, F8 est cuée seulement au niveau sévère. Au-delà, F8 est désactivée et le plan B de la démo s'applique (§11, J8).
+- comparaison avec les placements annotés « bons » par le coach : la référence est la hauteur de hanche **mesurée** sur ces placements (marqueur sur le grand trochanter vu par la caméra sagittale de référence, erreur ≤ 1 cm, §8.4) ; l'erreur du modèle = hauteur prédite − hauteur mesurée. **F8 n'est cuée au niveau modéré que si cette erreur est ≤ 2,3 cm au 95e percentile** (1/3 du seuil modéré de 7 cm). Si l'erreur est ≤ 3,3 cm, F8 est cuée seulement au niveau sévère. Au-delà, F8 est désactivée et le plan B de la démo s'applique (§11, J8).
 
 ### 5.5 Personnalisation
 
@@ -462,11 +469,13 @@ Volume : ≈ 5–10 Mo/s, soit ≈ 5 Go pour 10 min. Stockage local, sauvegarde 
 - 10–15 lifters de 1,55 à 1,95 m, aux ratios fémur/torse/bras variés, débutants à confirmés ;
 - séries naturelles (RPE ≤ 8) et **séries de fautes scénarisées**.
 
-**Jeu de test** : ≥ 6 lifters jamais vus à l'entraînement ni au réglage, dimensionné pour que les intervalles de Wilson tiennent les cibles du §1.
-- **Fautes héros (F1, F2, F3, F8) : ≥ 100 positifs chacune.** Avec un rappel de 0,7, cela donne ≈ 82 cues émis. À une précision de 0,85, la borne basse de Wilson est alors ≈ 0,76 ; pour le rappel, elle est ≈ 0,60.
-- **Fautes provisoires (F4–F7, F9) : ≥ 40 positifs chacune.** Intervalles rapportés tels quels ; cues seulement à partir de « modéré » jusqu'à ce qu'elles atteignent 100 positifs.
+**Jeu de test** : **≥ 8 lifters** jamais vus à l'entraînement ni au réglage.
+- **Fautes héros (F1, F2, F3, F8) : ≥ 100 positifs chacune.** Avec un rappel de 0,7, cela donne ≈ 82 cues émis ; à une précision de 0,85, la borne basse de Wilson est ≈ 0,76 et celle du rappel ≈ 0,60. C'est un plancher de dimensionnement.
+- **Fautes provisoires (F4–F7, F9) : ≥ 40 positifs chacune.** Intervalles rapportés tels quels ; cues seulement à partir de « modéré » jusqu'à 100 positifs.
 - **≥ 300 reps propres** pour le taux de fausses corrections.
-- Total ≈ 1 000 reps de test, surtout scénarisées à charge légère : ≈ 25 séries de 5 reps par lifter de test, en 2 séances.
+- Les reps d'un même lifter ne sont pas indépendantes. **La porte de J6 utilise un bootstrap par lifter** (on rééchantillonne des lifters, pas des reps). Elle exige en plus une précision minimale par lifter (≥ 0,70) pour les fautes héros.
+- **Séries scénarisées et naturelles rapportées séparément.** Les fautes scénarisées à charge légère surestiment la précision réelle. Les séries naturelles sont filmées en mode observation (cues coupés), et une faute héros doit atteindre ≥ 0,80 de précision sur ≥ 30 cas naturels ; sinon elle reste provisoire.
+- Volume : ≈ 25 séries de 5 reps par lifter de test, en 2 séances, soit 8 × 25 × 5 = 1 000 reps, surtout à charge légère.
 
 **Annotation (CVAT, vidéo des 3 vues) :**
 - par rep : chaque faute (présente / niveau) ;
@@ -485,7 +494,8 @@ Volume : ≈ 5–10 Mo/s, soit ≈ 5 Go pour 10 min. Stockage local, sauvegarde 
 |---|---|---|
 | Barre statique / F1 | Scotch au sol + gabarit de pied : barre à 0 / 3 / 6 / 10 cm devant le milieu du pied | ≤ 3 mm |
 | Barre dynamique (F3, vitesse, hauteur) | **Marqueurs ArUco au moyeu des disques**, triangulés par les mêmes caméras (indépendant du détecteur) ; en option, capteur de position linéaire à câble | ≤ 5 mm |
-| Angles tronc / hanche / genou (F2, F4, F5, F8) | **Deux centrales inertielles** (tronc, cuisse) à ±1°. Sinon, caméra sagittale plane calibrée (damier dans le plan sagittal, 120 fps, marqueurs sur repères osseux), ≈ 1–1,5° | ≤ 1,5° |
+| Angles tronc / hanche / genou (F2, F4, F5) | **Centrale inertielle sur le haut du dos**, bien sanglée : angle du tronc à ±1° y compris en mouvement (F2, F5). Centrale sur la cuisse : fiable seulement en statique (lockout, F4), à cause du mouvement de la peau. Plus une caméra sagittale plane calibrée (damier dans le plan sagittal, 120 fps, marqueurs sur repères osseux), ≈ 1–1,5° | ≤ 1,5° |
+| Hauteur de hanche au placement (F8, modèle §5.4) | Marqueur sur le grand trochanter, caméra sagittale de référence | ≤ 1 cm |
 | Gravité | Planche ChArUco à plat + niveau à bulle | ≤ 0,3° |
 | Événements | Horodatages annotés | 1 frame |
 
@@ -523,7 +533,8 @@ Usage : tests unitaires et d'intégration, bruit, inclinaison. **Jamais pour fix
   4. épaules au-dessus de la barre, dos plat ;
   5. mise en tension, pousser le sol.
 
-  Ensuite, 2–3 reps à la barre vide (mesure du bruit, §5.5). Cette phase se termine par `calibration_complete`, qui active la séance côté voix, comme pour le squat (`coaching_service.py:963-968`).
+  Quand le pipeline deadlift voit le lifter et la barre de façon fiable, il envoie `assessment_ready` avec `exercise` (transféré par `main.py`, §3.3) : la branche deadlift de l'agent d'apprentissage lance alors « vas-y, première rep », par le même callback que le squat (`coaching_service.py:609-620`). Ensuite, 2–3 reps à la barre vide (mesure du bruit, §5.5). La phase se termine par `calibration_complete` (marqueur `dl_v1`), qui active la séance côté voix comme pour le squat (`coaching_service.py:963-968`).
+- **Utilisateur avec une ligne `hip_hinge` sans marqueur `dl_v1`** : traité comme une première fois (§3.3).
 - **Utilisateur connu** : passage par `WorkoutAgent`, qui active la séance à l'entrée (`workout_agent.py:146`), comme pour le squat.
 - **Calibration caméra** : si aucun fichier de rig n'existe, la calibration actuelle demande 2 squats lents au poids du corps. On la garde (elle calibre les caméras, pas l'exercice) et l'agent deadlift l'annonce.
 - **Guidage du placement en boucle fermée** (moment fort de la démo), entièrement côté pipeline deadlift :
@@ -541,6 +552,7 @@ Usage : tests unitaires et d'intégration, bruit, inclinaison. **Jamais pour fix
 
   Les cues deadlift ne passent pas par `orchestrator.on_fault`, dont l'écart minimal de 8 s entre fautes (`coaching_orchestrator.py:152`) en supprimerait une sur deux au rythme d'une rep toutes les 5–8 s.
 - **Audio** : cues directionnels à deux intensités. Les chiffres (« 4 cm ») sont dits par le LLM dans le récap. Clips pré-générés hors ligne, lecture locale, repli TTS existant.
+- **Cues perdus** : `_dispatch_cached_cue` abandonne les événements de plus de 1 s, et un cue attend la fin de la parole du LLM. Les cues de placement passent donc `max_age_s = 3` à `play_cached_cue`. Comme le guidage est en boucle fermée, un cue perdu est renvoyé 1,5 s plus tard tant que l'écart persiste. Chaque perte est journalisée et comptée (indicateur suivi pendant J6).
 - **Récap** : déclenché comme pour le squat, par le compte de reps de l'orchestrateur, avec le diagnostic deadlift (`diagnosis_complete`) et le prompt deadlift.
 
 ### 9.2 Contrat de messages
@@ -551,9 +563,10 @@ Usage : tests unitaires et d'intégration, bruit, inclinaison. **Jamais pour fix
 |---|---|---|---|
 | `pipeline_status` | Démarrage, préchargement | `status` | `main.py:973` (inchangé) |
 | `cache_cues` | Début de séance | `cues` (clés `dl_*`) | `coaching_service._on_cache_cues` (inchangé) |
-| `assessment_*`, `calibration_rep` | Phase d'apprentissage, si pas de calibration | mêmes champs que le squat | `main.py` (transfert existant), `coaching_service` (branche deadlift pour les textes) |
+| `assessment_ready` | Lifter et barre suivis de façon fiable, en phase d'apprentissage | `exercise` | `main.py` (transfert **ajouté**, seulement si `exercise` est présent) → `coaching_service:609` → callback de l'agent d'apprentissage (branche deadlift) |
+| `assessment_rep`, `assessment_result`, `calibration_rep` | Phase d'apprentissage | mêmes champs que le squat | `main.py` (transfert existant, `:1035`), `coaching_service` (branche deadlift pour les textes) |
 | `calibration_complete` | Fin de l'apprentissage | `movement_pattern = "hip_hinge"` (**explicite**, jamais le défaut « squat »), `peaks`, `thresholds`, `athlete_params` (segments, bras, décalage prise), `baseline` | `coaching_service` (sauvegarde ~915-935 et passage de la séance en actif ~963-968) |
-| `dl_cue` (nouveau) | Guidage de placement **et** correction après une rep | `cue`, `kind` (`setup_correction` / `setup_confirm` / `rep_correction`), `fault_type` `dl_*`, `severity`, `severity_score`, `rep_number` (**rep courante**), `message`, `value`, `target`, `source` | `main.py` (ajout à la liste de transfert), `coaching_service` → `orchestrator.play_cached_cue` ; si `rep_correction`, `recorder.record_fault(message)` puis `record_cue_delivered` après lecture |
+| `dl_cue` (nouveau) | Guidage de placement **et** correction après une rep | `cue`, `kind` (`setup_correction` / `setup_confirm` / `rep_correction`), `fault_type` `dl_*`, `severity`, `severity_score`, `rep_number` (**rep courante**), `message`, `value`, `target`, `source` | `main.py` (ajout à la liste de transfert), `coaching_service` → `orchestrator.play_cached_cue` ; si `rep_correction`, `recorder.record_fault(message)`. L'accusé de livraison est fait par `_dispatch_cached_cue` lui-même (`data.fault_type`), et `_ops_cue_delivered` est idempotent |
 | `rep_complete` | Barre au sol, **après** l'éventuel `dl_cue` de cette rep | `rep_number`, `set_number`, `is_clean`, `faults_in_rep` (noms), `faults_detailed` (liste {`fault_type`, `severity`, `severity_score`} de **toutes** les fautes de la rep, cuées ou non), `rep_duration_ms`, `ascent_time_s` (= durée du tirage), `descent_time_s` (= durée de la descente), `depth_category = ""`, `max_depth_angle = 0`, `rep_kinematic_summary` (métriques deadlift, JSON), `bar_source` | `coaching_service` (branche) → `orchestrator.on_rep_complete` (champs de profondeur neutres, sans effet) ; enregistreur (`_build_rep_row`, inchangé) ; affichage |
 | `diagnosis_complete` | Après la série | `diagnosis` (`DiagnosisResult`), `scoring` {`mean_score`, `per_dimension` (5 dimensions deadlift), `best_rep`, `worst_rep`}, `set_number` | `coaching_service`, affichage |
 | `set_complete` | Fin de série | comme le squat | **affichage seulement** (`main.py:1005`) ; ce message n'est pas transféré à la voix (`main.py:1035`) et ne lui est pas destiné |
@@ -563,7 +576,7 @@ Usage : tests unitaires et d'intégration, bruit, inclinaison. **Jamais pour fix
 - `rest_start` : minuteur de repos, réarmement de la porte de départ ;
 - `workout_complete` : arrêt propre ;
 - `assessment_mode` : bascule apprentissage / séance ;
-- `request_last_rep` et `request_demo` : en v1, pas de rejeu deadlift ; le processus répond `demo_abort`, que la voix gère déjà, pour qu'elle n'attende pas ;
+- `request_last_rep` et `request_demo` : en v1, pas de rejeu deadlift. Le processus répond comme le squat quand il n'a rien (`pipeline_process.py:1721-1748`) : `last_rep_snapshot {request_id, error: "no_data"}` et `demo_data_ready {request_id, status: "unavailable"}`. `_request_from_pipeline` (`coaching_service.py:340-369`) est ainsi libéré tout de suite, sans attendre son délai de 5 s ;
 - `demo_start`, `demo_cue`, `demo_end` : ignorés.
 
 **Données** : `BiomechanicsRecorder(exercise="conventional_deadlift")`. Les séances, reps et `CueEvent` sont étiquetés. Les cues `rep_correction` sont liés à leur rep et évalués sur la rep suivante, ce qui prépare l'apprentissage futur sans le construire. Les cues de placement ne sont pas enregistrés comme `CueEvent` en v1 ; les métriques de placement de chaque rep sont dans `rep_kinematic_summary`.
@@ -586,8 +599,8 @@ Estimations pour 1 ingénieur à temps plein, à affiner. Avec 2 personnes, J2/J
 | **J2 — Simulateur deadlift** | Générateur, scénarios, monde incliné | Chaque scénario produit sa vérité terrain | J1 | 1 sem. |
 | **J3 — Cœur deadlift (pose + repli poignets)** | Fournisseur caméra, `DeadliftPipeline` (contrat `CameraCalibrationSession`), machine à états, références debout, métriques F1–F9, guidage de placement, golden master deadlift | Simulateur : 100 % des reps comptées (lockouts mous et hyperextension compris), reps bloquées aux genoux non comptées, événements ≤ 100 ms, chaque faute injectée détectée, scénario propre sans faute ; rejeu round 1 sans crash | J2 | 2 sem. |
 | **J4 — Barre 3D** | Annotation CVAT, entraînement, export, tracker 3D, association multi-vues, vérité terrain ArUco | Rappel ≥ 95 % ; erreur 3D statique ≤ 1 cm, dynamique ≤ 1,5 cm vs ArUco ; temps Jetson dans le budget ou mode dégradé validé | J1 | 2–3 sem. |
-| **J5 — Intégration** | `deadlift/process.py`, bifurcation, contrat §9.2 dans les deux sens, fichiers §3.3, audio `dl_*`, affichage, base | Séance complète sur le rack, première fois **et** utilisateur connu : « deadlift » → placement guidé → reps comptées → cue → récap, données en base avec liaison cue ↔ rep ; golden masters squat identiques drapeau éteint et allumé | J0, J3, J4 | 2 sem. |
-| **J6 — Validation réelle** | Annotation round 1 → seuils, budget d'erreur, marge de lockout ; round 2 → jeu de test | Cibles du §1 sur lifters jamais vus (Wilson) ; κ ≥ 0,6 ; statut de chaque faute (héros / provisoire / désactivée) | J5 | 3–4 sem. |
+| **J5 — Intégration** | `deadlift/process.py`, bifurcation, contrat §9.2 dans les deux sens, fichiers §3.3, audio `dl_*`, affichage, base | Séance complète sur le rack, première fois **et** utilisateur connu : « deadlift » → placement guidé → reps comptées → cue → récap, données en base avec liaison cue ↔ rep ; ligne `hip_hinge` de forme squat ⇒ parcours première fois ; tests d'isolation des données verts ; golden masters squat identiques drapeau éteint et allumé | J0, J3, J4 | 2 sem. |
+| **J6 — Validation réelle** | Annotation round 1 → seuils, budget d'erreur, marge de lockout ; round 2 → jeu de test | Cibles du §1 sur ≥ 8 lifters jamais vus (bootstrap par lifter, plancher par lifter, séries naturelles à part) ; κ ≥ 0,6 ; statut de chaque faute (héros / provisoire / désactivée) | J5 | 3–4 sem. |
 | **J7 — Diagnostic deadlift** | Graphe statique, score, récap | Cause n°1 = annotation du coach dans ≥ 70 % des séries annotées | J6 | 1–1,5 sem. |
 | **J8 — Démo** | Scénario héros : placement guidé (F1, puis F8 si elle est certifiée) puis F2 ou F3 corrigée à la rep suivante. Plan B : F1 + F3 seulement | 10 démos consécutives sans erreur ; budget Jetson respecté | J7 | 1 sem. |
 
@@ -612,6 +625,8 @@ Total indicatif : 16–18 semaines pour 1 personne, ≈ 10 semaines pour 2. La c
 | Duplication qui diverge | Golden master deadlift, tests de contrat d'interface |
 | Prise mixte qui fausse l'asymétrie | Rotation retirée de F6, prise enregistrée |
 | Collisions de noms en base | Préfixe `dl_`, pas d'entrée dans `END_OF_REP_FAULT_TYPES` |
+| Ancienne ligne `hip_hinge` de forme squat | Marqueur de provenance `dl_v1`, test |
+| Validation trop optimiste | Bootstrap par lifter, plancher par lifter, séries naturelles séparées |
 
 ## 13. Hors périmètre v1
 
