@@ -905,6 +905,82 @@ class TestDepthTargetGate:
         assert depth.uncalibrated_target_ratio > depth.default_target_ratio
 
 
+CALIBRATED_DEPTH_TARGET = 0.12
+
+
+def _pipeline_for(monkeypatch, exercise_name: str, bilstm_enabled: bool = False):
+    from biomechanics import pipeline as pipeline_module
+
+    monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
+    config = BiomechanicsConfig()
+    config.bilstm.enabled = bilstm_enabled
+    return pipeline_module.BiomechanicsPipeline(config, exercise_name=exercise_name, defer_capture=True)
+
+
+class TestExerciseProfiles:
+    def test_bilstm_counts_squats_only(self, monkeypatch):
+        """The squat-trained BiLSTM would never see an overhead press rep and
+        would override the press's own counter."""
+        assert _pipeline_for(monkeypatch, "Barbell Back Squat", bilstm_enabled=True)._bilstm is not None
+        assert _pipeline_for(monkeypatch, "Barbell Overhead Press", bilstm_enabled=True)._bilstm is None
+
+    def test_set_exercise_rebuilds_rules_and_counting(self, monkeypatch):
+        pipe = _pipeline_for(monkeypatch, "Barbell Back Squat", bilstm_enabled=True)
+        pipe.set_exercise("Barbell Overhead Press")
+
+        assert pipe.profile.name == "overhead_press"
+        assert pipe._bilstm is None
+        assert not pipe._depth_gated
+        assert {rule.fault_type for rule in pipe._rule_engine.rules} == {
+            FaultType.LOCKOUT, FaultType.ELBOW_FLARE, FaultType.BAR_PATH, FaultType.BILATERAL_ASYMMETRY,
+        }
+
+    def test_depth_target_survives_a_switch_away_and_back(self, monkeypatch):
+        pipe = _pipeline_for(monkeypatch, "Barbell Back Squat")
+        pipe.set_depth_target(CALIBRATED_DEPTH_TARGET)
+
+        pipe.set_exercise("Barbell Overhead Press")
+        pipe.set_exercise("Barbell Back Squat")
+
+        assert pipe._depth_gated
+        assert pipe._rule_engine.depth_target_ratio == pytest.approx(CALIBRATED_DEPTH_TARGET)
+
+    def test_squat_bilstm_only_segments_after_a_switch_back(self, monkeypatch):
+        """Rebuilt for the squat, the BiLSTM must open a rep on any descent and
+        leave counting to the depth target; at its default parallel class an
+        athlete whose target sits above parallel would silently never count."""
+        from biomechanics.ml.bilstm_counter import ASSESSMENT_MIN_DEPTH_CLASS
+
+        pipe = _pipeline_for(monkeypatch, "Barbell Back Squat", bilstm_enabled=True)
+        pipe.set_depth_target(CALIBRATED_DEPTH_TARGET)
+
+        pipe.set_exercise("Reverse Lunge")
+        pipe.set_exercise("Barbell Back Squat")
+
+        assert pipe._depth_gated
+        assert pipe._bilstm._counter.config.min_depth_class == ASSESSMENT_MIN_DEPTH_CLASS
+        assert ASSESSMENT_MIN_DEPTH_CLASS < BiomechanicsConfig().bilstm.min_depth_class
+        assert pipe._rule_engine.depth_target_ratio == pytest.approx(CALIBRATED_DEPTH_TARGET)
+
+    def test_calibration_loaded_during_another_exercise_reaches_the_squat(self, monkeypatch):
+        """A workout that opens with a press still hands its squat the stored depth target."""
+        from biomechanics.calibration import apply_calibration_to_rule_engine
+
+        pipe = _pipeline_for(monkeypatch, "Barbell Overhead Press")
+        apply_calibration_to_rule_engine(pipe._rule_engine, {"depth_target_ratio": CALIBRATED_DEPTH_TARGET})
+
+        pipe.set_exercise("Barbell Back Squat")
+
+        assert pipe._rule_engine.depth_target_ratio == pytest.approx(CALIBRATED_DEPTH_TARGET)
+
+    def test_uncalibrated_squat_after_another_exercise_keeps_the_lenient_target(self, monkeypatch):
+        pipe = _pipeline_for(monkeypatch, "Barbell Overhead Press")
+        pipe.set_exercise("Barbell Back Squat")
+
+        lenient = BiomechanicsConfig().faults.depth.uncalibrated_target_ratio
+        assert pipe._rule_engine.depth_target_ratio == pytest.approx(lenient)
+
+
 class TestTwoCameraRigs:
     def test_two_camera_rig_lowers_the_body_measurement_gate(self, monkeypatch):
         from biomechanics.pipeline import TWO_CAMERA_MEASUREMENT_CONFIDENCE

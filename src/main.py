@@ -616,7 +616,7 @@ class NowvaApp:
             msg_type = message.get("type")
             if msg_type not in ("rest_start", "workout_complete", "demo_start",
                                 "demo_cue", "demo_end", "assessment_mode",
-                                "request_last_rep", "request_demo"):
+                                "request_last_rep", "request_demo", "set_exercise"):
                 return
             if msg_type == "rest_start":
                 rest_sec = message.get("rest_seconds", 30)
@@ -627,6 +627,16 @@ class NowvaApp:
             elif msg_type == "workout_complete":
                 print("[COACHING IPC] Received workout_complete from voice agent")
                 self._publish_display({"type": "workout", "action": "complete"})
+            elif msg_type == "set_exercise":
+                print(f"[COACHING IPC] Received set_exercise ({message.get('exercise_name')}) from voice agent")
+                self._publish_display({
+                    "type": "workout",
+                    "action": "start",
+                    "exercise": message.get("exercise_name"),
+                    "total_sets": message.get("total_sets") or 0,
+                    "target_reps": message.get("target_reps") or 0,
+                    "weight_lbs": message.get("weight_lbs") or 0.0,
+                })
             # Snapshot the reference — this runs on the coaching IPC thread
             # while the main loop can nil self.ipc_server during shutdown
             pose_ipc = self.ipc_server
@@ -1098,7 +1108,15 @@ class NowvaApp:
                             # no shoulder width, so stance metrics and the
                             # whole diagnosis engine stay dark for the session.
                             payload = {"thresholds": cal_profile}
-                            payload.update(self._load_athlete_calibration(exercise_name))
+                            # The calibration belongs to the workout's squat,
+                            # which need not be its first exercise.
+                            from agent.agents.shared.helpers import calibration_exercise
+                            session_exercises = [
+                                ex.get("exercise_name", "")
+                                for ex in (self.state.get("workout.current_session") or {}).get("exercises", [])
+                            ]
+                            cal_exercise = calibration_exercise(session_exercises) or exercise_name
+                            payload.update(self._load_athlete_calibration(cal_exercise))
                             with open(cal_file, "w") as f:
                                 json.dump(payload, f)
                             self._cal_file = cal_file

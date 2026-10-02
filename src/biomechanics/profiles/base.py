@@ -28,7 +28,17 @@ class ExerciseProfile:
     """
 
     name: str = "default"
-    movement_pattern: str = "squat"
+    movement_pattern: Optional[str] = "squat"
+    # The assessment, calibration and causal-diagnosis engine model this
+    # exercise. Squats only today; everything else skips those phases.
+    uses_diagnosis_engine: bool = False
+    # The BiLSTM rep counter was trained on this exercise's movement.
+    uses_bilstm_counter: bool = False
+    # Nova offers this exercise for camera coaching. Off until the profile's
+    # faults are validated on real lifts.
+    coaching_ready: bool = False
+    # How Nova names the exercise when listing what it coaches ("" = from name).
+    display_name: str = ""
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
         """Create the fault rules for this exercise.
@@ -71,13 +81,20 @@ class ExerciseProfile:
         """
         return config.hip_counter
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
-        """Return exercise-specific cue dictionary, or None to use cue_cache defaults."""
-        return None
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
+        """Fault type -> cue key for this exercise's corrections.
 
-    def get_fault_to_cue_map(self) -> Optional[Dict[str, str]]:
-        """Return fault-type to cue-key mapping, or None to use cue_cache defaults."""
-        return None
+        The spoken text for each key lives in the voice agent's CUE_TEXT_MAP.
+        A fault with no entry here is never cued.
+        """
+        return {}
+
+    def get_cue_dict(self) -> Dict[str, str]:
+        """Every cue key the voice agent should have ready for this exercise:
+        its corrections, the generic positives and the rep counts."""
+        from biomechanics.coaching.cue_cache import GENERIC_POSITIVE_CUE_KEYS, build_cue_dict
+
+        return build_cue_dict(*self.get_fault_to_cue_map().values(), *GENERIC_POSITIVE_CUE_KEYS)
 
     def get_depth_metric(self, angles: JointAngles) -> float:
         """Return the per-frame depth metric tracked across the rep.

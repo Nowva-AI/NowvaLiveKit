@@ -84,3 +84,27 @@ class TestWorkoutStartWeight:
         assert weight_in_lbs(LB_TARGET, None) == LB_TARGET
         assert weight_in_lbs(0.0, "kg") == 0.0
 
+def _relayed_to_pipeline_types() -> set[str]:
+    source = (SRC / "main.py").read_text()
+    whitelist = re.search(r"if msg_type not in \(([^)]*)\):", source)
+    assert whitelist is not None, "agent -> pipeline relay whitelist not found in main.py"
+    return set(re.findall(r'"([a-z_]+)"', whitelist.group(1)))
+
+
+def _coaching_sent_types() -> set[str]:
+    source = (SRC / "agent" / "services" / "coaching_service.py").read_text()
+    return set(re.findall(r'"type":\s*"([a-z_]+)"', source))
+
+
+def _pipeline_handled_types() -> set[str]:
+    source = (SRC / "biomechanics" / "pipeline_process.py").read_text()
+    return set(re.findall(r'get\("type"\) == "([a-z_]+)"', source))
+
+
+class TestPipelineRelay:
+    def test_every_agent_command_the_pipeline_handles_is_relayed(self):
+        missing = (_coaching_sent_types() & _pipeline_handled_types()) - _relayed_to_pipeline_types()
+        assert missing == set()
+
+    def test_exercise_switch_reaches_the_pipeline(self):
+        assert "set_exercise" in _relayed_to_pipeline_types()

@@ -74,6 +74,8 @@ class SessionTracker:
         self._bottom_frame_buffer: list[tuple[int, list]] = []
         self._athlete_params: dict | None = None
         self._baseline: dict | None = None
+        # The diagnosis engine models squats only; off for any other exercise.
+        self.diagnosis_enabled: bool = True
 
         # Assessment mode: per-rep rolling-window diagnosis
         self._assessment_mode: bool = False
@@ -96,6 +98,22 @@ class SessionTracker:
 
     def set_assessment_mode(self, enabled: bool) -> None:
         self._assessment_mode = enabled
+
+    @property
+    def _diagnosing(self) -> bool:
+        return self.diagnosis_enabled and self._athlete_params is not None
+
+    def on_exercise_changed(self, diagnosis_enabled: bool) -> None:
+        """A new exercise starts: nothing from the previous one may be replayed
+        or diagnosed, diagnosis runs only if the engine models the new one, and
+        set numbers restart at 1 as they do in the workout plan."""
+        if self.set_active:
+            # Skipped mid-set: the partial set belongs to the old exercise.
+            self._end_current_set()
+        self.diagnosis_enabled = diagnosis_enabled
+        self.reset_rep_buffers()
+        self._last_set_diagnosis = None
+        self.current_set_number = 0
 
     # ------------------------------------------------------------------
     # Rep handling
@@ -132,7 +150,7 @@ class SessionTracker:
         # Guarded: a degenerate bottom frame must not block the rep_complete send.
         summary: RepKinematicSummary | None = None
         trajectory: RepTrajectory | None = None
-        if self._athlete_params is not None and bottom_kpts is not None and bottom_angles is not None:
+        if self._diagnosing and bottom_kpts is not None and bottom_angles is not None:
             try:
                 frame = build_frame_from_live_pipeline(
                     bottom_kpts, bottom_angles, standing_kpts=standing_kpts,
@@ -255,7 +273,7 @@ class SessionTracker:
             )
             self.total_sets += 1
 
-        if self._rep_kinematic_buffer and self._athlete_params is not None:
+        if self._rep_kinematic_buffer and self._diagnosing:
             anthro = build_anthro_dict(self._athlete_params)
             rom = build_rom_dict(self._athlete_params, self._baseline or {})
             set_features = SetFeatures(
@@ -348,7 +366,7 @@ class SessionTracker:
         a corrected pose stack from the last rep's bottom keypoints.
         Returns None if insufficient data.
         """
-        if self._athlete_params is None or self._last_rep_bottom_kpts is None:
+        if not self._diagnosing or self._last_rep_bottom_kpts is None:
             return None
 
         anthro = build_anthro_dict(self._athlete_params)

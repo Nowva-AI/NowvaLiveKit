@@ -9,7 +9,7 @@ from typing import Literal
 from livekit.agents import function_tool, AgentTask
 
 from agent.agents.shared.base_agent import build_agent_instructions
-from agent.agents.shared.helpers import check_calibration, start_calibration_mode
+from agent.agents.shared.helpers import calibration_exercise, check_calibration, start_calibration_mode
 from agent.agents.teaching_agent import TeachingAgent
 from agent.agents.workout_agent import WorkoutAgent
 from agent.core.workout_session import WorkoutSession
@@ -203,6 +203,8 @@ class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
         })
 
         calibration_profile = await self.calibration_task
+        # Only squats are calibrated (and taught); anything else starts straight away.
+        needs_calibration = calibration_exercise([exercise_name]) is not None
 
         if calibration_profile:
             self.state.set("workout.calibration_profile", calibration_profile)
@@ -210,11 +212,14 @@ class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
             # session would make main.py launch the pipeline in assessment mode
             self.state.set("calibration.active", None)
             logger.info(f"[CALIBRATION] Found existing calibration for {exercise_name}")
-        else:
+        elif needs_calibration:
             start_calibration_mode(self.state, exercise_name, {
                 "type": "quick_exercise",
             })
             logger.info(f"[CALIBRATION] No calibration for {exercise_name} — entering calibration mode")
+        else:
+            self.state.set("calibration.active", None)
+            logger.info(f"[CALIBRATION] {exercise_name} needs no calibration")
 
         session = WorkoutSession.create_quick_session(
             user_id=self.user_id,
@@ -236,7 +241,7 @@ class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
 
         next_agent = (
             WorkoutAgent(state=self.state, userdata=self.userdata)
-            if calibration_profile
+            if calibration_profile or not needs_calibration
             else TeachingAgent(state=self.state, userdata=self.userdata)
         )
         # LiveKit starts a new agent with an empty context; hand this conversation over.

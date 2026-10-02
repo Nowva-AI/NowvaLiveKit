@@ -95,10 +95,10 @@ class SkullCrusherProfile(ExerciseProfile):
             return 70.0 <= angles.avg_shoulder_flexion <= 110.0
         return _skull_crusher_ready
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "lockout": "Extend fully at the top",
-            "range_of_motion": "Lower the bar deeper — full stretch",
-            "shoulder_stability": "Keep upper arms vertical — elbows still",
-            "bilateral_asymmetry": "Even out left and right",
+            "lockout": "triceps_lockout",
+            "range_of_motion": "triceps_deeper",
+            "shoulder_stability": "triceps_elbows",
+            "bilateral_asymmetry": "triceps_even",
         }

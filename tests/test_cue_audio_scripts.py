@@ -58,10 +58,18 @@ class TestDraftScenarios:
 class TestAgentSideCues:
     def test_every_playable_cue_gets_drafted(self):
         from agent.services.coaching_constants import CUE_TEXT_MAP
+        from biomechanics.profiles import PROFILE_REGISTRY
 
+        # Other exercises' cue keys are voiced once those exercises are coached.
+        other_exercise_cues = {
+            key
+            for profile_class in set(PROFILE_REGISTRY.values())
+            if profile_class.name != "squat"
+            for key in profile_class().get_cue_dict()
+        } - set(SQUAT_CUES)
         agent_side = [
             key for key in CUE_TEXT_MAP
-            if key not in SQUAT_CUES and not key.startswith("rep_")
+            if key not in SQUAT_CUES and not key.startswith("rep_") and key not in other_exercise_cues
         ]
         assert agent_side
         for cue_key in agent_side:

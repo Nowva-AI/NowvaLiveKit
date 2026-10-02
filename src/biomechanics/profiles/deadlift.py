@@ -89,10 +89,10 @@ class DeadliftProfile(ExerciseProfile):
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"knee": angles.knee_asymmetry, "hip": angles.hip_asymmetry}
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "range_of_motion": "Stand up fully — hips to lockout",
-            "back_rounding": "Brace core — keep spine neutral",
-            "bar_path": "Keep the bar close — straight path up",
-            "bilateral_asymmetry": "Even out left and right",
+            "range_of_motion": "deadlift_lockout",
+            "back_rounding": "deadlift_flat_back",
+            "bar_path": "deadlift_bar_close",
+            "bilateral_asymmetry": "deadlift_even",
         }

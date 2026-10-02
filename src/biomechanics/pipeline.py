@@ -39,7 +39,7 @@ from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator
 from biomechanics.kinematics.analytical_ik import AnalyticalIKSolver
 from biomechanics.kinematics.valgus import build_valgus_estimator
 from biomechanics.faults import RuleEngine
-from biomechanics.profiles import get_profile
+from biomechanics.profiles import ExerciseProfile, get_profile
 from biomechanics.triangulation.triangulator import recentre_at_hips
 from biomechanics.utils.types import (
     PipelineFrame,
@@ -299,30 +299,13 @@ class BiomechanicsPipeline:
                 path_history_len=bt.path_history_len,
             )
 
-        # Layer 4: Fault detection (rules provided by exercise profile)
-        profile_rules = self._profile.create_fault_rules(self.config)
-        self._rule_engine = RuleEngine(rules=profile_rules)
+        # The athlete's depth target, carried across exercise switches so a
+        # squat after another exercise keeps it (see set_exercise).
+        self._athlete_depth_target: float | None = None
 
-        # Layer 5: Rep counting (strategy determined by exercise profile)
-        self._rep_counter = self._profile.create_rep_counter(self.config)
-
-        # Layer 6 (optional): BiLSTM rep counting
-        self._bilstm = None
-        if self.config.bilstm.enabled:
-            from biomechanics.ml.inference import BiLSTMInference
-            from biomechanics.ml.bilstm_counter import BiLSTMCounterConfig
-
-            bilstm_counter_cfg = BiLSTMCounterConfig(
-                min_depth_class=self.config.bilstm.min_depth_class,
-                min_rep_frames=self.config.bilstm.min_rep_frames,
-                ema_alpha=self.config.bilstm.ema_alpha,
-                num_classes=self.config.bilstm.num_classes,
-            )
-            self._bilstm = BiLSTMInference(
-                model_path=self.config.bilstm.model_path,
-                device=self.config.bilstm.device,
-                config=bilstm_counter_cfg,
-            )
+        # Layers 4-6: fault rules, rep counting and the optional BiLSTM, all
+        # set by the exercise profile and rebuilt by set_exercise().
+        self._build_exercise_layers()
 
         # Track max knee flexion independently for BiLSTM rep windows.
         # The hip position counter's snapshot may be desync'd from the
@@ -338,17 +321,6 @@ class BiomechanicsPipeline:
         # Deepest hip position (femur lengths above parallel) over the
         # BiLSTM's rep window, for its depth-target gate.
         self._bilstm_min_depth_ratio: float = math.nan
-
-        # A profile with a depth rule (squat) counts reps against the
-        # athlete's own geometric depth target, which the learned depth
-        # classes cannot express. The BiLSTM then only segments movement —
-        # any descent opens a rep — and the target decides whether it counts.
-        self._depth_gated = any(isinstance(rule, DepthRule) for rule in self._rule_engine.rules)
-        if self._depth_gated:
-            # Until calibration measures the athlete, reps count at a lenient target.
-            self._rule_engine.set_depth_target(self.config.faults.depth.uncalibrated_target_ratio)
-            if self._bilstm is not None:
-                self._bilstm.set_min_depth_class(ASSESSMENT_MIN_DEPTH_CLASS)
 
         # Robust per-frame knee flexion: running median feeding every rep
         # extremum below. Per-set temporal state.
@@ -383,6 +355,48 @@ class BiomechanicsPipeline:
 
         # Store last raw frame for dashboard access
         self.last_frame: np.ndarray | None = None
+
+    def _build_exercise_layers(self) -> None:
+        # Layer 4: Fault detection (rules provided by exercise profile)
+        profile_rules = self._profile.create_fault_rules(self.config)
+        self._rule_engine = RuleEngine(rules=profile_rules)
+
+        # Layer 5: Rep counting (strategy determined by exercise profile)
+        self._rep_counter = self._profile.create_rep_counter(self.config)
+
+        # Layer 6 (optional): BiLSTM rep counting. Its model was trained on
+        # squats: on any other lift it would never see a rep, and it would
+        # override the profile's own counter.
+        self._bilstm = None
+        if self.config.bilstm.enabled and self._profile.uses_bilstm_counter:
+            from biomechanics.ml.inference import BiLSTMInference
+            from biomechanics.ml.bilstm_counter import BiLSTMCounterConfig
+
+            bilstm_counter_cfg = BiLSTMCounterConfig(
+                min_depth_class=self.config.bilstm.min_depth_class,
+                min_rep_frames=self.config.bilstm.min_rep_frames,
+                ema_alpha=self.config.bilstm.ema_alpha,
+                num_classes=self.config.bilstm.num_classes,
+            )
+            self._bilstm = BiLSTMInference(
+                model_path=self.config.bilstm.model_path,
+                device=self.config.bilstm.device,
+                config=bilstm_counter_cfg,
+            )
+
+        # A profile with a depth rule (squat) counts reps against the
+        # athlete's own geometric depth target, which the learned depth
+        # classes cannot express. The BiLSTM then only segments movement —
+        # any descent opens a rep — and the target decides whether it counts.
+        self._depth_gated = any(isinstance(rule, DepthRule) for rule in self._rule_engine.rules)
+        if self._depth_gated:
+            # Until calibration measures the athlete, reps count at a lenient target.
+            target = self._athlete_depth_target
+            if target is None:
+                target = self.config.faults.depth.uncalibrated_target_ratio
+            self._rule_engine.set_depth_target(target)
+            if self._bilstm is not None:
+                self._bilstm.set_min_depth_class(ASSESSMENT_MIN_DEPTH_CLASS)
 
     def _build_bar_detector(self):
         bt = self.config.barbell_tracking
@@ -555,6 +569,27 @@ class BiomechanicsPipeline:
     def set_depth_target(self, target_ratio: float | None) -> None:
         """The athlete's depth target (femur lengths above parallel); None counts every descent."""
         self._rule_engine.set_depth_target(target_ratio)
+
+    @property
+    def profile(self) -> ExerciseProfile:
+        return self._profile
+
+    def set_exercise(self, exercise_name: str) -> None:
+        """Switch to another exercise between sets.
+
+        Capture, pose, camera calibration, body measurements and the depth
+        target carry over; fault rules, rep counting and per-set state are
+        rebuilt for the new exercise's profile.
+        """
+        # The depth target belongs to the athlete, not the exercise. A stored
+        # calibration may have been installed while another exercise was active.
+        if self._rule_engine.depth_target_ratio is not None:
+            self._athlete_depth_target = self._rule_engine.depth_target_ratio
+        self._profile = get_profile(exercise_name)
+        self._build_exercise_layers()
+        self._apply_body_proportions()
+        self.reset_readiness_gate()
+        logger.info("[PIPELINE] Exercise switched to '%s' (%s)", exercise_name, self._profile.name)
 
     def consume_bottom_frame(self) -> tuple[list[list[float]] | None, dict | None]:
         """Return and reset the bottom-of-rep keypoints and angles.

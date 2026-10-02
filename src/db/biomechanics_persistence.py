@@ -318,6 +318,10 @@ class BiomechanicsRecorder:
 
     # -------------------- public API (any thread) --------------------
 
+    @property
+    def exercise(self) -> str:
+        return self._exercise
+
     def start(self) -> None:
         self._worker = threading.Thread(
             target=self._run, name="biomech-recorder", daemon=True

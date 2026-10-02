@@ -1183,6 +1183,78 @@ class TestSetEndedEarly:
         assert orch.resting is True
 
 
+NEXT_EXERCISE_TARGET_REPS = 8
+NEXT_EXERCISE_SETS = 3
+
+
+def _orchestrator_with_next_exercise(cbs: dict) -> CoachingOrchestrator:
+    """A one-set squat whose advance moves the plan on to the overhead press."""
+    orch: CoachingOrchestrator
+
+    async def _advance() -> int:
+        orch.set_next_exercise("Barbell Overhead Press", NEXT_EXERCISE_SETS)
+        return NEXT_EXERCISE_TARGET_REPS
+
+    orch = CoachingOrchestrator(**cbs, advance_set_fn=_advance)
+    orch.set_exercise("Barbell Back Squat", is_squat=True)
+    orch.reset_set(target_reps=1, total_sets=1)
+    return orch
+
+
+class TestNextExercise:
+    """A workout used to end after its first exercise: the last set's recap
+    always fired workout_complete."""
+
+    def test_last_set_recaps_the_exercise_then_starts_the_next(self):
+        orch = _orchestrator_with_next_exercise(_make_callbacks())
+
+        async def _run():
+            await orch.on_rep_complete(1, "parallel", True, [])
+            events = []
+            while not orch._queue.empty():
+                events.append(orch._queue.get_nowait())
+            return events
+
+        events = asyncio.run(_run())
+        assert [e.event_type for e in events] == ["llm_exercise_recap"]
+        recap = events[0].data
+        assert recap["exercise_name"] == "Barbell Back Squat"
+        assert recap["next_exercise"] == "Barbell Overhead Press"
+        assert recap["is_squat"] is True
+        # The press starts fresh: set 1 of its own sets, after rest
+        assert orch._set_number == 0
+        assert orch._total_sets == NEXT_EXERCISE_SETS
+        assert orch._set_target_reps == NEXT_EXERCISE_TARGET_REPS
+        assert orch._all_set_summaries == []
+        assert orch.resting
+        assert not orch.next_exercise_pending
+
+    def test_workout_completes_only_after_the_last_exercise(self):
+        cbs = _make_callbacks()
+        on_complete = AsyncMock()
+        orch = CoachingOrchestrator(**cbs, on_workout_complete_fn=on_complete)
+        base = {"all_set_summaries": [], "total_sets": 1, "diagnosis_set_number": None}
+
+        asyncio.run(orch._speak_llm_exercise_recap({**base, "next_exercise": "Barbell Overhead Press"}))
+        on_complete.assert_not_awaited()
+
+        asyncio.run(orch._speak_llm_exercise_recap({**base, "next_exercise": None}))
+        on_complete.assert_awaited_once()
+
+    def test_exercise_without_diagnosis_does_not_wait_for_one(self):
+        cbs = _make_callbacks()
+        orch = CoachingOrchestrator(**cbs)
+        orch.set_exercise("Barbell Overhead Press", is_squat=False)
+        orch._diagnosis_wait_s = 5.0
+        data = {
+            "set_number": 1, "diagnosis_set_number": 1, "total_reps": 5, "clean_reps": 5,
+            "fault_summary": {}, "per_rep": [],
+        }
+        started = time.monotonic()
+        asyncio.run(orch._speak_llm_set_recap(data))
+        assert time.monotonic() - started < 1.0
+
+
 # =============================================================================
 # TEST DIAGNOSIS CONTEXT FOR THE RECAP
 # =============================================================================

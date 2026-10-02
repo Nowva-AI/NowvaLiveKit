@@ -13,8 +13,14 @@ from livekit.agents.llm import function_tool
 
 from agent.agents.quickExerciseAgent import CollectExerciseInfoTask
 from agent.agents.prompts import get_main_menu_prompt
+from agent.agents.prompts.main_menu_prompt import coachable_exercises_text
 from agent.agents.shared.base_agent import BaseNovaAgent
-from agent.agents.shared.helpers import check_calibration, normalize_exercise_name, start_calibration_mode
+from agent.agents.shared.helpers import (
+    calibration_exercise,
+    check_calibration,
+    normalize_exercise_name,
+    start_calibration_mode,
+)
 from db.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -116,20 +122,31 @@ class MainMenuAgent(BaseNovaAgent):
             exercise_name = first_exercise.exercise_name if first_exercise else "Barbell Back Squat"
             self.state.set("workout.exercise_name", exercise_name)
 
-            # Check calibration for the first exercise
-            self.calibration_profile = await check_calibration(user_id, exercise_name)
+            # Only squats are calibrated; the workout's first squat decides.
+            cal_exercise = calibration_exercise([ex.exercise_name for ex in session.exercises])
+            self.calibration_profile = (
+                await check_calibration(user_id, cal_exercise) if cal_exercise else None
+            )
 
             if self.calibration_profile:
                 self.state.set("workout.calibration_profile", self.calibration_profile)
                 # Explicitly disarm calibration mode — a stale flag from a dead
                 # session would make main.py launch the pipeline in assessment mode
                 self.state.set("calibration.active", None)
-                logger.info(f"[CALIBRATION] Found existing calibration for {exercise_name}")
-            else:
+                logger.info(f"[CALIBRATION] Found existing calibration for {cal_exercise}")
+            elif cal_exercise == exercise_name:
                 start_calibration_mode(self.state, exercise_name, {
                     "type": "scheduled_workout",
                 })
                 logger.info(f"[CALIBRATION] No calibration found for {exercise_name} — entering calibration mode")
+            else:
+                # The assessment is a squat, so it can only run when the
+                # workout opens with one. A later squat runs uncalibrated.
+                self.state.set("calibration.active", None)
+                logger.info(
+                    f"[CALIBRATION] {exercise_name} needs no calibration "
+                    f"(calibrated exercise in this workout: {cal_exercise})"
+                )
 
             self.state.switch_mode("workout")
             self.state.set("workout.active", True)
@@ -192,6 +209,15 @@ class MainMenuAgent(BaseNovaAgent):
             f"[MAIN MENU] User wants quick exercise: {exercise_name} "
             f"(sets={sets}, reps={reps}, weight={weight}{weight_unit or ''}, rest={rest_seconds})"
         )
+        from biomechanics.profiles import find_profile_class
+
+        profile_class = find_profile_class(exercise_name)
+        if profile_class is None or not profile_class.coaching_ready:
+            logger.info(f"[MAIN MENU] {exercise_name} is not coached on camera yet")
+            return None, (
+                f"Tell the user you can't coach {exercise_name} on camera yet and offer "
+                f"what you can: {coachable_exercises_text()}. One or two sentences."
+            )
         self._publish_visual({"type": "menu", "action": "select", "choice": "quick_exercise"})
         return await self._carry_context_to(CollectExerciseInfoTask(
             exercise_name=exercise_name,

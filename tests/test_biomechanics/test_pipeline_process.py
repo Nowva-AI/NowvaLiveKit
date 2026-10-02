@@ -257,3 +257,27 @@ class TestCalibrationFileSelection:
         _write_rig_file(refined_calibration_path(factory_path), REFINED_TIMESTAMP, FACTORY_TIMESTAMP)
 
         assert select_calibration_file(factory_path) is None
+
+
+class TestSwitchExercise:
+    def test_switch_moves_pipeline_tracker_and_agent_to_the_new_exercise(self, monkeypatch, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.coaching.session_tracker import SessionTracker
+        from biomechanics.config import BiomechanicsConfig
+        from biomechanics.pipeline import BiomechanicsPipeline
+        from biomechanics.pipeline_process import _switch_exercise
+
+        monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
+        pipeline = BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
+        bridge = IPCBridge(mock_ipc_client)
+        session_tracker = SessionTracker(bridge)
+
+        _switch_exercise(pipeline, session_tracker, bridge, "Barbell Overhead Press")
+
+        assert pipeline.profile.name == "overhead_press"
+        assert not session_tracker.diagnosis_enabled
+        cache_cues = [m for m in mock_ipc_client.messages if m["type"] == "cache_cues"][-1]
+        assert cache_cues["exercise_name"] == "Barbell Overhead Press"
+        assert cache_cues["profile"] == "overhead_press"
+        assert "press_lockout" in cache_cues["cues"]
+        assert "knees_out" not in cache_cues["cues"]

@@ -9,7 +9,7 @@ ever flags drift, never moves a threshold.
 
 import logging
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.faults.fault_types import FaultRule
@@ -53,6 +53,20 @@ class SquatProfile(ExerciseProfile):
 
     name = "squat"
     movement_pattern = "squat"
+    uses_diagnosis_engine = True
+    uses_bilstm_counter = True
+    coaching_ready = True
+    display_name = "squats and squat variations (back, front, goblet, bodyweight)"
+
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
+        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
+
+        return dict(FAULT_TO_CUE_MAP)
+
+    def get_cue_dict(self) -> Dict[str, str]:
+        from biomechanics.coaching.cue_cache import SQUAT_CUES
+
+        return dict(SQUAT_CUES)
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
         """Squat fault rules, listed in cue priority order (ties on one frame go first-listed)."""

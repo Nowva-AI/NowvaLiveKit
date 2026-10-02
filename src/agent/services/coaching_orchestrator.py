@@ -317,6 +317,13 @@ class CoachingOrchestrator:
         # Accumulated per-set summaries for exercise recap
         self._all_set_summaries: List[Dict[str, Any]] = []
 
+        # The exercise being coached, and the one the workout moves to after
+        # this exercise's last set (set by CoachingService when the plan
+        # advances). Only the squat has depth, diagnosis and stance coaching.
+        self._exercise_name: str = ""
+        self._is_squat: bool = True
+        self._next_exercise: Optional[Dict[str, Any]] = None
+
         # Diagnosis data — populated by set_diagnosis_data(), consumed by recaps
         self._pending_diagnosis: Optional[Dict[str, Any]] = None
         self._pending_scoring: Optional[Dict[str, Any]] = None
@@ -478,6 +485,32 @@ class CoachingOrchestrator:
             self._set_rep_count = reps
         await self._complete_set("force_end")
         return True
+
+    def set_exercise(self, exercise_name: str, is_squat: bool) -> None:
+        """The exercise the pipeline is now analysing."""
+        self._exercise_name = exercise_name
+        self._is_squat = is_squat
+
+    def set_next_exercise(self, exercise_name: str, total_sets: Optional[int]) -> None:
+        """The workout plan moved on; the next exercise starts once this set is wrapped up."""
+        self._next_exercise = {"exercise_name": exercise_name, "total_sets": total_sets}
+
+    @property
+    def next_exercise_pending(self) -> bool:
+        return self._next_exercise is not None
+
+    def begin_next_exercise(self, target_reps: Optional[int]) -> None:
+        """Start the pending next exercise: set numbering and the recap history restart."""
+        next_exercise = self._next_exercise or {}
+        self._next_exercise = None
+        self._set_number = 0
+        self._all_set_summaries = []
+        self.reset_set(
+            target_reps=target_reps,
+            positive_cue_keys=self._positive_cue_keys,
+            total_sets=next_exercise.get("total_sets"),
+        )
+        logger.info(f"[ORCHESTRATOR] Next exercise: {next_exercise.get('exercise_name')}")
 
     # ------------------------------------------------------------------
     # Public state accessors
@@ -682,7 +715,9 @@ class CoachingOrchestrator:
         self._pending_diagnosis_set_number = None
         return diagnosis, scoring
 
-    async def _await_set_diagnosis(self, set_number: Optional[int]) -> tuple:
+    async def _await_set_diagnosis(
+        self, set_number: Optional[int], expects_diagnosis: Optional[bool] = None,
+    ) -> tuple:
         """This set's diagnosis, waiting up to _diagnosis_wait_s for it.
 
         The pipeline diagnoses a set only after rest_start reaches it, which
@@ -690,7 +725,10 @@ class CoachingOrchestrator:
         the previous set's diagnosis, or none. Without a set number to match
         (older callers), whatever is pending is used as before.
         """
-        if set_number is None:
+        if expects_diagnosis is None:
+            expects_diagnosis = self._is_squat
+        # Only the squat is diagnosed; nothing is coming for other exercises.
+        if set_number is None or not expects_diagnosis:
             return self._consume_diagnosis()
         deadline = time.monotonic() + self._diagnosis_wait_s
         while True:
@@ -1292,23 +1330,34 @@ class CoachingOrchestrator:
                 "rep_events": list(self._set_rep_events),
                 "start_time": self._set_start_wall_time,
             }
+            new_target_reps = None
             if self._advance_set:
                 try:
-                    await self._advance_set()
+                    new_target_reps = await self._advance_set()
                 except Exception as e:
                     logger.error(f"[ORCHESTRATOR] advance_set_fn failed: {e}")
             # Queue exercise recap instead of set recap
             await self._queue_exercise_recap(set_data)
+            if self._next_exercise is not None:
+                # Another exercise follows: rest, then start it
+                self.begin_next_exercise(new_target_reps)
+                self._resting = True
+                self._rest_started_at = time.monotonic()
         else:
             # Mid-workout set complete — normal flow
             await self.on_set_complete(set_data)
             if self._advance_set:
                 try:
                     new_target_reps = await self._advance_set()
-                    self.reset_set(
-                        target_reps=new_target_reps,
-                        positive_cue_keys=self._positive_cue_keys,
-                    )
+                    if self._next_exercise is not None:
+                        # The plan moved to another exercise before the
+                        # set count said so (unknown total, skipped sets)
+                        self.begin_next_exercise(new_target_reps)
+                    else:
+                        self.reset_set(
+                            target_reps=new_target_reps,
+                            positive_cue_keys=self._positive_cue_keys,
+                        )
                     # Enter rest mode — will be cleared by on_rest_complete()
                     self._resting = True
                     self._rest_started_at = time.monotonic()
@@ -1369,6 +1418,10 @@ class CoachingOrchestrator:
                 "all_set_summaries": list(self._all_set_summaries),
                 "total_sets": self._total_sets,
                 "diagnosis_set_number": final_set_data.get("diagnosis_set_number"),
+                # Snapshotted: the next exercise may start before this plays
+                "exercise_name": self._exercise_name,
+                "is_squat": self._is_squat,
+                "next_exercise": (self._next_exercise or {}).get("exercise_name"),
             },
         ))
         logger.info("[ORCHESTRATOR] Last set complete — queued exercise recap")
@@ -1404,6 +1457,8 @@ class CoachingOrchestrator:
 
         return {
             "set_number": self._set_number,
+            "exercise_name": self._exercise_name,
+            "is_squat": self._is_squat,
             # The pipeline's number for this set, matched against diagnosis_complete
             "diagnosis_set_number": (
                 self._pipeline_set_number
@@ -1873,10 +1928,12 @@ class CoachingOrchestrator:
 
         next_set = set_num + 1
         total_sets_str = f" of {self._total_sets}" if self._total_sets else ""
+        is_squat = data.get("is_squat", True)
+        exercise_prefix = "" if is_squat or not data.get("exercise_name") else f"{data['exercise_name']} "
 
         # Build structured context for LLM
         parts = [
-            f"Set {set_num}{total_sets_str} just finished: {clean_reps} of {total_reps} reps clean.",
+            f"{exercise_prefix}Set {set_num}{total_sets_str} just finished: {clean_reps} of {total_reps} reps clean.",
             f"Next up is set {next_set}{total_sets_str}.",
         ]
         target_reps = data.get("target_reps")
@@ -1885,15 +1942,15 @@ class CoachingOrchestrator:
                 f"They stopped at {total_reps} of {target_reps} target reps — treat that as "
                 "information about the load or the day, never as failure."
             )
-        if shallow_reps:
+        if shallow_reps and is_squat:
             attempted = total_reps + shallow_reps
             parts.append(
                 f"{shallow_reps} of {attempted} attempts were too shallow to count "
-                f"(never reached parallel) — those did not go toward the rep total."
+                f"(never reached their depth target) — those did not go toward the rep total."
             )
         if data.get("load"):
             parts.append(f"Load: {data['load']}.")
-        if avg_depth:
+        if avg_depth and is_squat:
             parts.append(f"Depth was {_depth_consistency_words(depth_consistency)}.")
         if effort == "near_limit":
             parts.append("Rep speed: the last reps slowed down a lot — close to their limit.")
@@ -2141,7 +2198,9 @@ class CoachingOrchestrator:
         """Generate and speak comprehensive exercise recap after all sets."""
         set_coaching_moment("recap")
         # The final set's diagnosis follows workout_complete — wait for it
-        diagnosis, scoring = await self._await_set_diagnosis(data.get("diagnosis_set_number"))
+        diagnosis, scoring = await self._await_set_diagnosis(
+            data.get("diagnosis_set_number"), data.get("is_squat"),
+        )
 
         all_summaries = data.get("all_set_summaries", [])
         total_sets = data.get("total_sets", len(all_summaries))
@@ -2179,12 +2238,17 @@ class CoachingOrchestrator:
 
         total_shallow = sum(s.get("shallow_reps", 0) for s in all_summaries)
         last_set = self.last_set_data or {}
+        exercise_name = data.get("exercise_name") or "Exercise"
+        next_exercise = data.get("next_exercise")
+        is_squat = data.get("is_squat", True)
 
         parts = [
-            f"Exercise complete! {total_sets} sets finished.",
+            f"{exercise_name} complete! {total_sets} sets finished.",
             f"Total: {total_clean} of {total_reps} reps clean.",
         ]
-        if total_shallow:
+        if next_exercise:
+            parts.append(f"The workout continues: {next_exercise} is next, after the rest.")
+        if total_shallow and is_squat:
             parts.append(
                 f"{total_shallow} attempts across the session were too shallow to count."
             )
@@ -2270,6 +2334,11 @@ class CoachingOrchestrator:
         context_str = " ".join(parts)
 
         humor_line = self._humor_line(total_reps, total_clean, total_shallow)
+        closing = (
+            f"End by telling them {next_exercise} is up next after the rest — the workout isn't over."
+            if next_exercise
+            else "End warm and steady — they just finished."
+        )
         speech_rules = (
             "Plain qualitative words: whole numbers only where they help (a rep number, a score "
             "change), never decimals, degrees or seconds. "
@@ -2284,7 +2353,7 @@ class CoachingOrchestrator:
                 f"thing that went well. "
                 f"{speech_rules}"
                 f"{humor_line} "
-                f"End warm and steady — they just finished."
+                f"{closing}"
             )
         else:
             instructions = (
@@ -2294,7 +2363,7 @@ class CoachingOrchestrator:
                 f"the sets went, one takeaway for next session, and one specific thing that went well. "
                 f"{speech_rules}"
                 f"{humor_line} "
-                f"End warm and steady — they just finished."
+                f"{closing}"
             )
 
         exercise_note = f"Exercise done: {total_sets} sets, {total_clean} of {total_reps} reps clean"
@@ -2305,8 +2374,9 @@ class CoachingOrchestrator:
         try:
             handle = await self._generate_llm(instructions, last_set_note=exercise_note + ".")
             logger.info("[ORCHESTRATOR] ✓ LLM exercise recap spoken")
-            # Only fire workout_complete AFTER speech has played out
-            if self._on_workout_complete:
+            # Only fire workout_complete AFTER speech has played out, and only
+            # after the workout's last exercise
+            if self._on_workout_complete and not data.get("next_exercise"):
                 try:
                     await self._on_workout_complete()
                 except Exception as e:

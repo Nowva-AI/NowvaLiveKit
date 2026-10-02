@@ -125,6 +125,23 @@ class TestCheckCalibration:
         assert result is None
         assert "pattern" not in db_spy
 
+    def test_program_library_squat_name_reaches_db_lookup(self, db_spy):
+        asyncio.run(check_calibration("user-1", "Dumbbell Goblet Squat"))
+        assert db_spy["pattern"] == "squat"
+
+    def test_uncalibrated_exercise_returns_none_without_query(self, db_spy):
+        assert asyncio.run(check_calibration("user-1", "Barbell Romanian Deadlift")) is None
+        assert "pattern" not in db_spy
+
+
+class TestCalibrationExercise:
+    def test_first_squat_in_the_workout_is_calibrated(self):
+        names = ["Barbell Overhead Press", "Barbell Back Squat", "Barbell Front Squat"]
+        assert helpers.calibration_exercise(names) == "Barbell Back Squat"
+
+    def test_workout_without_a_squat_has_no_calibration(self):
+        assert helpers.calibration_exercise(["Barbell Overhead Press", "Barbell Bench Press"]) is None
+
 
 class TestBuildProgramGenerationPayload:
     def test_website_payload_matches_collected_params(self):

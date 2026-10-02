@@ -82,10 +82,10 @@ class BulgarianSplitSquatProfile(ExerciseProfile):
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"knee": angles.knee_asymmetry}
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "range_of_motion": "Go deeper — rear knee toward floor",
-            "knee_valgus": "Push front knee out over toes",
-            "trunk_stability": "Keep torso stable — no rocking",
-            "bilateral_asymmetry": "Balance both sides evenly",
+            "range_of_motion": "lunge_deeper",
+            "knee_valgus": "lunge_knee_out",
+            "trunk_stability": "lunge_steady",
+            "bilateral_asymmetry": "lunge_even",
         }
