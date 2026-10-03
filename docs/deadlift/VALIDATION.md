@@ -108,11 +108,15 @@ Exclude a set, and report how many were excluded, only when:
   - D1 or D3: the demo waits for a fix and a new round.
 - **D2 specifically:**
   - D2's size comes from the setup model, which only this data validates
-    (`docs/deadlift/KNOWLEDGE.md` §5).
+    (`docs/deadlift/KNOWLEDGE.md` §5). Whether D2 fires at all comes from the model-free rise
+    ratio, rep and set.
   - Report the model's predicted trunk change against the instrument-measured change on
     labelled-good reps.
-  - If the model's error makes good reps read ≥ 5° (the mild threshold), D2 is re-defined on
-    the raw trunk change and the rise ratio before its result is reported.
+  - Report the rise ratio's distribution on labelled held-back-angle reps and on labelled
+    hips-first reps. The 1.05 / 1.15 / 1.30 gates are re-set from these before the D2 result
+    is reported.
+  - If the model's error makes good reps read ≥ 5° (the mild threshold), D2 is sized on the
+    raw trunk change instead.
 
 ## 8. Freeze record (filled at the freeze)
 

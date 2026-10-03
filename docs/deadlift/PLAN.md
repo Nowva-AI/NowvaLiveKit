@@ -1,6 +1,6 @@
 # Conventional deadlift — plan v15 (built on the multi-exercise platform)
 
-Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 15: v14 plus the changes an independent review of the implementation forced (§2.3 gates built for the platform's keypoint noise, a pull counted from any phase, events fitted rather than thresholded; §2.5 hip-shift and proxy-tilt statistics; §2.6 D2's cue tier needs the rise ratio; D10 off the proxy). Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
+Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 15: v14 plus the changes two independent reviews of the implementation forced (§2.3 gates built for the platform's keypoint noise, a pull counted from any phase, events fitted rather than thresholded, a noise-proof touch-and-go, over-extended lockouts counted; §2.5 hip-shift and proxy-tilt statistics, D2 from several frames; §2.6 D2 emitted only when the hips decisively out-rose the shoulders, D8b severe-only and D10 off on the proxy). Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
 
 ## 0. Decisions
 
@@ -96,11 +96,11 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 | SETUP → STANCE / APPROACH | Stands back up without lifting |
 | SETUP → PULL | Bar > rest + 3 cm and vertical velocity > 0.10 m/s |
 | APPROACH / STANCE → PULL | **Grip and rip** (v15): the same liftoff with the hands on the bar; the setup is judged on the last 0.2 s before liftoff |
-| PULL → TOP | Bar ≥ expected top height − 8 cm, \|v\| < 0.05 m/s for ≥ 3 frames, trunk within 35° of vertical |
+| PULL → TOP | Bar ≥ expected top height − 8 cm, \|v\| < 0.05 m/s for ≥ 3 frames, trunk within 35° of vertical; or (v15) the trunk ≥ 10° behind vertical, an over-extended lockout at any bar height |
 | PULL → FLOOR without TOP | **Failed rep** (bar rose ≥ 10 cm but never reached top − 8 cm): an event, not counted |
 | TOP → LOWER | v < −0.10 m/s |
 | LOWER → FLOOR | **Dead stop**: bar ≤ rest + 2 cm and \|v\| < 0.02 m/s for ≥ 3 frames, or bar within rest + 2 cm for ≥ 0.3 s → **rep counted and judged** |
-| LOWER → PULL | **Touch-and-go**: low point within 5 cm of rest, then a rise of > 3 cm above that low point, with upward velocity sustained ≥ 100 ms and hands on the bar → **the finishing rep is counted and judged now**. The low point is the next rep's liftoff, and `rep_started` is set (§3.3 explains how the pipeline's touch-and-go block, `pipeline.py:1115-1121`, routes to the analyser) |
+| LOWER → PULL | **Touch-and-go**: low point within 5 cm of rest, then a rise of > 3 cm plus the noise band above that low point, ≥ 100 ms after it, still rising (slope over the last 100 ms > 0.10 m/s; v15: not "rising at every step", which one noisy frame defeated) and hands on the bar → **the finishing rep is counted and judged now**. The low point is the next rep's liftoff, and `rep_started` is set (§3.3 explains how the pipeline's touch-and-go block, `pipeline.py:1115-1121`, routes to the analyser) |
 | FLOOR → SETUP | Dead stop with hands still on the bar ≥ 0.3 s → a new setup is judged |
 | FLOOR → PULL | Quick re-pull: the setup is judged on the last 0.2 s before liftoff, or marked "not measured" |
 | FLOOR → STANCE / APPROACH | Stands up or steps back (the set may end) |
@@ -166,12 +166,12 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 | D1 ★α | `deadlift_bar_position` | Bar not over midfoot at setup | `bar_midfoot_setup_cm` (the stance value drives the closed loop) | 3 / 5 / 8 cm | mild | `bar_3d` (new class) | `deadlift_bar_midfoot` | 20 |
 | D4 ★ | `deadlift_setup_hips` | Hips too low / too high at setup | `setup_hip_height_cm` vs band | outside band by 4 / 7 / 10 cm | §2.7 (severe until measured) | `side_view` | `deadlift_hips_up` / `deadlift_hips_down` | 22 |
 | D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | `shoulder_vs_bar_cm` | 2 / 4 / 6 cm | moderate | `side_view` | `deadlift_shoulders_over` | 21 |
-| D2 ★ | `deadlift_hips_shoot` | Hips rise before the chest off the floor | `trunk_change_liftoff_knee_deg`; cross-check ratio ≥ 1.0 | 5 / 8 / 11° (v14; was 10 / 15 / 20°, which straight legs make unreachable: the excess caps at ~8–12° for typical bodies) | moderate when the rise ratio confirms (> 1.0), else severe (v15: the size is the unvalidated model's; a held back angle reads 8–10°) | `side_view` (≥ 30 fps) | `deadlift_chest_with_hips` | 23 |
+| D2 ★ | `deadlift_hips_shoot` | Hips rise before the chest off the floor | `trunk_change_liftoff_knee_deg` sizes it; emitted only when `hip_shoulder_rise_ratio` > 1.05 and the set's last reps > 1.15 (or this rep > 1.30) (v15: the size is the unvalidated model's, a held back angle reads 6–12°, and one rep's ratio scatters ~0.1 at platform noise) | 5 / 8 / 11° (v14; was 10 / 15 / 20°, which straight legs make unreachable: the excess caps at ~8–12° for typical bodies) | moderate | `side_view` (≥ 30 fps) | `deadlift_chest_with_hips` | 23 |
 | D3 ★α | `deadlift_bar_drift` | Bar drifts away from the legs | `bar_drift_cm` | 3 / 5 / 8 cm | moderate | `bar_3d` | `deadlift_bar_close` | 24 |
 | D6 | `deadlift_lockout` | Incomplete lockout | hip or knee extension deficit | 8 / 12 / 20° | moderate | `side_view` | `deadlift_lockout` | 25 |
 | D5 | `deadlift_lean_back` | Over-extension at the top | `lean_back_deg` | 8 / 12 / 18° | moderate | `side_view` | `deadlift_finish_neutral` | 26 |
 | D8 | `deadlift_hip_shift` | Hips shift sideways (side = direction) | `hip_shift_ratio` | 0.10 / 0.15 / 0.22 | moderate | `lateral_travel` | `deadlift_even_feet` (+ `_left` / `_right`) | 27 |
-| D8b | `deadlift_bar_tilt` | Bar tilts | `bar_tilt_cm` | 3 / 5 / 7 cm | moderate | `bar_3d` | `deadlift_level_bar` | 28 |
+| D8b | `deadlift_bar_tilt` | Bar tilts | `bar_tilt_cm` | 3 / 5 / 7 cm | moderate (v15: severe on the wrist proxy) | `bar_3d` | `deadlift_level_bar` | 28 |
 | D9 | `deadlift_bent_arms` | Arms bend during the pull | `elbow_flexion_deg` | 15 / 25 / 35° | mild | `side_view` | `deadlift_long_arms` | 29 |
 | D10 | `deadlift_velocity_loss` | Bar speed dropped vs the set's two fastest reps | `concentric_velocity_ms` | 20 / 30 / 40 % (Sánchez-Medina 2011) | **recap only** (never a mid-set cue: fatigue is load advice, not a technique correction) | `bar_3d` | — (feeds the diagnosis' load cause) | 30 |
 

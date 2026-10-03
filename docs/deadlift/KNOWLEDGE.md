@@ -35,6 +35,9 @@ lifts (`docs/deadlift/VALIDATION.md`).
     offset. The offset is 7.5 cm by default, and is learned per lifter (clipped to 4–12 cm)
     from any set where the bar was tracked.
   - A set never mixes the two sources.
+  - Without a bar axis, the lifter's left-right is locked per set from up to 2 s of settled
+    stance and setup frames (hips, ankles and wrists together). Rebuilt from the noisy hip line
+    every frame, it turned forward travel into sideways hip shift.
 
 ## 2. Phases (`deadlift/analyzer.py`)
 
@@ -76,12 +79,17 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   still (under 0.05 m/s for 3 frames) with the trunk within 35° of vertical.
   - The expected top height is the standing mid-wrist height minus the wrist-to-bar offset.
     Without a standing reference, it is the median top of the set's earlier reps.
-  - The 8 cm margin lets soft and over-extended lockouts count; D6 and D5 then judge them.
+  - The 8 cm margin lets soft lockouts count; D6 then judges them. A trunk 10° or more
+    behind vertical is an over-extended lockout and counts at any bar height (D5 judges it).
+    A lockout short by 30° or more is a failed rep.
 - **Dead stop:** within 2 cm of the rest, and either still for 3 frames or there for 0.3 s.
 - **Touch-and-go:**
   - The low point is within 5 cm of the rest.
-  - The bar then rises more than 3 cm above that low point, rising the whole way, for at least
-    0.1 s, with the hands on the bar.
+  - The bar then rises more than 3 cm plus the noise band above that low point, for at least
+    0.1 s, with the hands on the bar, and is still rising: its slope over the last 0.1 s (or
+    the noise-widened velocity window) is over 0.10 m/s.
+  - Not "rising at every step since the low point": one noisy frame would defeat that, and
+    with no dead stop in between every rep after it would be lost.
   - The rep ending at the low point is counted, and the low point is the next rep's liftoff.
   - A bumper bounce (≤ 2–3 cm, hands off) is not a touch-and-go.
 - **Failed rep:** the bar rose at least 10 cm and came back to the floor without a top. It is
@@ -108,24 +116,27 @@ NaN means "not measured", never 0.
 - 0.3 s before liftoff after a visible setup.
 - 0.2 s for a quick re-pull or a grip-and-rip.
 - None for a touch-and-go.
-- Only frames with the legs measured count, and setup bar values come only from bar states
-  measured on that frame (not carried, not predicted).
+- Hip height, trunk and the setup model need frames with the legs measured. Bar over midfoot,
+  shoulders vs bar and the grip offset need only the bar (measured on that frame, not carried,
+  not predicted), the shoulders and the midfoot locked at the stance, so feet hidden by the
+  plates at setup still leave D1 and D7 judged.
 
 | Feature | Frame and sign | Window | Rule |
 |---|---|---|---|
-| `bar_midfoot_stance_cm` | bar centre ahead of the live midfoot, cm (> 0 = bar too far out) | last 0.3 s of STANCE | context |
+| `bar_midfoot_stance_cm` | bar centre ahead of the live midfoot, cm (> 0 = bar too far out) | last 0.5 s of settled STANCE | context |
 | `bar_midfoot_setup_cm` | bar centre ahead of the locked midfoot, cm | setup window | D1 |
 | `shoulder_vs_bar_cm` | shoulder midpoint ahead of the bar centre, cm (< 0 = behind) | setup window | D7 |
 | `setup_hip_height_cm` | hip midpoint above the ankle midpoint, cm | setup window | D4 |
 | `setup_hip_band_low/high_cm` | the setup model's band (§5) | setup window | D4 |
 | `setup_trunk_deg` | trunk angle, deg forward of vertical | setup window | context |
-| `trunk_change_liftoff_knee_deg` | (trunk at knee pass − trunk at liftoff) − the model's predicted change; the raw change when there is no model | liftoff → knee pass | D2 |
-| `hip_shoulder_rise_ratio` | hip rise ÷ shoulder rise (> 1 = the hips out-rose the chest) | liftoff → knee pass | D2 cross-check |
+| `trunk_change_liftoff_knee_deg` | (trunk at knee pass − trunk at liftoff) − the model's predicted change; the raw change when there is no model. Liftoff: median over 0.2 s before it; knee pass: a line fitted through the 0.2 s leading to it | liftoff → knee pass | D2 size |
+| `hip_shoulder_rise_ratio` | hip rise ÷ shoulder rise over the same window, same estimates (> 1 = the hips out-rose the chest) | liftoff → knee pass | D2 gate |
+| `set_rise_ratio` | median `hip_shoulder_rise_ratio` over the set's last 3 reps, this one included; NaN until two | set | D2 gate |
 | `bar_drift_cm` | p90 of the bar centre's forward travel from its liftoff position, cm (away from the legs only) | pull | D3 |
 | `hip_extension_deficit_deg`, `knee_extension_deficit_deg` | median flexion at the top minus standing flexion, deg (> 0 = short of standing) | top frames | D6 |
 | `lean_back_deg` | standing trunk minus median trunk at the top, deg (> 0 = behind standing) | top frames | D5 |
 | `hip_shift_ratio` | hip midpoint's sideways position vs the locked midfoot ÷ ankle separation, as the median over the second half of the pull minus the median over the first fifth (> 0 = toward the right foot) | pull | D8 |
-| `bar_tilt_cm` | p90 of the left hub's height above the right hub, on a 5-frame running median, cm. On the proxy, the hands' height difference is carried out to the 1.70 m hub span | pull | D8b |
+| `bar_tilt_cm` | p90 of the left hub's height above the right hub, on a 5-frame running median, cm. On the proxy, the hands' height difference carried out to the 1.70 m hub span, as the median from mid-pull through the top hold | pull | D8b |
 | `elbow_flexion_deg` | p90 of the sagittal elbow bend minus standing, deg | pull | D9 |
 | `concentric_velocity_mps` | bar rise ÷ (top − liftoff), m/s | pull | D10 |
 | `velocity_loss_pct` | loss against the mean of the set's two fastest reps, % | set | D10 |
@@ -148,12 +159,12 @@ at or above its minimum tier (`details.min_tier`).
 | D1 | Bar not over midfoot | 3 / 5 / 8 cm | mild | The coaching standard is bar over midfoot. 3 cm is about a third of the midfoot zone, and the static measurement should be ≤ 1 cm (§2.9) |
 | D7 | Shoulders behind the bar | 2 / 4 / 6 cm | moderate | The shoulders belong slightly ahead (0–6 cm). Behind the bar, the lats cannot keep it close |
 | D4 | Hips outside the model band | 4 / 7 / 10 cm | severe | The band is the model's (§5). Severe-only until the model's error, plus the hip-keypoint bias in deep flexion, is measured |
-| D2 | Hips shoot | 5 / 8 / 11° | moderate when the rise ratio is > 1, else severe | See §5 |
+| D2 | Hips shoot | 5 / 8 / 11° | moderate; emitted only when the hips decisively led (rise ratio > 1.05, and the set's > 1.15 or this rep's > 1.30) | See §5 |
 | D3 | Bar drift | 3 / 5 / 8 cm | moderate | 3 cm forward is where coaches see the bar leave the legs. The moving bar's error is 1–2 cm |
 | D6 | Incomplete lockout | 8 / 12 / 20° | moderate | Against the lifter's own standing angles, so it is not anatomy |
 | D5 | Lean-back | 8 / 12 / 18° | moderate | The same reference. Gravity-sensitive: moderate on the body vertical |
 | D8 | Hip shift | 0.10 / 0.15 / 0.22 of ankle separation | moderate | 0.10 is ~3 cm at a hip-width stance |
-| D8b | Bar tilt | 3 / 5 / 7 cm hub to hub | moderate | ×1.5 on the wrist proxy |
+| D8b | Bar tilt | 3 / 5 / 7 cm hub to hub | moderate (severe on the wrist proxy) | ×1.5 on the wrist proxy, where the hands' noise is carried ~3× out to the hubs |
 | D9 | Bent arms | 15 / 25 / 35° | mild | Elbows should stay long. Measured against standing |
 | D10 | Velocity loss | 20 / 30 / 40 % | recap | Sánchez-Medina 2011. Fatigue is load advice, never a mid-set cue. Not emitted on the wrist proxy |
 
@@ -185,17 +196,21 @@ lifter, clipped to 2–10 cm).
   - The model's solves meet their own constraints when rebuilt with independent forward
     kinematics: the shins sit at the contact distance and knee flexion is in range.
   - On poses scripted by trunk angle rather than built by the model, the analyser measures
-    the trunk change within 2°, the rise ratio within 0.03 and the setup hip height within
+    the trunk change within 2°, the rise ratio within 0.05 and the setup hip height within
     1 cm, on four body types.
 - **Not checked:** that real good lifters move the way the model says. That needs J6 data
   (§8.4 instruments).
 - **Consequences:**
   - D2's and D4's sizes, and therefore their thresholds, are model-derived.
-  - A lifter who holds their back angle from the floor to the knees reads 8–10° against the
-    model. For average proportions this needs the knees nearly locked by the knee pass, which
-    is a stiff-legged first pull. For a long torso it is reachable with bent knees.
-  - So, until J6, D2 is cued below severe only when the rep's own model-free evidence agrees:
-    the hips rose faster than the shoulders (rise ratio > 1).
+  - A lifter who holds their back angle from the floor to the knees reads 6–12° against the
+    model. Hips and chest then rise together (rise ratio ~1.0), which coaches teach, so it
+    must never be cued "Chest and hips together".
+  - So the model only sizes D2; whether there is a D2 at all is the rep's model-free
+    evidence: the hips must have out-risen the shoulders, decisively. One rep's ratio scatters
+    by ~0.1 at 2 cm of Kalman-correlated keypoint noise, so the rep must read > 1.05 and the
+    set's last reps > 1.15 (or the rep alone > 1.30). A held back angle is then cued on 0 of
+    90 reps at 2 cm i.i.d. noise and 4 of 90 at 2 cm correlated noise (simulator); a
+    hips-first pull (ratio ~1.24) from the set's second rep on, on 60–87 % of reps.
 
 ## 6. Cue text (`src/assets/cue_text/cues.json`, `coaching_constants.py`)
 
@@ -217,8 +232,9 @@ External focus, ≤ 4 words, nothing medical, no "flat back" claim.
 
 **When cues are spoken:**
 - Only after a dead stop, or while standing at the bar. Never between touch-and-go reps.
-- The closed-loop foot guidance runs in STANCE on the tracked bar only. The wrist proxy says
-  nothing about where the bar sits on the floor.
+- The closed-loop foot guidance runs in STANCE on the tracked bar only, while the lifter
+  stands settled at the bar before the set's first rep, from a 0.5 s median of the offset.
+  The wrist proxy says nothing about where the bar sits on the floor.
 
 ## 7. Known limits (measured on the simulator)
 
@@ -227,7 +243,8 @@ Outside it:
 - **Grip-and-rip on the wrist proxy:** the first rep is lost. With no tracked bar there is no
   rest height until the wrists hold still at the bottom, so the lifter needs a short pause
   (≈ 0.2 s) there.
-- **Rising from a hinge on the proxy:** someone standing up out of a hinge with the hands
-  below the knees (loading plates) looks like a pull to the wrist proxy. The tracked bar does
-  not move, so it does not.
+- **Standing up off the bar on the proxy counts as a rep.** To the wrists, standing up from
+  the setup without lifting the bar (a re-setup), or out of a hinge with the hands below the
+  knees (loading plates), is a pull: 5 reps counted for 3 with two re-setups. The tracked bar
+  does not move, so it counts 3.
 - **Back rounding:** proxies only (PLAN.md §2.10).
