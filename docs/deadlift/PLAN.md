@@ -98,6 +98,7 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 | FLOOR → SETUP | Dead stop with hands still on the bar ≥ 0.3 s → a new setup is judged |
 | FLOOR → PULL | Quick re-pull: the setup is judged on the last 0.2 s before liftoff, or marked "not measured" |
 | FLOOR → STANCE / APPROACH | Stands up or steps back (the set may end) |
+| STANCE → APPROACH | Walks away (bar more than 40 cm ahead of the midfoot) or turns away (foot forward axis more than 60° off the bar direction) for ≥ 0.5 s |
 
 - **Liftoff is back-dated** to motion onset: the last frame in a 0.5 s buffer where the bar was within 0.5 cm of rest and moving < 0.02 m/s.
 - **Expected top height** = standing mid-wrist height (arms hanging, measured in `APPROACH`) minus the learned wrist → bar offset.
@@ -164,7 +165,7 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 | D8 | `deadlift_hip_shift` | Hips shift sideways (side = direction) | `hip_shift_ratio` | 0.10 / 0.15 / 0.22 | moderate | `lateral_travel` | `deadlift_even_feet` (+ `_left` / `_right`) | 27 |
 | D8b | `deadlift_bar_tilt` | Bar tilts | `bar_tilt_cm` | 3 / 5 / 7 cm | moderate | `bar_3d` | `deadlift_level_bar` | 28 |
 | D9 | `deadlift_bent_arms` | Arms bend during the pull | `elbow_flexion_deg` | 15 / 25 / 35° | mild | `side_view` | `deadlift_long_arms` | 29 |
-| D10 | `deadlift_velocity_loss` | Bar speed dropped vs the set's two fastest reps | `concentric_velocity_ms` | 20 / 30 / 40 % (Sánchez-Medina 2011) | moderate | `bar_3d` | `deadlift_drive` | 30 |
+| D10 | `deadlift_velocity_loss` | Bar speed dropped vs the set's two fastest reps | `concentric_velocity_ms` | 20 / 30 / 40 % (Sánchez-Medina 2011) | **recap only** (never a mid-set cue: fatigue is load advice, not a technique correction) | `bar_3d` | — (feeds the diagnosis' load cause) | 30 |
 
 ★ = hero fault; α = in Demo α.
 
@@ -274,7 +275,7 @@ Rewrite `src/biomechanics/profiles/deadlift.py` as `DeadliftProfile`. It is **st
 | `uses_diagnosis_engine` | `False` | Squat assessment, calibration and `HypothesisEngine` stay squat-only (`pipeline_process.py:303`, `:1014`; `calibration.py:19-28`) |
 | `uses_bilstm_counter` | `False` | |
 | `coaching_ready` | computed at import: `"deadlift" in NOWVA_DEV_COACHING_READY.split(",")` (False by default) until J8, then `True` | Set as the class attribute itself, so every reader sees the same value: `main_menu_agent.py:215` reads the attribute directly, and `coaching_ready_profiles()` (`registry.py:76-82`) does too. The env var must be set for the agent process; the pipeline subprocess inherits it. Tests patch the class attribute (`monkeypatch.setattr(DeadliftProfile, "coaching_ready", True)`), not the env |
-| `gate_until_ready` | `True` (new attribute, default `False`) | `get_profile` returns `UntrackedProfile` for such a profile while it is not coaching-ready. This closes the scheduled-workout leak (O4) without changing other placeholder profiles |
+| `gate_until_ready` | `True` (new attribute, default `False`) | While the profile is not coaching-ready, `get_profile` returns `GatedDeadliftProfile(UntrackedProfile)`: no reps and no faults, but the deadlift's safety flags (`allows_camera_refine=False`, `feeds_body_calibration=False`). This closes the scheduled-workout leak (O4), and keeps program deadlift frames out of squat refines and body measurements before J8, without changing other placeholder profiles |
 | `display_name` | `"conventional deadlift"` | |
 | `create_fault_rules` | D1–D10 rules, **no `DepthRule`** | A `DepthRule` would turn on depth-gated counting (`pipeline.py:391-399`) |
 | `create_rep_counter` | `DeadliftRepCounter` (§2.3) | |
@@ -284,7 +285,7 @@ Rewrite `src/biomechanics/profiles/deadlift.py` as `DeadliftProfile`. It is **st
 ### 3.2 Registry
 
 Matching is whole-word, longest key wins (`registry.py:40-55`).
-- A new `UntrackedVariantProfile(UntrackedProfile)` is registered for `sumo_deadlift`, `trap_bar_deadlift`, `hex_bar_deadlift`, `deficit_deadlift`, `snatch_grip_deadlift`, `single_leg_deadlift` and `rack_pull`.
+- A new `UntrackedVariantProfile(UntrackedProfile)` is registered for `sumo_deadlift`, `trap_bar_deadlift`, `hex_bar_deadlift`, `deficit_deadlift`, `snatch_grip_deadlift`, `single_leg_deadlift` and `rack_pull`. It carries the deadlift's safety flags (`allows_camera_refine=False`, `feeds_body_calibration=False`).
 - `romanian_deadlift`, `rdl` and `stiff_leg_deadlift` stay on the RDL profile.
 - **Existing pins changed on purpose**, in the J3 PR with Ambaka's review:
   - `test_profile_registry.py:30` (`"Barbell Sumo Deadlift" → "deadlift"`) becomes `→ untracked` permanently;
@@ -359,7 +360,7 @@ Squat sections are unchanged.
 
 **Camera calibration.** Shared rig state stays squat-safe.
 - `allows_camera_refine=False` gates **every** refine started at a set boundary (`pipeline_process.py:610-651`): the drift refine, **and** the world-anchor refine (`keep_world_frame=False`, `:619-621`). The vertical is therefore never re-anchored on deadlift frames. The drift *check* is skipped too during deadlift sets, because it would read stale views, and resumes at the next squat set. The deadlift's own health signal is the bar/skeleton reprojection residual, logged per set.
-- While the deadlift is active **and no capture window is open**, the provider stops appending views to `_view_buffer` (`multi_camera.py:108`). Deadlift frames can therefore never feed a later squat refine. The bootstrap capture window is exempt (`_capture_window_open`, `multi_camera.py:393-396`; `pipeline_process.py:681-693`): a deadlift-first session on an uncalibrated rig still calibrates, and the person-calibration solve asks for its two slow bodyweight squats, as today.
+- The provider gets a setter, `set_view_recording(enabled)`, which `_activate_profile` calls. While a profile with `allows_camera_refine=False` is active **and no capture window is open**, the provider stops appending views to `_view_buffer` (`multi_camera.py:108`), so deadlift frames can never feed a later squat refine. The bootstrap capture window is exempt (`_capture_window_open`, `multi_camera.py:393-396`; `pipeline_process.py:681-693`): a deadlift-first session on an uncalibrated rig still calibrates, and the person-calibration solve asks for its two slow bodyweight squats, as today.
 
 ## 4. Platform integration — delivery side
 
@@ -371,7 +372,7 @@ Squat sections are unchanged.
 - the `details` keys and IPC fields.
 
 It reuses the existing message types (`fault`, `rep_complete` with `features` / `highlights` / `faults_detailed`, `diagnosis_complete`, `cache_cues`, `set_exercise`, `start_capture`). Nothing is renamed. The new fields are:
-- `cache_cues`: `fault_to_cue`, `min_cue_tiers`, `set_idle_timeout_s`, `waits_for_diagnosis`;
+- `cache_cues`: `fault_to_cue`, `min_cue_tiers`, `set_idle_timeout_s`, `waits_for_diagnosis`. Each field is sent only when it differs from the default, so the squat payload is unchanged;
 - `start_capture` / `set_exercise`: `exercise_meta`;
 - `frame_data`: `deadlift_phase`, `bar_midfoot_live_cm`, `bar_source`.
 
@@ -405,7 +406,7 @@ Every item is a dispatch with squat as the default, or an addition.
 5. **Closed-loop D1 guidance.** This is its own small mode, not the squat stance monitor.
    - The squat monitor speaks only when `rep_phase == "idle"` (`:857`) and only arms after a fault cue plus a stance diagnosis (`:1709-1715`).
    - Deadlift guidance arms whenever `frame_data.deadlift_phase == "stance"` and `|bar_midfoot_live_cm| >` 2 cm.
-   - It speaks `deadlift_closer` / `deadlift_back` through the existing cached-cue path. It reuses the squat monitor's speaking flag and utterance budget (`MAX_ADJUSTMENT_UTTERANCES`; monitor code at `:125-131`, `:348-357`, `:763-905`), says `adjust_good` once the bar is in tolerance, and disarms at SETUP or PULL.
+   - It speaks `deadlift_step_closer` (coarse, > 15 cm), then `deadlift_closer` / `deadlift_back` (fine) through the existing cached-cue path. All three keys are in the contract, with text and audio. It reuses the squat monitor's speaking flag and utterance budget (`MAX_ADJUSTMENT_UTTERANCES`; monitor code at `:125-131`, `:348-357`, `:763-905`), says `adjust_good` once the bar is in tolerance, and disarms at SETUP or PULL.
    - The squat stance monitor is additionally gated on `is_squat`. It already arms only on bodyweight sets with a stance cause (`:1709-1715`, `:1725-1727`); this gate stops a squat diagnosis left over in `_latest_diagnosis` (O6) from arming it during deadlifts.
 6. **Tracking-lost gate.** `ipc_bridge.py:391-428` mutes cues when tracking is lost, and plates can hide the shins.
    - The deadlift gate uses `tracking_keypoints` = hips, shoulders and wrists, plus the bar state.
@@ -454,7 +455,7 @@ Grip type (double / mixed / hook), plate diameter (default 45 cm), belt, shoes.
 | Squat golden master, fresh | Replay fixed squat scenarios through `BiomechanicsPipeline` (harness `test_pipeline.py:329-392`) + `SessionTracker` / `IPCBridge`. Snapshot frames, faults, `rep_complete.features` and IPC messages | J0 |
 | Squat golden master **after a switch** | Same scenarios after `set_exercise("deadlift")` → simulated deadlift reps → `set_exercise("squat")`. Expected output = the fresh golden, apart from the carry-overs listed in §5.2. Both goldens run in two variants, so the body-measurement path is compared like for like: with the same stored athlete params applied up front, and with none (first-time user) | J0 (deadlift part at J3) |
 | Delivery golden master | Squat IPC stream through `CoachingService` + `CoachingOrchestrator` with fake TTS / LLM / DB. Snapshot cues, recap text and recorder ops | J0 |
-| Invariants | Squat rule order; the full `FAULT_TO_CUE_MAP`; squat `CUE_TEXT_MAP` strings; squat tool list; squat `cache_cues` payload | J0 |
+| Invariants | Squat rule order; the full `FAULT_TO_CUE_MAP`; squat `CUE_TEXT_MAP` strings; squat tool list; squat `cache_cues` payload. The new `cache_cues` fields are omitted when they hold the defaults, so the squat payload stays byte-identical | J0 |
 | Intentional changes | J3: `test_profile_registry.py:30` (sumo → untracked) and `:29` (conventional → untracked while gated). J8: `:29` back to deadlift, `:58-59` (`coaching_ready == ["squat"]`), `test_agent_prompts.py:116` (`"deadlift" not in` the menu prompt) | reviewed by Ambaka |
 
 ### 5.2 Shared state a deadlift could leave behind (each pinned by the after-switch golden)
