@@ -1,6 +1,6 @@
-# Conventional deadlift — plan v15 (built on the multi-exercise platform)
+# Conventional deadlift — plan v16 (built on the multi-exercise platform)
 
-Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 15: v14 plus the changes two independent reviews of the implementation forced (§2.3 gates built for the platform's keypoint noise, a pull counted from any phase, events fitted rather than thresholded, a noise-proof touch-and-go, over-extended lockouts counted; §2.5 hip-shift and proxy-tilt statistics, D2 from several frames; §2.6 D2 emitted only when the hips decisively out-rose the shoulders, D8b severe-only and D10 off on the proxy). Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
+Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 16: v15 plus a third review's corrections (§2.3 a hitch is not a top, an over-extended lockout needs straight-ish legs, touch-and-go's slope over the frames since the low point; §2.4 the midfoot re-locked at a re-setup on the floor; §2.5 hip shift on the lifter's own left-right, D2's knee-pass pose from a curve; §4.3 foot guidance with hysteresis). Version 15: v14 plus the changes two independent reviews of the implementation forced (§2.3 gates built for the platform's keypoint noise, a pull counted from any phase, events fitted rather than thresholded, a noise-proof touch-and-go, over-extended lockouts counted; §2.5 hip-shift and proxy-tilt statistics, D2 from several frames; §2.6 D2 emitted only when the hips decisively out-rose the shoulders, D8b severe-only and D10 off on the proxy). Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
 
 ## 0. Decisions
 
@@ -96,13 +96,14 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 | SETUP → STANCE / APPROACH | Stands back up without lifting |
 | SETUP → PULL | Bar > rest + 3 cm and vertical velocity > 0.10 m/s |
 | APPROACH / STANCE → PULL | **Grip and rip** (v15): the same liftoff with the hands on the bar; the setup is judged on the last 0.2 s before liftoff |
-| PULL → TOP | Bar ≥ expected top height − 8 cm, \|v\| < 0.05 m/s for ≥ 3 frames, trunk within 35° of vertical; or (v15) the trunk ≥ 10° behind vertical, an over-extended lockout at any bar height |
+| PULL → TOP | Bar ≥ expected top height − 8 cm, \|v\| < 0.05 m/s for ≥ 3 frames, trunk within 35° of vertical; or (v15) the trunk ≥ 10° behind vertical with the knees bent ≤ 40° (v16), an over-extended lockout at any bar height |
+| TOP / LOWER → PULL | (v16) **A hitch, not a top:** the bar rises > 5 cm (or the hold band, if wider) above the top it held; the pull goes on and its top comes later |
 | PULL → FLOOR without TOP | **Failed rep** (bar rose ≥ 10 cm but never reached top − 8 cm): an event, not counted |
 | TOP → LOWER | v < −0.10 m/s |
 | LOWER → FLOOR | **Dead stop**: bar ≤ rest + 2 cm and \|v\| < 0.02 m/s for ≥ 3 frames, or bar within rest + 2 cm for ≥ 0.3 s → **rep counted and judged** |
-| LOWER → PULL | **Touch-and-go**: low point within 5 cm of rest, then a rise of > 3 cm plus the noise band above that low point, ≥ 100 ms after it, still rising (slope over the last 100 ms > 0.10 m/s; v15: not "rising at every step", which one noisy frame defeated) and hands on the bar → **the finishing rep is counted and judged now**. The low point is the next rep's liftoff, and `rep_started` is set (§3.3 explains how the pipeline's touch-and-go block, `pipeline.py:1115-1121`, routes to the analyser) |
-| FLOOR → SETUP | Dead stop with hands still on the bar ≥ 0.3 s → a new setup is judged |
-| FLOOR → PULL | Quick re-pull: the setup is judged on the last 0.2 s before liftoff, or marked "not measured" |
+| LOWER → PULL | **Touch-and-go**: low point within 5 cm of rest, then a rise of > 3 cm plus the noise band above that low point, ≥ 100 ms after it, still rising (slope over the frames since the low point > 0.10 m/s; v15: not "rising at every step", which one noisy frame defeated; v16: not a window reaching back into the descent) and hands on the bar (on the wrist proxy, at the low point: a fast pull lifts the wrists past the knees within a few frames) → **the finishing rep is counted and judged now**. The low point is the next rep's liftoff, and `rep_started` is set (§3.3 explains how the pipeline's touch-and-go block, `pipeline.py:1115-1121`, routes to the analyser) |
+| FLOOR → SETUP | Dead stop with hands still on the bar ≥ 0.3 s → a new setup is judged, against the midfoot re-locked at its liftoff (§2.4, v16) |
+| FLOOR → PULL | Quick re-pull: the setup is judged on the last 0.2 s before liftoff, or marked "not measured"; the midfoot is re-locked as for a re-setup |
 | FLOOR → STANCE / APPROACH | Stands up or steps back (the set may end) |
 | STANCE → APPROACH | Walks away (bar more than 40 cm ahead of the midfoot) or turns away (foot forward axis more than 60° off the bar direction) for ≥ 0.5 s |
 
@@ -123,6 +124,8 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 - **Midfoot.**
   - It is tracked **live during `STANCE`**; the closed-loop guidance (§4.3) uses this live value.
   - It is **locked when `SETUP` starts** (or at a grip-and-rip liftoff), when the feet are final, by averaging the last ≤ 15 settled `STANCE` frames whose feet were measured.
+  - (v16) A **re-setup at the floor** (FLOOR → SETUP or a quick re-pull) re-locks it at liftoff from the last ≤ 15 frames since the dead stop whose feet were measured: a lifter told "bar over midfoot" may shuffle the feet without standing up. If the plates hid the feet throughout, the lock stands.
+- **The lifter's left-right** (v16) is locked from up to 8 s of frames at the bar (settled stance, setup, the floor between reps), re-locked at each liftoff after a setup: the hips' and ankles' lines for D8 on either bar source, plus the wrists' for the wrist proxy's sagittal frame. The hips travel ~45 cm forward in a pull, so each degree off reads ~0.03 of hip shift; correlated keypoint noise needs seconds of frames (about 1.2° from 4 s).
   - The pull is then judged against the locked midfoot, so plate occlusion during the pull does not matter.
 - **Squat state stays untouched.** The squat setup snapshot and `_standing_reference_hip_cm` are never touched by deadlift reps (§3.3).
 
@@ -132,17 +135,17 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 
 | Feature | Definition | Window |
 |---|---|---|
-| `bar_midfoot_stance_cm` | forward offset of bar centre vs live midfoot, median | last 0.3 s of STANCE |
+| `bar_midfoot_stance_cm` | forward offset of bar centre vs live midfoot, median | last 1 s of settled STANCE (v16) |
 | `bar_midfoot_setup_cm` | forward offset of bar centre vs the locked midfoot, median | last 0.3 s of SETUP |
 | `setup_hip_height_cm` | hip height above ankle midpoint | SETUP |
 | `setup_hip_band_cm` | expected band from the setup model (§2.7) | — |
 | `shoulder_vs_bar_cm` | forward offset of the shoulder joint vs bar centre | SETUP |
-| `trunk_change_liftoff_knee_deg` | signed trunk-angle change from back-dated liftoff to the bar at knee height, minus the model-predicted change | early pull |
+| `trunk_change_liftoff_knee_deg` | signed trunk-angle change from back-dated liftoff to the bar at knee height, minus the model-predicted change. Liftoff: the median over 0.2 s before it; knee pass: a curve fitted through the 0.2 s leading to it (v16: a line read a fast pull's accelerating rise ~0.1 low in rise ratio) | early pull |
 | `hip_shoulder_rise_ratio` | hip vertical rise ÷ shoulder vertical rise | same window |
 | `bar_drift_cm` | p90 forward deviation of the bar centre from its liftoff position | pull |
 | `hip_extension_deficit_deg`, `knee_extension_deficit_deg` | signed deficits at the top vs the standing reference | TOP |
 | `lean_back_deg` | signed backward trunk angle at the top vs the standing reference | TOP |
-| `hip_shift_ratio` | (hip_mid − locked midfoot) on the ankle axis ÷ ankle separation; median over the second half of the pull minus the median over its first fifth (v15: the squat's 80th-percentile deviation read 2 cm keypoint noise as a shift) | pull |
+| `hip_shift_ratio` | (hip_mid − locked midfoot) on the lifter's left-right (hips and ankles, locked for the set, §2.4; v16: the bar's axis read forward travel as sideways on a stance 5–8° off square) ÷ ankle separation along it; median over the second half of the pull minus the median over its first fifth (v15: the squat's 80th-percentile deviation read 2 cm keypoint noise as a shift) | pull |
 | `bar_tilt_cm` | p90 height difference between the two 3D bar ends (5-frame running median). Wrist proxy: the hands' height difference carried out to the 1.70 m hub span, as the median over the second half of the pull | pull |
 | `elbow_flexion_deg` | p90 elbow flexion vs the standing reference | pull |
 | `concentric_velocity_ms` | bar rise ÷ time from liftoff to top (the true bar, not the squat's shoulder proxy) | pull |
@@ -293,7 +296,7 @@ Rewrite `src/biomechanics/profiles/deadlift.py` as `DeadliftProfile`. It is **st
 ### 3.2 Registry
 
 Matching is whole-word, longest key wins (`registry.py:40-55`).
-- A new `UntrackedVariantProfile(UntrackedProfile)` is registered for `sumo_deadlift`, `trap_bar_deadlift`, `hex_bar_deadlift`, `deficit_deadlift`, `snatch_grip_deadlift`, `single_leg_deadlift` and `rack_pull`. It carries the deadlift's safety flags (`allows_camera_refine=False`, `feeds_body_calibration=False`).
+- A new `UntrackedVariantProfile(UntrackedProfile)` takes every deadlift the conventional rules do not model, and `rack_pull`. It carries the deadlift's safety flags (`allows_camera_refine=False`, `feeds_body_calibration=False`). (v16) The conventional profile takes a name by allow-list, not by listing variants (a list kept missing "Band Deadlift", "Suitcase Deadlift", "Deadlift with Chains"): the profile hook `name_qualifiers` names the words that may stand beside "deadlift" (barbell, conventional, touch and go), and any other word makes the name an untracked variant. The hook defaults to None, so the squat's name resolution is unchanged.
 - `romanian_deadlift`, `rdl` and `stiff_leg_deadlift` stay on the RDL profile.
 - **Existing pins changed on purpose**, in the J3 PR with Ambaka's review:
   - `test_profile_registry.py:30` (`"Barbell Sumo Deadlift" → "deadlift"`) becomes `→ untracked` permanently;
@@ -413,7 +416,7 @@ Every item is a dispatch with squat as the default, or an addition.
 4. **Set idle timeout.** Use `cache_cues.set_idle_timeout_s`, default 15 s (`:108`).
 5. **Closed-loop D1 guidance.** This is its own small mode, not the squat stance monitor.
    - The squat monitor speaks only when `rep_phase == "idle"` (`:857`) and only arms after a fault cue plus a stance diagnosis (`:1709-1715`).
-   - Deadlift guidance arms whenever `frame_data.deadlift_phase == "stance"` and `|bar_midfoot_live_cm| >` 2 cm.
+   - Deadlift guidance arms whenever `frame_data.deadlift_phase == "stance"` and `|bar_midfoot_live_cm| >` 3 cm (v16: D1's mild threshold, a hysteresis over the 2 cm it guides down to; the live value is a 1 s median of settled stance frames, so keypoint noise does not arm it on a bar placed right).
    - It speaks `deadlift_step_closer` (coarse, > 15 cm), then `deadlift_closer` / `deadlift_back` (fine) through the existing cached-cue path. All three keys are in the contract, with text and audio. It reuses the squat monitor's speaking flag and utterance budget (`MAX_ADJUSTMENT_UTTERANCES`; monitor code at `:125-131`, `:348-357`, `:763-905`), says `adjust_good` once the bar is in tolerance, and disarms at SETUP or PULL.
    - The squat stance monitor is additionally gated on `is_squat`. It already arms only on bodyweight sets with a stance cause (`:1709-1715`, `:1725-1727`); this gate stops a squat diagnosis left over in `_latest_diagnosis` (O6) from arming it during deadlifts.
 6. **Tracking-lost gate.** `ipc_bridge.py:391-428` mutes cues when tracking is lost, and plates can hide the shins.

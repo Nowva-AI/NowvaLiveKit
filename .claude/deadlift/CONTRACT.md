@@ -75,8 +75,9 @@ when absent, the agent keeps today's behaviour (wait only on the squat).
 The existing fields, plus, for the deadlift only:
 - `deadlift_phase`: one of `approach`, `stance`, `setup`, `pull`, `top`, `lower`, `floor`
 - `bar_midfoot_live_cm`: forward offset of the bar centre vs the live midfoot (cm, > 0 = bar
-  ahead of midfoot, i.e. step closer), the median over the last 0.5 s; null outside `stance`,
-  while the lifter is moving (hinging down, walking), after the set's first rep, and always null when
+  ahead of midfoot, i.e. step closer), the median over the last 1 s of settled stance frames,
+  once it holds at least 10; null outside `stance`, while the lifter is moving (hinging down,
+  walking), after the set's first rep (per set: `reset_set` re-opens it), and always null when
   `bar_source` is `"wrist_proxy"` (the hanging wrists say nothing about where the bar sits)
 - `bar_source`: `"bar"` or `"wrist_proxy"`
 
@@ -129,7 +130,8 @@ Each correction key also gets a `<key>_fixed` praise line, as the squat keys do.
 4. **Set idle timeout** from `cache_cues.set_idle_timeout_s` (default 15 s).
 5. **Closed-loop D1 guidance** (deadlift only, tracked bar only: never when `bar_source` is
    `"wrist_proxy"`): arms whenever `deadlift_phase == "stance"` and
-   `abs(bar_midfoot_live_cm) > 2`; speaks `deadlift_step_closer` (> 15 cm), then
+   `abs(bar_midfoot_live_cm) > 3` (D1's mild threshold: a bar placed right must not arm it on
+   keypoint noise); once armed, speaks `deadlift_step_closer` (> 15 cm), then
    `deadlift_closer` / `deadlift_back`, then `adjust_good` once within 2 cm; shares the squat
    monitor's speaking flag and utterance budget; disarms at `setup` / `pull`.
 6. The squat stance monitor is additionally gated on the squat profile.
