@@ -18,8 +18,19 @@ from livekit import rtc
 from livekit.agents import RunContext, StopResponse, get_job_context, llm
 from livekit.agents.llm import function_tool
 
+from agent.agents.deadlift_setup_task import DeadliftSetupTask
 from agent.agents.prompts import get_workout_prompt
 from agent.agents.shared.base_agent import BaseNovaAgent
+from agent.agents.shared.deadlift_card import explain_deadlift
+from agent.agents.shared.deadlift_session import (
+    DEADLIFT_PROFILE_NAME,
+    EXERCISE_META_STATE_KEY,
+    deadlift_form_findings,
+    first_session_briefing_instructions,
+    is_coached_deadlift,
+    session_includes_coached_deadlift,
+    store_exercise_meta,
+)
 from agent.services.athlete_facts import (
     active_pain_flags,
     add_pain_flag,
@@ -125,6 +136,24 @@ def _assess_last_rep(verdict: dict) -> list[str]:
     return findings
 
 
+def _deadlift_form_reply(rep_message: dict | None) -> str:
+    """The check_my_form answer for a deadlift, from its last rep. Behaviour only: no camera
+    sees the spine, so the back is never judged either way."""
+    findings = deadlift_form_findings(rep_message)
+    if not findings:
+        return (
+            "Tell the user you haven't seen a deadlift rep from them yet — ask them to pull "
+            "one and ask again right after. One short sentence, no verdict on their form."
+        )
+    return (
+        f"The user asked how their deadlift looks. What you measured on their last rep: "
+        f"{'; '.join(findings)}. Relay this in 1-2 short sentences as a coach — plain words, "
+        f"no jargon, no number except the bar speed. Lead with whatever is already right, "
+        f"then the one thing to change. Never say their back rounded or stayed flat: no "
+        f"camera sees the spine."
+    )
+
+
 def _wake_word_uses_local_mic() -> bool:
     """Console jobs have no room audio track to tap, so they listen on the local mic.
     WAKE_WORD_LOCAL_MIC=1 or 0 overrides the detection."""
@@ -182,7 +211,15 @@ class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
         self._ww_last_detection: float = 0.0
         self._ww_last_near_miss: float = 0.0
 
-        super().__init__(state=state, userdata=userdata, instructions=get_workout_prompt())
+        # Only a coaching-ready deadlift adds the deadlift prompt section and explain_deadlift;
+        # every other session keeps the squat's prompt and tool list.
+        self._includes_deadlift = session_includes_coached_deadlift(state)
+        super().__init__(
+            state=state,
+            userdata=userdata,
+            instructions=get_workout_prompt(includes_deadlift=self._includes_deadlift),
+            tools=[explain_deadlift] if self._includes_deadlift else None,
+        )
 
     async def on_enter(self):
         """Start coaching service, generate greeting, then activate wake word system."""
@@ -253,11 +290,50 @@ class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
                 restore=False,
             )
 
+        if self._includes_deadlift:
+            await self._prepare_deadlift()
+
         self.state.set("workout.greeting_done", True)
         self.state.save_state()
         logger.info("[WORKOUT] Greeting done — signalled main.py to start pose estimation")
 
         await self._start_wake_word_system()
+
+    async def _prepare_deadlift(self) -> None:
+        """Before the camera starts: the deadlift setup questions when the quick path
+        hasn't asked them (scheduled path), then, when the workout opens with the deadlift
+        and it is the athlete's first deadlift session, the setup briefing. No squat
+        assessment runs for the deadlift."""
+        opens_with_deadlift = is_coached_deadlift(self.state.get("workout.exercise_name"))
+        first_session = (
+            asyncio.create_task(self._is_first_deadlift_session()) if opens_with_deadlift else None
+        )
+        if self.state.get(EXERCISE_META_STATE_KEY) is None:
+            self._restore_turn_detection()
+            meta = await DeadliftSetupTask(
+                state=self.state, userdata=self.userdata, chat_ctx=self.chat_ctx.copy(),
+            )
+            store_exercise_meta(self.state, meta)
+            self.state.save_state()
+        if first_session is not None and await first_session:
+            await self._say(first_session_briefing_instructions(), restore=False)
+
+    async def _is_first_deadlift_session(self) -> bool:
+        from db.biomechanics_persistence import get_last_completed_session
+
+        def _query() -> bool:
+            db = SessionLocal()
+            try:
+                return get_last_completed_session(db, self.user_id, exercise=DEADLIFT_PROFILE_NAME) is None
+            finally:
+                db.close()
+
+        try:
+            return await asyncio.to_thread(_query)
+        except Exception:
+            # Unknown history: a returning lifter hearing the setup again beats a new one missing it.
+            logger.exception("[DEADLIFT] Last-session lookup failed — briefing as a first session")
+            return True
 
     # ===== COACHING SERVICE CALLBACKS =====
 
@@ -332,6 +408,7 @@ class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
         self.state.set("calibration.movement_pattern", None)
         self.state.set("calibration.pending_workout", None)
         self.state.set("workout.greeting_done", False)
+        self.state.set(EXERCISE_META_STATE_KEY, None)
 
         await self._stop_wake_word_system()
 
@@ -1106,6 +1183,11 @@ class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
                 "Tell the user you can't check their form right now. "
                 "Keep it brief."
             )
+
+        if is_coached_deadlift(self.state.get("workout.exercise_name")):
+            # Judged from the last rep's features; the squat's standing checks below read
+            # stance and toe-angle targets the deadlift doesn't have.
+            return None, _deadlift_form_reply(getattr(coaching, "_last_rep_message", None))
 
         snapshot = coaching.get_current_form_snapshot()
         fresh = snapshot is not None and snapshot["data_age_ms"] <= FORM_SNAPSHOT_MAX_AGE_MS

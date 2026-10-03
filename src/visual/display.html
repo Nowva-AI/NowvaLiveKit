@@ -960,8 +960,8 @@
       <div class="tiles">
         <div class="tile"><div class="v" id="tile-reps">—</div><div class="k">Reps</div></div>
         <div class="tile"><div class="v" id="tile-clean">—</div><div class="k">Clean</div></div>
-        <div class="tile"><div class="v" id="tile-depth">—</div><div class="k">Avg depth</div></div>
-        <div class="tile"><div class="v" id="tile-consistency">—</div><div class="k">Consistency</div></div>
+        <div class="tile" id="tile-depth-box"><div class="v" id="tile-depth">—</div><div class="k">Avg depth</div></div>
+        <div class="tile" id="tile-consistency-box"><div class="v" id="tile-consistency">—</div><div class="k">Consistency</div></div>
       </div>
 
       <div id="scores"></div>
@@ -1219,13 +1219,27 @@
 
   /* ================= workout state ================= */
 
-  const SCORE_DIMS = [
-    ["depth", "Depth"],
-    ["trunk_control", "Trunk control"],
-    ["knee_tracking", "Knee tracking"],
-    ["symmetry", "Symmetry"],
-    ["tempo", "Tempo"],
-  ];
+  // Score dimensions per exercise profile; anything without its own list uses the squat's.
+  const SCORE_DIMS = {
+    squat: [
+      ["depth", "Depth"],
+      ["trunk_control", "Trunk control"],
+      ["knee_tracking", "Knee tracking"],
+      ["symmetry", "Symmetry"],
+      ["tempo", "Tempo"],
+    ],
+    deadlift: [
+      ["setup", "Setup"],
+      ["coordination", "Coordination"],
+      ["bar_path", "Bar path"],
+      ["lockout", "Lockout"],
+      ["symmetry", "Symmetry"],
+    ],
+  };
+
+  function scoreDims(profile) {
+    return SCORE_DIMS[profile] || SCORE_DIMS.squat;
+  }
 
   // fault_type → what to do about it, phrased as coaching, not diagnostics
   const FOCUS_TEXT = {
@@ -1248,11 +1262,23 @@
     shoulder_stability: "Lock your shoulders down",
     trunk_stability: "Stay braced through your core",
     tempo: "Control the way down",
+    deadlift_bar_position: "Start with the bar over mid-foot",
+    deadlift_setup_hips: "Set your hips before you pull",
+    deadlift_shoulders_behind: "Shoulders over the bar",
+    deadlift_hips_shoot: "Chest and hips rise together",
+    deadlift_bar_drift: "Keep the bar close to your legs",
+    deadlift_lockout: "Finish tall — full lockout",
+    deadlift_lean_back: "Stand tall, no lean back",
+    deadlift_hip_shift: "Push evenly through both feet",
+    deadlift_bar_tilt: "Keep the bar level",
+    deadlift_bent_arms: "Long arms — legs do the work",
+    deadlift_velocity_loss: "Bar slowed — consider a lighter load",
   };
 
   const workout = {
     active: false,
     exercise: "",
+    profile: "squat",
     totalSets: 0,
     targetReps: 0,
     weightLbs: 0,
@@ -1280,6 +1306,7 @@
     leaveMenuStates();
     workout.active = true;
     workout.exercise = msg.exercise || "Workout";
+    workout.profile = msg.profile || "squat";
     workout.totalSets = msg.total_sets || 0;
     workout.targetReps = msg.target_reps || 0;
     workout.weightLbs = msg.weight_lbs || 0;
@@ -1430,6 +1457,11 @@
         summary.avg_depth != null ? `${Math.round(summary.avg_depth)}°` : "—";
       t("tile-consistency").textContent =
         summary.depth_consistency != null ? `±${summary.depth_consistency}°` : "—";
+      // A lift without depth (the deadlift) sends null depth tiles: hide them, not "—".
+      t("tile-depth-box").hidden = summary.avg_depth == null;
+      t("tile-consistency-box").hidden = summary.depth_consistency == null;
+      const shownTiles = report.querySelectorAll(".tiles .tile:not([hidden])").length;
+      report.querySelector(".tiles").style.gridTemplateColumns = `repeat(${shownTiles}, 1fr)`;
       document.getElementById("focus-text").textContent = focusLine(summary);
     }
 
@@ -1439,7 +1471,7 @@
 
     scoresBox.innerHTML = "";
     if (scores && scores.per_dimension) {
-      SCORE_DIMS.forEach(([key, label], i) => {
+      scoreDims(workout.profile).forEach(([key, label], i) => {
         const v = scores.per_dimension[key];
         if (v == null) return;
         const pct = Math.round(v * 100);
