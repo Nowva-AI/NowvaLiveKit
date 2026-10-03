@@ -1,6 +1,6 @@
-# Conventional deadlift — plan v12 (built on the multi-exercise platform)
+# Conventional deadlift — plan v13 (built on the multi-exercise platform)
 
-Status: proposal for Ambaka. Version 12. Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10 and v11. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
+Status: proposal for Ambaka. Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
 
 ## 0. Decisions
 
@@ -14,6 +14,11 @@ Status: proposal for Ambaka. Version 12. Replaces v1–v9, which assumed a separ
 | The bar must be detected on the floor | 3D bar tracking from all three cameras (§6) |
 | LLM learning out of scope | Sessions, reps and cue events are already tagged per exercise (one DB session per exercise) |
 | Thresholds are absolute and never moved by observed reps | Same two channels as the squat (FINDINGS D2): an absolute standard, plus drift against the athlete's best rep this session |
+| Set diagnosis: parameterise `HypothesisEngine` (Ambaka, 2026-10-03) | The engine takes its graph as a parameter, defaulting to the squat graph; no duplicated module (§7) |
+| Gate the deadlift only (Ambaka, 2026-10-03) | `gate_until_ready` is set on `DeadliftProfile` only; other placeholder profiles behave as today (§3.1) |
+| Keep the current bar detector for now (Ambaka, 2026-10-03) | Ultralytics YOLO11n-pose stays the architecture; J4 retrains it for the bar on the floor. The AGPL question moves to J8 and no longer blocks J4 (§6) |
+| Touch-and-go reps are counted (Ambaka, 2026-10-03) | Counted and judged once each; no cue between touch-and-go reps, the cue waits for a dead stop or the set recap (§2.3) |
+| No accelerometer in the device (Ambaka, 2026-10-03) | Gravity comes from the ChArUco board laid flat (§2.1); bar speed comes from vision only. IMUs appear only as lab ground truth (§8.4) |
 
 ## 1. Goal and gates
 
@@ -105,6 +110,7 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
   - *Fallback* when the athlete never stands still with arms hanging: the median top height of the set's counted reps (the first rep uses top − 8 cm against its own peak).
   - The 8 cm margin counts soft and over-extended lockouts; D6 and D5 then judge them.
 - A bumper bounce (≤ 3 cm, no pull) is not a touch-and-go. Each rep is counted exactly once. A bar dropped from the top counts, with no fault.
+- **Touch-and-go reps are counted (decided).** Each is judged when it finishes, but no cue is spoken between them: the most important cue waits for the next dead stop, or goes into the set recap.
 - **Set boundaries.**
   - Pipeline: the existing `set_timeout_seconds` and `rest_start`.
   - Voice: the orchestrator ends a set after `SET_IDLE_TIMEOUT_S = 15 s` with no rep (`coaching_orchestrator.py:108`), which a deadlift re-setup or foot guidance can exceed. The deadlift gets 30 s through a per-profile `set_idle_timeout_s`, carried in `cache_cues` (§4.3).
@@ -502,7 +508,9 @@ Grip type (double / mixed / hook), plate diameter (default 45 cm), belt, shoes.
 - ≤ 1 % false positives on the racked bar.
 - 3D error ≤ 1 cm static and ≤ 1.5 cm dynamic, measured against ArUco hub markers.
 
-**Licence.** Ultralytics is **AGPL-3.0**. Shipping it needs an Enterprise licence or an Apache-2.0 alternative (for example RTMDet / RTMPose from MMPose). Decide **before J4**; this also applies to the existing bar detector.
+**Detector.** Decided: keep the current Ultralytics YOLO11n-pose detector and retrain it on floor-bar data at J4. The existing weights (`models/barbell_keypoints.pt`, `config.py:222`) are gitignored and not in any branch; they are needed at J1 as the starting point (§11, Q7).
+
+**Licence (deferred).** Ultralytics is **AGPL-3.0**. Shipping it on the device needs an Enterprise licence or an Apache-2.0 alternative (for example RTMDet / RTMPose from MMPose). Not a blocker for development; settled at J8, before the device ships.
 
 **Wrist proxy without a bar.** Mid-wrist minus the learned offset.
 - D1, D3 and D8b run with `bar_source = wrist_proxy`, wider thresholds and a moderate minimum.
@@ -514,9 +522,7 @@ The method is the squat's: symptoms → causes → hand-set prior × evidence �
 
 It is installed by `_activate_profile` (§3.4), so it also runs when the deadlift is the startup exercise. It produces a rolling update after each rep and a final `diagnosis_complete` at set end, in the contract shape.
 
-**Decision for Ambaka (Q1).**
-- **(a) Recommended:** parameterise `HypothesisEngine` with its graph, defaulting to the squat graph. It is pinned by `test_engine.py` (730 lines) and the goldens.
-- **(b)** A separate module (~150 duplicated lines).
+**Decided (Ambaka, 2026-10-03):** parameterise `HypothesisEngine` with its graph, defaulting to the squat graph. The squat path stays pinned by `test_engine.py` (730 lines) and the goldens, which must pass unchanged with the default graph.
 
 | Symptom | From | Causes (tier) |
 |---|---|---|
@@ -579,7 +585,13 @@ It is reviewed by Ambaka and, ideally, by an external strength coach.
 
 **Labelling (CVAT, three views).**
 - Faults and severity per rep, plus event timestamps on a subset.
-- 20 % of reps double-labelled; target κ ≥ 0.6 per fault; Ambaka adjudicates; any fault below κ 0.6 is redefined.
+- A label is the truth for one rep: which faults it has and how bad. The gate metrics (§1) compare the detector's output with these labels.
+- Most labels need no human judgement:
+  - measured quantities (D1, D3, D4, D2 angles) come from the instruments in §8.4, on instrumented sessions;
+  - scripted sets carry their label by construction (the lifter was told which fault to make), checked against the instruments.
+- A person is needed for the natural sets (estimated ≈ 400 reps): watch the three views in CVAT and tick each fault per rep, ≈ 15 s per rep, so ≈ 2 h per labeller.
+- Proposed: the deadlift engineer labels everything; Ambaka double-labels 20 % and adjudicates disagreements (Q5).
+- Target κ ≥ 0.6 per fault; any fault below κ 0.6 is redefined.
 
 **Training and tuning.** ≥ 300 reps and ≥ 50 positives per fault, on top of the test set. Plus 2,000–3,000 bar frames.
 
@@ -629,7 +641,7 @@ J4 starts in parallel with J1. With two engineers, J2 and J3 also run alongside 
 
 | | Content | Acceptance | Est. |
 |---|---|---|---|
-| **J0 Squat net** | Squat goldens (fresh, delivery, after-switch scaffold); invariants; `requirements.lock` env; CI proposal; licence decision; `VALIDATION.md` skeleton | All green on `main`; changing one squat threshold or one cue text fails the right test | 4–6 d |
+| **J0 Squat net** | Squat goldens (fresh, delivery, after-switch scaffold); invariants; `requirements.lock` env; CI proposal; `VALIDATION.md` skeleton | All green on `main`; changing one squat threshold or one cue text fails the right test | 4–6 d |
 | **J1 Foundations** | Recorder + replay; gravity tool, deadlift frame, sign/tilt/lag tests; `KNOWLEDGE.md`; setup model (2 solves); round-1 capture (ρ, keypoint bias, visibility map); Jetson numbers; existing bar weights evaluated | Review signed; tests green; ≥ 1 h raw capture | 2 wk |
 | **J4 3D bar** (from J1) | Annotation, training, export, tracker, provider frames, time-aligned buffer, ArUco ground truth | Recall ≥ 95 %; 3D error ≤ 1 / 1.5 cm; Jetson budget | 2–3 wk |
 | **J2 Simulator** | Deadlift generator and scenarios | Each scenario carries ground truth | 1 wk |
@@ -638,22 +650,25 @@ J4 starts in parallel with J1. With two engineers, J2 and J3 also run alongside 
 | **Demo α** (≈ week 8 with two engineers, ≈ week 10 with one) | D1 closed loop + D3 at the floor, rep counting | 10 runs in a row; team round-1 lifters | — |
 | **J5 Delivery integration** | Contract; FINDINGS checklist touchpoints; orchestrator items in §4.3; recap; display; DB; metadata; first session; card and form-check | Full rack session (first time and returning, quick and scheduled under the override); no clip synthesised at run time; squat goldens (pipeline + delivery) unchanged | 2 wk |
 | **J6 Real validation** | Round 1 → thresholds, min tiers, margins, ρ; round 2 → test set | Demo gate (§1) on ≥ 10 unseen lifters, per the pre-registered plan; κ ≥ 0.6; status per fault | 3–4 wk |
-| **J7 Set diagnosis** | Graph (a or b), scoring, recap | Top cause matches the coach on ≥ 70 % of sets | 1–1.5 wk |
-| **J8 Ship** | `coaching_ready=True`; the two intentional test changes; hero demo | 10 consecutive demos; Jetson budget | 1 wk |
+| **J7 Set diagnosis** | Deadlift graph in the parameterised `HypothesisEngine`, scoring, recap | Top cause matches the coach on ≥ 70 % of sets | 1–1.5 wk |
+| **J8 Ship** | `coaching_ready=True`; the two intentional test changes; detector licence settled; hero demo | 10 consecutive demos; Jetson budget | 1 wk |
 
 Total: about 16–18 weeks for one person, or about 10 weeks for two. Demo α lands at about week 8 with two engineers, or about week 10 with one.
 
 ## 11. Decisions for Ambaka
 
-1. Set diagnosis: parameterise `HypothesisEngine` (recommended) or a separate module?
-2. No camera refine (drift or world-anchor) during deadlift sets: OK?
-3. `gate_until_ready` on the deadlift only, or for every placeholder profile (a wider change)?
-4. Bar detector licence: Ultralytics Enterprise or an Apache-2.0 alternative?
-5. Who labels the data?
-6. Count touch-and-go reps in v1? Proposed: yes, with no cue between those reps.
-7. Where are the current bar weights, and what were they trained on?
-8. An accelerometer in the device?
-9. Which plates are in the demo gym?
+**Decided (2026-10-03).**
+- Q1: parameterise `HypothesisEngine` (§7).
+- Q3: gate the deadlift only (§3.1).
+- Q4: keep the current bar detector; licence settled at J8 (§6).
+- Q6: count touch-and-go reps, with no cue between them (§2.3).
+- Q8: no accelerometer in the device (§2.1).
+- Q9: dropped. Plate variety is covered by the detector training data (§6).
+
+**Still open.**
+- Q2: no camera refine during deadlift sets — OK? A camera refine is the between-sets re-solve of the three cameras' positions (`CameraCalibrationSession`, `pipeline_process.py:610-651`): a drift refine when reprojection error grows, or a world-anchor refine that re-centres the world frame on the lifter. It writes `rig_calibration_*_refined.json`, which later squat sessions load. Deadlift frames (deep hinge, feet hidden by plates) could bend it, so the plan skips it during deadlift sets (§3.6).
+- Q5: labelling — the deadlift engineer labels, Ambaka double-labels 20 % and adjudicates (§8.3)?
+- Q7: the current bar weights (`models/barbell_keypoints.pt`) are not in the repo or any branch. Push them (git LFS or a release asset) and say what they were trained on.
 
 ## 12. Risks
 
@@ -667,7 +682,7 @@ Total: about 16–18 weeks for one person, or about 10 weeks for two. Demo α la
 | Back rounding unmeasurable | Proxies; behavioural wording; experiments gated on data |
 | Pose quality in a deep hinge; occlusion | Measured in round 1; live midfoot locked at SETUP; deadlift tracking-lost gate |
 | Far plate hub hidden | Visibility map; bar-length constraint |
-| Bar detector generalisation; licence | Varied data split by lifter, negatives; licence decided before J4 |
+| Bar detector generalisation; licence | Varied data split by lifter, negatives; AGPL licence settled at J8, before shipping |
 | Thresholds invented | Initial values only; min tiers; error budget; real data |
 | Optimistic validation | Clustered design, pre-registration, natural sets reported separately |
 | Long timeline for YC | Demo α at about week 8 with two engineers (about week 10 with one) |
@@ -678,7 +693,7 @@ Total: about 16–18 weeks for one person, or about 10 weeks for two. Demo α la
 - **O2a:** `rep_data.features` is dumped (`pipeline.py:1076`) before `finish_rep` annotates `velocity_loss_pct` (`rule_engine.py:238-239`). The non-BiLSTM IPC/diagnosis copy therefore keeps NaN.
 - **O2b:** `HeelRiseRule` emits `affected_side`, not `side` (`heel_rise.py:107-112`), so `heels_down_left/right` are never chosen (`ipc_bridge.py:183`).
 - **O3:** the conversational stack is cloud (Deepgram, OpenAI `gpt-5.4-mini`, ElevenLabs; `pipeline_factory.py`), against guardrail #1. Missing cue clips fall back to cloud OpenAI TTS at cache time (`audio_cue_service.py:41-48`).
-- **O4:** scheduled `start_workout` does not check `coaching_ready` (`main_menu_agent.py:89-166`). Placeholder profiles run in programs; this plan closes it for the deadlift only (Q3).
+- **O4:** scheduled `start_workout` does not check `coaching_ready` (`main_menu_agent.py:89-166`). Placeholder profiles run in programs; this plan closes it for the deadlift only (Q3, decided).
 - **O5:** the cue-audio script's default ElevenLabs voice (`generate_cue_audio.py:55`) differs from the live agent's (`pipeline_factory.py:43`) unless `ELEVENLABS_VOICE_ID` is set.
 - **O6:** `_latest_diagnosis` survives exercise switches (`coaching_orchestrator.py:334`, `:600`). Low impact: the stance monitor arms only on bodyweight sets with a stance cause.
 - **O7:** the `set_exercise` display event sends `weight_lbs` without converting from kg (`coaching_service.py:1330`).
