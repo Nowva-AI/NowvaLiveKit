@@ -10,6 +10,10 @@ back as the pipeline's pose source and re-applies the events before the
 frame they preceded, so the real pipeline runs again from the readiness gate
 through pre-IK, IK, the analyser or counter and the rules.
 
+The header keeps the single camera's mount (config fields and the
+NOWVA_CAMERA_PITCH_DEG override), which replay re-applies so pitch
+certification comes out the same.
+
 Not recorded: barbell detections (no images are kept) and frames processed
 before recording starts (a multi-camera calibration bootstrap).
 Usage: python -m biomechanics.replay.raw_skeleton <recording.jsonl>
@@ -33,6 +37,7 @@ import numpy as np
 
 from biomechanics.config import BiomechanicsConfig, load_pipeline_config
 from biomechanics.faults.observability import SINGLE_CAMERA, TRIANGULATED
+from biomechanics.utils.camera_mount import PITCH_ENV
 from biomechanics.utils.types import Keypoint2D, PipelineFrame, Skeleton2D, Skeleton3D
 
 logger = logging.getLogger(__name__)
@@ -42,6 +47,8 @@ MULTI_CAMERA_ENV = "NOWVA_MULTI_CAMERA"
 # Replayed frames carry no image; analysis never reads one.
 PLACEHOLDER_FRAME = np.zeros((1, 1, 3), dtype=np.uint8)
 GIT_TIMEOUT_S = 2.0
+# CaptureConfig fields describing the single camera's physical mount.
+MOUNT_FIELDS = ("mount_source", "mount_pitch_deg", "mount_height_m")
 
 
 def config_hash(config: BiomechanicsConfig) -> str:
@@ -89,6 +96,8 @@ class RawSkeletonRecorder:
             "capture_mode": TRIANGULATED if multi_camera else SINGLE_CAMERA,
             "config_hash": config_hash(config),
             "git_sha": _git_sha(),
+            "camera_mount": {field: getattr(config.capture, field) for field in MOUNT_FIELDS},
+            "camera_pitch_env": os.getenv(PITCH_ENV),
         })
 
     def _write(self, record: dict[str, Any]) -> None:
@@ -247,8 +256,16 @@ class ReplayResult:
         return [frame.rep_data.rep_number for frame in self.frames if frame.rep_data is not None]
 
 
+def _set_env(name: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+
+
 def replay_recording(path: Path, config: BiomechanicsConfig | None = None) -> ReplayResult:
-    """Run a recording through a fresh pipeline built for its capture mode and exercise."""
+    """Run a recording through a fresh pipeline built for its capture mode,
+    exercise and camera mount."""
     from biomechanics.pipeline import BiomechanicsPipeline
 
     recording = load_recording(path)
@@ -259,8 +276,15 @@ def replay_recording(path: Path, config: BiomechanicsConfig | None = None) -> Re
     for event in recording.events:
         events_before[event["before_frame"]].append(event)
 
+    # A recording made before the mount was recorded keeps the replay's own.
+    config = config.model_copy(update={
+        "capture": config.capture.model_copy(update=recording.header.get("camera_mount", {})),
+    })
+
     previous_mode = os.environ.get(MULTI_CAMERA_ENV)
+    previous_pitch = os.environ.get(PITCH_ENV)
     os.environ[MULTI_CAMERA_ENV] = "true" if recording.header["capture_mode"] == TRIANGULATED else "false"
+    _set_env(PITCH_ENV, recording.header.get("camera_pitch_env", previous_pitch))
     try:
         pipeline = BiomechanicsPipeline(
             config,
@@ -274,10 +298,8 @@ def replay_recording(path: Path, config: BiomechanicsConfig | None = None) -> Re
                 _apply_event(pipeline, event["event"], event["data"])
             results.append(pipeline.process_frame())
     finally:
-        if previous_mode is None:
-            os.environ.pop(MULTI_CAMERA_ENV, None)
-        else:
-            os.environ[MULTI_CAMERA_ENV] = previous_mode
+        _set_env(MULTI_CAMERA_ENV, previous_mode)
+        _set_env(PITCH_ENV, previous_pitch)
     return ReplayResult(header=recording.header, frames=results)
 
 

@@ -1231,3 +1231,200 @@ class TestProfileNameFollowsTheGate:
 
         assert _profile_name("Barbell Back Squat") == "squat"
         assert _profile_name("Barbell Bench Press") == "untracked"
+
+
+# =============================================================================
+# Press and RDL delivery: setup lines, camera status, hedges, grip note, labels
+# =============================================================================
+
+RDL_CUE_MAP = {"rdl_hip_sink": "rdl_hips_back"}
+CAMERA_PITCH_MESSAGE = {"type": "pipeline_status", "status": "camera_pitch", "latency_ms": {"delta_deg": 4.0}}
+MODERATE_WIDER_GRIP_NOTE = {"fault_id": "press_grip", "direction": "wider", "severity": "moderate"}
+FAULT_LABEL_HIP_SINK = "letting the hips sink (squatting it) instead of pushing them back"
+
+
+def _rdl_cache_cues(**fields) -> dict:
+    return {
+        "type": "cache_cues", "exercise_name": "Barbell Romanian Deadlift", "profile": "romanian_deadlift",
+        "cues": {"rdl_hips_back": "rdl_hips_back"}, "fault_to_cue": RDL_CUE_MAP, "reports_depth": False,
+        **fields,
+    }
+
+
+def _rdl_service() -> tuple[CoachingService, CoachingOrchestrator, _FakeRecorder]:
+    service, orchestrator, recorder = _wired_service()
+    service._audio_cue_service = _FakeAudioCueService()
+    recorder.exercise = "romanian_deadlift"
+    return service, orchestrator, recorder
+
+
+async def _settle() -> None:
+    """Let fire-and-forget playback tasks run."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+def _played(orchestrator) -> list:
+    return [call.args[0] for call in orchestrator._play_cached.await_args_list]
+
+
+class TestExerciseSetupLines:
+    def test_cache_cues_plays_the_rdl_setup_lines(self):
+        service, orchestrator, _ = _rdl_service()
+
+        async def _run():
+            await service._handle_message(_rdl_cache_cues())
+            await _settle()
+
+        asyncio.run(_run())
+        assert _played(orchestrator) == ["rdl_setup", "rdl_back_note"]
+
+    def test_nothing_plays_before_the_workout_starts(self):
+        service, orchestrator, _ = _rdl_service()
+        service._workout_active_flag = False
+
+        async def _run():
+            await service._handle_message(_rdl_cache_cues())
+            await _settle()
+
+        asyncio.run(_run())
+        assert _played(orchestrator) == []
+
+    def test_hedged_recap_faults_reach_the_orchestrator(self):
+        service, orchestrator, _ = _rdl_service()
+        asyncio.run(service._on_cache_cues(_rdl_cache_cues(hedged_recap_faults=["rdl_hip_sink"])))
+        assert orchestrator._hedged_recap_faults == frozenset({"rdl_hip_sink"})
+
+    def test_a_new_exercises_lines_follow_the_rest_complete_announcement(self):
+        service, orchestrator, _ = _workout_service()
+        service._audio_cue_service = _FakeAudioCueService()
+        order: list[str] = []
+
+        async def _reply(instructions: str, last_set_note: str | None = None):
+            order.append("announcement")
+
+        service._coaching_llm_reply = _reply
+        orchestrator._play_cached = AsyncMock(side_effect=order.append)
+        orchestrator.resting = True
+
+        async def _run():
+            await service._handle_message(_rdl_cache_cues())
+            await _settle()
+            await service._handle_message({"type": "rest_complete"})
+            await _settle()
+            orchestrator.stop()
+
+        asyncio.run(_run())
+        assert order == ["announcement", "rdl_setup", "rdl_back_note"]
+
+
+class TestPipelineStatusRelay:
+    def test_camera_pitch_plays_level_camera(self):
+        service, orchestrator, _ = _rdl_service()
+        orchestrator.resting = True
+
+        async def _run():
+            await service._handle_message(CAMERA_PITCH_MESSAGE)
+            await _settle()
+
+        asyncio.run(_run())
+        assert _played(orchestrator) == ["level_camera"]
+
+    def test_ignored_before_the_workout_starts(self):
+        service, orchestrator, _ = _rdl_service()
+        service._workout_active_flag = False
+        orchestrator.resting = True
+
+        async def _run():
+            await service._handle_message(CAMERA_PITCH_MESSAGE)
+            await _settle()
+
+        asyncio.run(_run())
+        assert _played(orchestrator) == []
+
+
+class TestShallowRepRangeLabel:
+    @pytest.mark.parametrize("depth_fields", [{"depth_class_name": ""}, {}])
+    def test_range_label_stands_in_for_a_missing_depth_class(self, depth_fields):
+        service, orchestrator, _ = _rdl_service()
+        asyncio.run(service._on_cache_cues(_rdl_cache_cues()))
+        orchestrator._play_cached.reset_mock()
+
+        async def _run():
+            await service._handle_message({
+                "type": "shallow_rep", "depth_class": None, "cue": None, "label": "above the knee",
+                **depth_fields,
+            })
+            await _settle()
+
+        asyncio.run(_run())
+        assert orchestrator._set_shallow_count == 1
+        assert orchestrator._set_shallow_depths == ["above the knee"]
+        assert _played(orchestrator) == []
+
+
+class TestRecordedOnlyShallowRep:
+    def test_counted_for_the_recap_but_never_cued(self):
+        service, orchestrator, _ = _rdl_service()
+        asyncio.run(service._on_cache_cues(_rdl_cache_cues()))
+        orchestrator._play_cached.reset_mock()
+
+        async def _run():
+            await service._handle_message({
+                "type": "shallow_rep", "depth_class": None, "depth_class_name": "at the knee",
+                "cue": "rdl_hips_back", "label": "at the knee", "fault_type": "rdl_hip_sink",
+                "severity": "moderate", "recorded_only": True,
+            })
+            await _settle()
+
+        asyncio.run(_run())
+        assert orchestrator._set_shallow_count == 1
+        assert _played(orchestrator) == []
+
+
+class TestHedgedRecapFaultsEndToEnd:
+    def test_cache_cues_field_drives_the_possible_mention(self):
+        service, orchestrator, _ = _rdl_service()
+        asyncio.run(service._on_cache_cues(_rdl_cache_cues(hedged_recap_faults=["rdl_hip_sink"])))
+        asyncio.run(service._handle_message({
+            "type": "rep_complete", "rep_number": 1, "is_clean": True, "faults_in_rep": [],
+            "max_depth_angle": None, "features": {"exercise": "romanian_deadlift"},
+            "faults_detailed": [{
+                "fault_type": "rdl_hip_sink", "severity": "moderate",
+                "details": {"side": "both", "observability": "observable", "recorded_only": True},
+            }],
+        }))
+        orchestrator.stop()
+        summary = orchestrator._build_set_summary()
+        assert summary["possible"] == [{"fault_id": "rdl_hip_sink", "label": FAULT_LABEL_HIP_SINK}]
+        assert summary["fault_summary"] == {}
+
+
+class TestRestCompleteGripNote:
+    def _press_service(self, set_numbers: tuple, setup_note: dict | None):
+        service, orchestrator, _ = _workout_service()
+        orchestrator.set_exercise(
+            "Barbell Overhead Press", is_squat=False, fault_to_cue=PRESS_CUE_MAP,
+            reports_depth=False, profile_name="overhead_press",
+        )
+        orchestrator.last_set_data = {"setup_note": setup_note}
+        service._get_set_numbers = lambda: set_numbers
+        return service, orchestrator
+
+    def test_moderate_grip_adds_one_setup_action(self):
+        service, orchestrator = self._press_service((1, 2, 3), MODERATE_WIDER_GRIP_NOTE)
+        prompt = service._build_rest_complete_prompt()
+        orchestrator.stop()
+        assert "One setup change before they unrack: hands a thumb wider." in prompt
+
+    def test_mild_grip_waits_for_the_recap(self):
+        service, orchestrator = self._press_service((1, 2, 3), dict(MODERATE_WIDER_GRIP_NOTE, severity="mild"))
+        prompt = service._build_rest_complete_prompt()
+        orchestrator.stop()
+        assert "setup change" not in prompt
+
+    def test_a_new_exercise_carries_no_grip_note(self):
+        service, orchestrator = self._press_service((0, 1, 3), MODERATE_WIDER_GRIP_NOTE)
+        prompt = service._build_rest_complete_prompt()
+        orchestrator.stop()
+        assert "setup change" not in prompt

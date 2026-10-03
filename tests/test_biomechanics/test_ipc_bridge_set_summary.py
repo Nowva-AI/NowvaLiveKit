@@ -1,8 +1,9 @@
 """
 Producer-side delivery contract for non-squat exercises (SHARED-PLUMBING.md §4):
 recorded-only verdicts are flagged, never cued and never counted; a profile that
-does not report depth sends null depth fields; cache_cues carries the fields a
-non-squat profile needs and leaves the squat payload unchanged.
+does not report depth sends null depth fields (every profile but the squat,
+legacy rep-counting ones included); cache_cues carries the fields a non-squat
+profile needs and leaves the squat payload unchanged.
 """
 
 from __future__ import annotations
@@ -25,6 +26,11 @@ CUSTOM_IDLE_TIMEOUT_S = 20.0
 RANGE_LABEL = "mid-shin"
 SHALLOW_CUE = "rdl_lower"
 SQUAT_CACHE_CUES_KEYS = {"type", "exercise_name", "profile", "cues"}
+# Rep-counting profiles from before the shared plumbing: none of them is a depth exercise.
+LEGACY_REP_COUNTING_EXERCISES = (
+    "Barbell Row", "Barbell Curl", "Reverse Lunge", "Bulgarian Split Squat",
+    "Skull Crusher", "Overhead Tricep Extension", "Barbell Conventional Deadlift",
+)
 
 
 class _NonDepthProfile(ExerciseProfile):
@@ -147,6 +153,36 @@ class TestDepthFields:
         assert summary["depth_consistency"] is None
 
 
+class TestLegacyProfilesWithoutDepth:
+    @pytest.mark.parametrize("exercise_name", LEGACY_REP_COUNTING_EXERCISES)
+    def test_a_switch_to_a_legacy_profile_sends_null_depth_end_to_end(
+        self, monkeypatch, bridge, exercise_name: str,
+    ):
+        from biomechanics.pipeline_process import _activate_profile
+        from conftest import SyntheticSession
+
+        session = SyntheticSession(monkeypatch, multi_camera=False)
+        tracker = SessionTracker(bridge, CoachingConfig())
+        _activate_profile(session.pipeline, tracker, bridge, "Barbell Back Squat", startup=True)
+        assert tracker.reports_depth and bridge.reports_depth
+
+        _activate_profile(session.pipeline, tracker, bridge, exercise_name)
+        tracker.on_rep_complete(_rep(1))
+        tracker.on_rep_complete(_rep(2))
+        tracker.force_end_set()
+
+        assert session.pipeline.profile.name != "untracked"
+        assert _messages(bridge, "cache_cues")[-1]["reports_depth"] is False
+        assert not tracker.reports_depth and not bridge.reports_depth
+        for message in _messages(bridge, "rep_complete"):
+            assert message["max_depth_angle"] is None
+            assert message["depth_category"] is None
+            assert "depth_target_met" not in message["highlights"]
+        summary = _messages(bridge, "set_complete")[0]
+        assert summary["avg_depth"] is None and summary["depth_consistency"] is None
+        assert tracker.last_set_summary["avg_depth"] is None
+
+
 class TestCacheCues:
     def test_the_squat_payload_is_unchanged(self, bridge):
         bridge.prepare_exercise("Barbell Back Squat", get_profile("Barbell Back Squat"), BiomechanicsConfig())
@@ -166,7 +202,7 @@ class TestCacheCues:
         bridge.prepare_exercise("Barbell Bench Press")
         message = _messages(bridge, "cache_cues")[0]
         assert message["fault_to_cue"] == {}
-        assert "reports_depth" not in message
+        assert message["reports_depth"] is False
 
 
 class TestShallowRep:
@@ -186,6 +222,19 @@ class TestShallowRep:
         assert message["label"] == RANGE_LABEL
         assert message["cue"] == SHALLOW_CUE
         assert message["fault_type"] == "rdl_partial"
+
+    def test_a_recorded_only_rejection_is_flagged_at_the_top_level(self, bridge):
+        fault = _fault("rdl_partial", FaultSeverity.MODERATE, recorded_only=True)
+        bridge.send_shallow_rep(None, fault=fault, set_number=2, cue_key=None, label=RANGE_LABEL)
+
+        message = _messages(bridge, "shallow_rep")[0]
+        assert message["recorded_only"] is True
+        assert message["cue"] is None
+
+    def test_a_cueable_rejection_carries_no_flag(self, bridge):
+        fault = _fault("rdl_partial", FaultSeverity.MODERATE)
+        bridge.send_shallow_rep(None, fault=fault, set_number=2, cue_key=SHALLOW_CUE, label=RANGE_LABEL)
+        assert "recorded_only" not in _messages(bridge, "shallow_rep")[0]
 
     def test_a_cue_less_rejection_still_reaches_the_agent(self, bridge):
         bridge.send_shallow_rep(None, cue_key=None)

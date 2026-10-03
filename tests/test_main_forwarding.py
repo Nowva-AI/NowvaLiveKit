@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 SRC = Path(__file__).parent.parent / "src"
+sys.path.insert(0, str(SRC))
 # Handled by the coaching service only to log that it is ignored.
 DELIBERATELY_UNFORWARDED = {"set_complete"}
 
@@ -49,6 +51,10 @@ class TestCoachingForwarding:
 
     def test_tracking_loss_reaches_the_agent(self):
         assert "tracking_quality" in _forwarded_types()
+
+    def test_camera_pitch_status_reaches_the_agent(self):
+        """A revoked camera mount is announced only as pipeline_status "camera_pitch"."""
+        assert "pipeline_status" in _forwarded_types()
 
 
 KG_TARGET = 60.0
@@ -108,3 +114,31 @@ class TestPipelineRelay:
 
     def test_exercise_switch_reaches_the_pipeline(self):
         assert "set_exercise" in _relayed_to_pipeline_types()
+
+
+def _workout_start_event_keys() -> list[set[str]]:
+    events = []
+    for node in ast.walk(ast.parse((SRC / "main.py").read_text())):
+        if not isinstance(node, ast.Dict):
+            continue
+        literal = {
+            key.value: value.value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+        }
+        if literal.get("type") == "workout" and literal.get("action") == "start":
+            events.append({key.value for key in node.keys if isinstance(key, ast.Constant)})
+    return events
+
+
+class TestDisplayDepthFlag:
+    def test_every_workout_start_event_says_whether_the_profile_has_depth(self):
+        events = _workout_start_event_keys()
+        assert events
+        assert all("reports_depth" in keys for keys in events)
+
+    def test_the_squat_keeps_its_depth_tiles(self):
+        from biomechanics.profiles import get_profile
+
+        assert get_profile("Barbell Back Squat").reports_depth is True
+

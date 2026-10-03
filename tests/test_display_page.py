@@ -1,6 +1,7 @@
 """Checks on the display page's set report for exercises other than the squat:
-every press and RDL fault has a focus line, and depth tiles and the form score
-are hidden when an exercise has none."""
+every press and RDL fault has a focus line, and depth tiles (on the profile's
+reports_depth flag, never on a null value) and the form score are hidden when an
+exercise has none."""
 
 from __future__ import annotations
 
@@ -31,7 +32,21 @@ class TestSetReport:
         score_dims = _block(DISPLAY_PATH.read_text(), "SCORE_DIMS")
         assert re.findall(r"^    (\w+): \[", score_dims, re.M) == ["squat"]
 
-    def test_null_depth_hides_its_tiles(self) -> None:
+    def test_depth_tiles_hide_on_the_profile_flag_not_on_null(self) -> None:
+        """A squat set with one unmeasured rep sends null depth: its tiles show "—"."""
         page = DISPLAY_PATH.read_text()
-        assert 'parentElement.classList.toggle("hidden", summary.avg_depth == null)' in page
+        assert page.count('parentElement.classList.toggle("hidden", !workout.reportsDepth)') == 2
+        assert "summary.avg_depth == null)" not in page
+        assert "summary.depth_consistency == null)" not in page
         assert "#report .tile.hidden { display: none; }" in page
+
+    def test_null_depth_still_reads_as_a_dash(self) -> None:
+        page = DISPLAY_PATH.read_text()
+        assert 'summary.avg_depth != null ? `${Math.round(summary.avg_depth)}°` : "—"' in page
+        assert 'summary.depth_consistency != null ? `±${summary.depth_consistency}°` : "—"' in page
+
+    def test_only_an_explicit_false_hides_depth(self) -> None:
+        """An older hub sends no flag; it runs the squat, which has depth."""
+        page = DISPLAY_PATH.read_text()
+        assert "workout.reportsDepth = msg.reports_depth !== false;" in page
+        assert "reportsDepth: true," in page

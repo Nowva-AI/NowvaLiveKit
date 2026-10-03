@@ -93,6 +93,30 @@ PREEMPTIVE_TEXT: dict[str, str] = {
 # Played once when the pipeline loses sight of the athlete mid-set.
 TRACKING_LOST_CUE = "tracking_lost"
 
+# Setup lines an exercise plays once per session, before its first set.
+SETUP_CUE_KEYS_BY_PROFILE: dict[str, tuple[str, ...]] = {
+    "overhead_press": ("press_setup",),
+    "romanian_deadlift": ("rdl_setup", "rdl_back_note"),
+}
+# Played once per session when the camera tilted after its mount was certified.
+LEVEL_CAMERA_CUE = "level_camera"
+# Lines only the agent plays: from a clip on disk or not at all, never synthesized.
+AGENT_SIDE_CUE_KEYS = frozenset(
+    {key for keys in SETUP_CUE_KEYS_BY_PROFILE.values() for key in keys} | {LEVEL_CAMERA_CUE}
+)
+
+# The press's grip note: one setup action for the next set, by the way the
+# hands should move ("press_grip" verdict direction).
+GRIP_SETUP_ACTION = "hands a thumb {direction}"
+
+# One static sentence on why an RDL focus fault happens, voiced once per session.
+HINGE_FAULT_CONTEXT: dict[str, str] = {
+    "rdl_hip_sink": (
+        "When the hips sink, the hamstrings are usually running out of stretch — a slightly "
+        "shorter range with soft knees trains them better."
+    ),
+}
+
 # Number words for rep cues
 _NUMBER_WORDS = {
     1: "One!", 2: "Two!", 3: "Three!", 4: "Four!", 5: "Five!",

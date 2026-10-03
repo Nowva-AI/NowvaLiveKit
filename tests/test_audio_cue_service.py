@@ -86,6 +86,20 @@ class TestCacheCuesFallback:
 
         assert set(service._fallback_cache) == {"knees_out"}
 
+    def test_never_synthesizes_the_agent_side_lines(self, service):
+        """Setup and camera lines play from a clip on disk or not at all."""
+        mock_client = AsyncMock()
+        mock_client.audio.speech.create = AsyncMock(return_value=_make_speech_response())
+        service._client = mock_client
+
+        asyncio.run(service.cache_cues({
+            key: key for key in ("press_setup", "rdl_setup", "rdl_back_note", "level_camera", "knees_out")
+        }))
+
+        assert set(service._fallback_cache) == {"knees_out"}
+        assert not service.has_cue("press_setup")
+        assert not service.has_cue("level_camera")
+
     def test_skips_cues_already_on_disk(self, cue_wav_dir):
         _write_cue_wav(cue_wav_dir / "knees_out_0.wav")
         service = AudioCueService(session=None)

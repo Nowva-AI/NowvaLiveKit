@@ -12,6 +12,12 @@ unchanged. A first-time user's body measurement is session-scoped, so press
 frames feed it while the press profile allows (feeds_body_calibration); that
 run has its own golden, and a profile that opts out reproduces the fresh one.
 
+The overhead press is still gated, so that switch only reaches an untracked
+stand-in. A second switch goes through a test-only analyser profile that
+exercises every hook (readiness, counter baseline, rejection, a counted rep,
+recorded-only verdicts, no depth, no camera refine, no body measurement) and
+must still reproduce the fresh golden on the way back.
+
 Regenerate only for an intended squat change:
     NOWVA_REGEN_GOLDENS=1 pytest tests/test_biomechanics/test_squat_golden_master.py
 """
@@ -22,15 +28,22 @@ import json
 import math
 import os
 import types
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pytest
+from pydantic import BaseModel
 
 from biomechanics.config import BiomechanicsConfig
+from biomechanics.faults.fault_types import FaultType, RepFaultRule
+from biomechanics.faults.session_reference import SessionReference
+from biomechanics.profiles import PROFILE_REGISTRY
+from biomechanics.profiles.base import ExerciseProfile
+from biomechanics.utils.frame_context import FrameContext
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import CocoKeypoints as CK
-from biomechanics.utils.types import Keypoint2D, Skeleton2D, Skeleton3D
+from biomechanics.utils.types import FaultEvent, FaultSeverity, Keypoint2D, Skeleton2D, Skeleton3D
 from conftest import SYNTHETIC_FPS, squat_depth_profile, world_squat_points
 
 GOLDEN_DIR = Path(__file__).parent / "fixtures" / "golden"
@@ -60,6 +73,18 @@ OTHER_EXERCISE_FRAMES = 30
 OTHER_EXERCISE_LEAD_S = 10.0
 OTHER_EXERCISE = "Barbell Overhead Press"
 SQUAT = "Barbell Back Squat"
+# The test-only analyser profile, registered per test (never in production code).
+FAKE_LIFT = "Fake Lift"
+FAKE_LIFT_PROFILE = "fake_lift"
+FAKE_LIFT_REPS = 2
+# Warm-up, the reps and a rest: a whole number of frame_data intervals that
+# ends before the squat's clock starts (OTHER_EXERCISE_LEAD_S).
+FAKE_LIFT_FRAMES = 240
+FAKE_REJECTION = "partial"
+FAKE_SHALLOW_CUE = "fake_lower"
+FAKE_DEPTH_DEG = 42.0
+# Hip above the ankles standing upright (cm), the analyser's counter baseline.
+FAKE_STANDING_SIGNAL_CM = -88.0
 ATHLETE_PARAMS = {
     "shoulder_width_m": 0.38,
     "femur_avg_m": 0.45,
@@ -159,6 +184,108 @@ class _RecordingClient:
 
     def send_message(self, message: dict) -> None:
         self.messages.append(message)
+
+
+class _FakeLiftFeatures(BaseModel):
+    exercise: str = FAKE_LIFT_PROFILE
+    rep_number: int
+    max_depth_angle: float = math.nan
+
+
+class _FakeLiftAnalyzer:
+    """Squat-shaped signal (hip above ankle, cm); rejects its first rep and counts the rest."""
+
+    def __init__(self) -> None:
+        self.rep_signal = math.nan
+        self.readiness_checks = 0
+        self.baseline_seeds = 0
+        self.reasons: list[str | None] = []
+
+    def is_ready(self, ctx: FrameContext) -> bool:
+        self.readiness_checks += 1
+        return ctx.angles is None
+
+    def counter_baseline(self) -> float | None:
+        self.baseline_seeds += 1
+        return FAKE_STANDING_SIGNAL_CM
+
+    def observe(self, ctx: FrameContext) -> None:
+        points = ctx.skeleton_3d.to_numpy()
+        hip_y = (points[CK.LEFT_HIP][1] + points[CK.RIGHT_HIP][1]) / 2.0
+        ankle_y = (points[CK.LEFT_ANKLE][1] + points[CK.RIGHT_ANKLE][1]) / 2.0
+        self.rep_signal = (hip_y - ankle_y) * 100.0
+
+    def on_rep_start(self, piston: bool) -> None:
+        pass
+
+    def finish_rep(self, rep_number: int) -> _FakeLiftFeatures:
+        return _FakeLiftFeatures(rep_number=rep_number, max_depth_angle=FAKE_DEPTH_DEG)
+
+    def rejection_reason(self, features: _FakeLiftFeatures) -> str | None:
+        self.reasons.append(FAKE_REJECTION if not self.reasons else None)
+        return self.reasons[-1]
+
+    def discard_rep(self) -> None:
+        pass
+
+    def reset_set(self) -> None:
+        pass
+
+
+class _FakeLiftReference(SessionReference):
+    def annotate(self, features) -> None:
+        pass
+
+    def update(self, features) -> None:
+        pass
+
+
+class _MildVerdictRule(RepFaultRule):
+    """A mild verdict on every counted rep, below the fake lift's start tier."""
+
+    @property
+    def fault_type(self) -> FaultType:
+        return FaultType.PRESS_UNEVEN
+
+    def judge_rep(self, features, reference, angles) -> FaultEvent | None:
+        return self._create_fault_event(FaultSeverity.MILD, 1.0, "verdict", angles, features.rep_number)
+
+
+class _FakeLiftProfile(ExerciseProfile):
+    name = FAKE_LIFT_PROFILE
+    movement_pattern = None
+    reports_depth = False
+    allows_camera_refine = False
+    feeds_body_calibration = False
+    min_cue_tiers = types.MappingProxyType({"press_uneven": FaultSeverity.MODERATE})
+
+    def create_fault_rules(self, config):
+        return [_MildVerdictRule()]
+
+    def create_rep_analyzer(self, config) -> _FakeLiftAnalyzer:
+        return _FakeLiftAnalyzer()
+
+    def create_session_reference(self) -> SessionReference:
+        return _FakeLiftReference()
+
+    def get_fault_to_cue_map(self):
+        return {"press_uneven": "press_uneven"}
+
+    def on_rep_rejected(self, reason, features, angles):
+        return [FaultEvent(
+            fault_type="rdl_partial", severity=FaultSeverity.MODERATE, severity_score=1.5,
+            message="rejected", rep_number=features.rep_number, details={"shallow_rep": True},
+        )]
+
+    def shallow_rep_cue(self, fault, streak, cued_this_set):
+        return FAKE_SHALLOW_CUE
+
+
+@dataclass
+class _FakeLiftRun:
+    analyzer: _FakeLiftAnalyzer
+    messages: list[dict]
+    view_recording: list[bool]
 
 
 def _cosine_move(start: float, end: float, seconds: float) -> list[float]:
@@ -349,6 +476,30 @@ def _after_switch_run(monkeypatch, multi_camera: bool, bilstm: bool, athlete_par
     return session.snapshot(ipc_from)
 
 
+def _after_analyser_switch_run(
+    monkeypatch, multi_camera: bool, bilstm: bool, athlete_params: bool,
+) -> tuple[dict, _FakeLiftRun]:
+    """Squat -> the fake analyser lift (a rejected rep, a counted one) -> squat, then the same session."""
+    session = _Session(monkeypatch, multi_camera, bilstm, athlete_params, CLOCK_START_S - OTHER_EXERCISE_LEAD_S)
+    view_recording: list[bool] = []
+    # The rig keeps buffering views for camera refines only while the exercise allows them.
+    session.provider.set_view_recording = view_recording.append
+    _start(session.pipeline, session.tracker, session.bridge, SQUAT)
+    fake_from = len(session.client.messages)
+    _switch(session.pipeline, session.tracker, session.bridge, FAKE_LIFT)
+    analyzer = session.pipeline._rep_analyzer
+    depths = [0.0] * READINESS_WARM_UP_FRAMES
+    for _ in range(FAKE_LIFT_REPS):
+        depths += squat_depth_profile()
+    session.frames(depths + [0.0] * (FAKE_LIFT_FRAMES - len(depths)))
+    fake_run = _FakeLiftRun(analyzer, session.client.messages[fake_from:], view_recording)
+    _switch(session.pipeline, session.tracker, session.bridge, SQUAT)
+    session.rewind(CLOCK_START_S)
+    ipc_from = len(session.client.messages)
+    _squat_session(session)
+    return session.snapshot(ipc_from), fake_run
+
+
 def _check_golden(name: str, actual: dict) -> None:
     path = GOLDEN_DIR / f"{name}.json"
     if os.getenv(REGEN_ENV) == "1":
@@ -412,6 +563,32 @@ class TestSquatGoldenMaster:
             pytest.skip("the fresh run writes this golden")
         monkeypatch.setattr(OverheadPressProfile, "feeds_body_calibration", False)
         _check_golden("squat_hip_counter_first_time", _after_switch_run(monkeypatch, True, False, False))
+
+    @pytest.mark.parametrize("multi_camera, bilstm, athlete_params, golden", VARIANTS)
+    def test_session_after_an_analyser_profile_and_back_matches_the_fresh_golden(
+        self, monkeypatch, multi_camera: bool, bilstm: bool, athlete_params: bool, golden: str,
+    ):
+        if os.getenv(REGEN_ENV) == "1":
+            pytest.skip("the fresh run writes this golden")
+        monkeypatch.setitem(PROFILE_REGISTRY, FAKE_LIFT_PROFILE, _FakeLiftProfile)
+
+        snapshot, fake_run = _after_analyser_switch_run(monkeypatch, multi_camera, bilstm, athlete_params)
+
+        _check_golden(golden, snapshot)
+        # The switch really went through every analyser hook and profile flag.
+        assert isinstance(fake_run.analyzer, _FakeLiftAnalyzer)
+        assert fake_run.analyzer.readiness_checks > 0
+        assert fake_run.analyzer.baseline_seeds > 0
+        assert fake_run.analyzer.reasons == [FAKE_REJECTION, None]
+        by_type: dict[str, list[dict]] = {}
+        for message in fake_run.messages:
+            by_type.setdefault(message["type"], []).append(message)
+        assert by_type["cache_cues"][0]["reports_depth"] is False
+        assert [message["cue"] for message in by_type["shallow_rep"]] == [FAKE_SHALLOW_CUE]
+        assert [message["max_depth_angle"] for message in by_type["rep_complete"]] == [None]
+        assert [message.get("recorded_only") for message in by_type["fault"]] == [True]
+        if multi_camera:
+            assert fake_run.view_recording == [True, False, True]
 
     def test_golden_sessions_exercise_every_squat_outcome(self):
         expected = json.loads((GOLDEN_DIR / "squat_hip_counter_athlete_params.json").read_text())

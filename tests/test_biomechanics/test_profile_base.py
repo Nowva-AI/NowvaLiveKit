@@ -56,7 +56,8 @@ class TestHookDefaults:
         assert not profile.needs_bar_3d
         assert profile.feeds_body_calibration
         assert not profile.gate_until_ready
-        assert profile.reports_depth
+        # Only the squat speaks about depth (it sets reports_depth itself).
+        assert not profile.reports_depth
         assert profile.readiness_hint == ""
         assert dict(profile.min_cue_tiers) == {}
         assert profile.tracking_keypoints == LEG_KEYPOINTS

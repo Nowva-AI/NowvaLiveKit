@@ -991,20 +991,25 @@ class BiomechanicsPipeline:
             rep_data.ascent_time = concentric_s
 
     def _emit_rejection(
-        self, reason: str, features, angles: JointAngles, faults: list[FaultEvent],
+        self, reason: str, features, angles: JointAngles, faults: list[FaultEvent], ctx: FrameContext,
     ) -> tuple[bool, str | None]:
         """Faults for a rep the analyser rejected; returns (a shallow_rep message
-        is due, its cue). "ignore" is silent and leaves every streak as it is."""
+        is due, its cue). "ignore" is silent and leaves every streak as it is.
+        A recorded-only shallow verdict gets a cue-less message that is not
+        counted among the set's cued ones."""
         rejected = self._profile.on_rep_rejected(reason, features, angles)
         if reason == REJECTION_IGNORE:
             return False, None
         streak = self._rejection_streaks.get(reason, 0) + 1
         self._rejection_streaks[reason] = streak
         emitted = [fault for fault in rejected if self._rule_engine.tag_observability(fault)]
+        self._stamp_recorded_only(emitted, ctx)
         faults.extend(emitted)
         shallow_fault = next((fault for fault in emitted if fault.details.get("shallow_rep")), None)
         if shallow_fault is None:
             return False, None
+        if shallow_fault.details.get("recorded_only"):
+            return True, None
         cue = self._profile.shallow_rep_cue(shallow_fault, streak, self._shallow_cues_this_set)
         if cue is not None:
             self._shallow_cues_this_set += 1
@@ -1018,6 +1023,7 @@ class BiomechanicsPipeline:
         was_in_rep: bool,
         angles: JointAngles,
         faults: list[FaultEvent],
+        ctx: FrameContext,
     ) -> tuple[RepData | None, bool, str | None]:
         """Rep boundaries on the analyser path, in the spec's order: the ended
         rep is finished (or rejected, before any verdict or reference update)
@@ -1044,7 +1050,7 @@ class BiomechanicsPipeline:
                 self._rule_engine.discard_rep()
                 analyzer.discard_rep()
                 rep_data = None
-                shallow_rep, shallow_cue = self._emit_rejection(reason, features, angles, faults)
+                shallow_rep, shallow_cue = self._emit_rejection(reason, features, angles, faults, ctx)
         elif feedback == "go_deeper":
             self._rule_engine.discard_rep()
             analyzer.discard_rep()
@@ -1326,6 +1332,8 @@ class BiomechanicsPipeline:
                 if delta_deg is not None and not self._pitch_certification_revoked:
                     self.revoke_pitch_certification(delta_deg)
                     pitch_revoked_deg = delta_deg
+                    # Every verdict of this frame is judged uncertified.
+                    ctx.pitch_certified = self.pitch_certified
         else:
             rep_signal = self._profile.get_rep_signal(analysis, angles)
 
@@ -1409,7 +1417,7 @@ class BiomechanicsPipeline:
 
         if analyzer is not None:
             rep_data, analyzer_shallow_rep, shallow_rep_cue = self._analyzer_rep_end(
-                analyzer, rep_data, feedback, was_in_rep, angles, faults,
+                analyzer, rep_data, feedback, was_in_rep, angles, faults, ctx,
             )
         else:
             # A completed movement whose hip never reached the athlete's depth

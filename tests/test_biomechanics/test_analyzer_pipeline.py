@@ -3,7 +3,9 @@ Tests for the pipeline's rep-analyser path (docs/exercises/SHARED-PLUMBING.md §
 a profile with a RepAnalyzer owns the rep signal and per-rep features, the
 squat blocks are skipped, rejections run in the spec's order with a
 pipeline-owned streak, readiness and counter baselines come from the analyser,
-and verdicts below a fault's start tier are stamped recorded-only.
+and verdicts below a fault's start tier are stamped recorded-only (a rejected
+rep's too, before its shallow_rep cue is chosen, and at the uncertified tier
+from the frame a pitch tripwire fires on).
 """
 
 from __future__ import annotations
@@ -14,7 +16,8 @@ import numpy as np
 import pytest
 from pydantic import BaseModel
 
-from biomechanics.faults.fault_types import FaultType, RepFaultRule
+from biomechanics.coaching.ipc_bridge import IPCBridge
+from biomechanics.faults.fault_types import FaultRule, FaultType, RepFaultRule
 from biomechanics.faults.session_reference import SessionReference
 from biomechanics.profiles.base import ExerciseProfile
 from biomechanics.profiles.squat import SquatProfile
@@ -37,6 +40,9 @@ PISTON_REPS = 3
 SHALLOW_DIP_DEPTH = 0.3
 TRIPWIRE_DELTA_DEG = 4.0
 TRIPWIRE_AFTER_OBSERVATIONS = 3
+# Far enough after the first analysed frame that the rule engine's 0.5 s
+# de-duplication lets a verdict through on both.
+TRIPWIRE_WITH_VERDICT_OBSERVATIONS = 20
 MOUNT_PITCH_DEG = "2.0"
 CUE_AFTER_STREAK = 2
 MAX_CUES_PER_SET = 2
@@ -109,8 +115,12 @@ class _SeededAnalyzer(_FakeAnalyzer):
 
 
 class _TrippingAnalyzer(_FakeAnalyzer):
+    def __init__(self, calls: list, trip_after: int = TRIPWIRE_AFTER_OBSERVATIONS) -> None:
+        super().__init__(calls)
+        self.trip_after = trip_after
+
     def pitch_tripwire_delta(self) -> float | None:
-        return TRIPWIRE_DELTA_DEG if len(self.observed) >= TRIPWIRE_AFTER_OBSERVATIONS else None
+        return TRIPWIRE_DELTA_DEG if len(self.observed) >= self.trip_after else None
 
 
 class _RecordingReference(SessionReference):
@@ -147,6 +157,32 @@ class _VerdictRule(RepFaultRule):
 
     def discard_rep(self) -> None:
         self._calls.append(("rule_discard",))
+
+
+class _ObservationRule(FaultRule):
+    """A moderate frame verdict on chosen analyser observations (1 = the first analysed frame)."""
+
+    def __init__(self, fault_type: FaultType, analyzer: _FakeAnalyzer, observations: frozenset[int]) -> None:
+        self._type = fault_type
+        self._analyzer = analyzer
+        self._observations = observations
+
+    @property
+    def fault_type(self) -> FaultType:
+        return self._type
+
+    def evaluate(self, angles, history, in_rep: bool = False, rep_number: int = 0) -> FaultEvent | None:
+        if len(self._analyzer.observed) not in self._observations:
+            return None
+        return self._create_fault_event(FaultSeverity.MODERATE, 1.5, "verdict", angles, rep_number)
+
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    def send_message(self, message: dict) -> None:
+        self.messages.append(message)
 
 
 def _fault(fault_type: str, rep_number: int, shallow: bool = False) -> FaultEvent:
@@ -196,6 +232,19 @@ class _AnalyserProfile(ExerciseProfile):
         if streak >= CUE_AFTER_STREAK and cued_this_set < MAX_CUES_PER_SET:
             return SHALLOW_CUE
         return None
+
+
+class _AlwaysCueProfile(_AnalyserProfile):
+    def shallow_rep_cue(self, fault, streak, cued_this_set):
+        self.cue_args.append((streak, cued_this_set))
+        return SHALLOW_CUE
+
+
+class _CertifiedTierProfile(_AnalyserProfile):
+    """Cues from mild only while the mount is certified, severe otherwise."""
+
+    def cue_start_tier(self, fault_type, ctx):
+        return FaultSeverity.MILD if ctx.pitch_certified else FaultSeverity.SEVERE
 
 
 def _session(monkeypatch, profile: ExerciseProfile, multi_camera: bool = True) -> SyntheticSession:
@@ -562,6 +611,46 @@ class TestRecordedOnly:
         assert all(fault.details.get("recorded_only") for fault in faults)
         assert seen and all(isinstance(ctx, FrameContext) and ctx.angles is not None for ctx in seen)
 
+    def test_a_recorded_only_shallow_verdict_is_sent_cue_less_and_flagged(self, monkeypatch):
+        from biomechanics.pipeline_process import _send_shallow_rep
+
+        calls: list = []
+        profile = _AlwaysCueProfile(_FakeAnalyzer(calls, reasons=["partial"]), calls)
+        profile.min_cue_tiers = {"rdl_partial": FaultSeverity.SEVERE}
+        session = _session(monkeypatch, profile)
+
+        rejected = [result for result in session.run(_reps(1)) if result.analyzer_shallow_rep]
+
+        assert len(rejected) == 1
+        assert rejected[0].faults[0].severity == FaultSeverity.MODERATE
+        assert rejected[0].faults[0].details["recorded_only"] is True
+        assert rejected[0].shallow_rep_cue is None
+        assert profile.cue_args == []
+        assert session.pipeline._shallow_cues_this_set == 0
+        client = _RecordingClient()
+        _send_shallow_rep(IPCBridge(client), rejected[0], set_number=1)
+        message = next(message for message in client.messages if message["type"] == "shallow_rep")
+        assert message["cue"] is None
+        assert message["recorded_only"] is True
+
+    def test_a_cueable_shallow_verdict_carries_no_recorded_only_flag(self, monkeypatch):
+        from biomechanics.pipeline_process import _send_shallow_rep
+
+        calls: list = []
+        profile = _AlwaysCueProfile(_FakeAnalyzer(calls, reasons=["partial"]), calls)
+        profile.min_cue_tiers = {"rdl_partial": FaultSeverity.MODERATE}
+        session = _session(monkeypatch, profile)
+
+        rejected = [result for result in session.run(_reps(1)) if result.analyzer_shallow_rep]
+
+        assert rejected[0].shallow_rep_cue == SHALLOW_CUE
+        assert session.pipeline._shallow_cues_this_set == 1
+        client = _RecordingClient()
+        _send_shallow_rep(IPCBridge(client), rejected[0], set_number=1)
+        message = next(message for message in client.messages if message["type"] == "shallow_rep")
+        assert message["cue"] == SHALLOW_CUE
+        assert "recorded_only" not in message
+
 
 class TestProfileFlagsInThePipeline:
     def test_a_profile_that_does_not_feed_body_calibration_never_measures_the_body(self, monkeypatch):
@@ -606,3 +695,20 @@ class TestPitchTripwire:
         assert not session.pipeline.pitch_certified
         session.pipeline.set_exercise("Barbell Back Squat")
         assert not session.pipeline.pitch_certified
+
+    def test_a_verdict_on_the_tripping_frame_is_judged_uncertified(self, monkeypatch):
+        monkeypatch.setenv("NOWVA_CAMERA_PITCH_DEG", MOUNT_PITCH_DEG)
+        calls: list = []
+        analyzer = _TrippingAnalyzer(calls, trip_after=TRIPWIRE_WITH_VERDICT_OBSERVATIONS)
+        rule = _ObservationRule(
+            FaultType.RDL_HIP_SINK, analyzer, frozenset({1, TRIPWIRE_WITH_VERDICT_OBSERVATIONS}),
+        )
+        session = _session(monkeypatch, _CertifiedTierProfile(analyzer, calls, rules=[rule]), multi_camera=False)
+
+        results = session.run([0.0] * READINESS_WARM_UP_FRAMES * 4)
+
+        tripping = [index for index, result in enumerate(results) if result.pitch_certification_revoked_deg]
+        assert len(tripping) == 1
+        before = [fault for result in results[:tripping[0]] for fault in result.faults]
+        assert [fault.details.get("recorded_only") for fault in before] == [None]
+        assert [fault.details.get("recorded_only") for fault in results[tripping[0]].faults] == [True]

@@ -631,7 +631,8 @@ class CoachingService:
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — rep_complete dropped")
             elif msg_type == "shallow_rep":
-                depth_name = message.get("depth_class_name", "")
+                # An analyser's rejected rep has no depth class; its range label stands in
+                depth_name = message.get("depth_class_name") or message.get("label") or ""
                 logger.info(
                     f"[COACHING SERVICE] SHALLOW REP received: depth={depth_name} "
                     f"knee={message.get('max_knee_flexion')}°"
@@ -644,6 +645,7 @@ class CoachingService:
                     await self._coaching_orchestrator.on_shallow_rep(
                         cue_key=message.get("cue"),
                         depth_class_name=depth_name,
+                        recorded_only=bool(message.get("recorded_only")),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — shallow_rep dropped")
@@ -702,6 +704,11 @@ class CoachingService:
                     await self._coaching_orchestrator.on_tracking_quality(
                         message.get("status", ""), message.get("reason", "keypoints")
                     )
+            elif msg_type == "pipeline_status":
+                status = message.get("status", "")
+                logger.info(f"[COACHING SERVICE] PIPELINE STATUS {status}")
+                if self._workout_active and self._coaching_orchestrator:
+                    self._coaching_orchestrator.on_pipeline_status(status)
             elif msg_type == "rest_complete":
                 logger.info("[COACHING SERVICE] REST COMPLETE — firing LLM prompt for next set")
                 # The pipeline counts reps as soon as its rest timer ends, so
@@ -718,6 +725,8 @@ class CoachingService:
                 finally:
                     if orchestrator:
                         orchestrator.cues_suppressed = False
+                        # A new exercise's setup lines follow its announcement
+                        orchestrator.play_clips_at_rest_end()
             elif msg_type == "assessment_rep":
                 rep = message.get("rep_number", 0)
                 total = message.get("total_required", 2)
@@ -822,6 +831,7 @@ class CoachingService:
                 profile_name=profile,
                 waits_for_diagnosis=message.get("waits_for_diagnosis"),
                 set_idle_timeout_s=message.get("set_idle_timeout_s"),
+                hedged_recap_faults=message.get("hedged_recap_faults"),
             )
         # One DB session per exercise. The pipeline sends this after the
         # previous exercise's last set and diagnosis, so those stay with it.
@@ -838,6 +848,9 @@ class CoachingService:
                 self._coaching_orchestrator.positive_cue_keys = available
         except Exception as e:
             logger.error(f"[COACHING SERVICE] TTS cache generation failed: {e}")
+        # The exercise's setup lines, once the pipeline is ready for it
+        if self._workout_active and self._coaching_orchestrator:
+            self._coaching_orchestrator.on_exercise_ready()
 
     async def _on_assessment_result(self, message: dict) -> None:
         """Handle assessment result — choreographed demo on first failure, else spoken feedback.
@@ -1258,6 +1271,9 @@ class CoachingService:
             preemptive = PREEMPTIVE_TEXT.get(cue_key)
             if preemptive:
                 parts.append(f"The set-up line for it: '{preemptive}'")
+        setup_action = orchestrator.next_set_setup_action() if orchestrator and next_set > 1 else None
+        if setup_action:
+            parts.append(f"One setup change before they unrack: {setup_action}. Say it as one plain action.")
         parts.append(
             "Say it calmly in one or two short sentences, in your own words — never the same "
             "announcement twice in a session."

@@ -51,6 +51,12 @@ FAULT_LABELS = {
     "rdl_partial": "stopping too high for the rep to count",
 }
 
+# The press grip by the way the hands should move: "narrower" means the grip is too wide
+GRIP_DIRECTION_LABELS = {
+    "narrower": "grip too wide — forearms leaning in",
+    "wider": "grip too narrow — elbows flaring out",
+}
+
 # How progress lines name an exercise profile's sessions
 EXERCISE_PROGRESS_NAMES = {
     "squat": "squat",
@@ -71,7 +77,12 @@ def _days_ago_phrase(days_ago: int) -> str:
     return f"{days_ago} days ago"
 
 
-def fault_label(fault_type: str) -> str:
+def fault_label(fault_type: str, details: dict | None = None) -> str:
+    """The fault in plain words; the press grip names which way it is off when
+    the verdict's details carry a direction."""
+    direction = (details or {}).get("direction")
+    if fault_type == "press_grip" and direction in GRIP_DIRECTION_LABELS:
+        return GRIP_DIRECTION_LABELS[direction]
     return FAULT_LABELS.get(fault_type, fault_type.replace("_", " "))
 
 

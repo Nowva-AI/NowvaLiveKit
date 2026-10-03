@@ -3,13 +3,16 @@ Tests for exercise profile resolution: names from the program library and
 the voice agent reach the right profile, unknown exercises are untracked
 rather than squats, and only squats are calibrated or offered for coaching.
 Profiles that gate themselves until coaching-ready (press, RDL) resolve to an
-untracked stand-in, and unmodelled variants to UntrackedVariantProfile.
+untracked stand-in, and unmodelled variants to UntrackedVariantProfile. Every
+registered profile's readiness check, and its analyser's, accepts a pre-latch
+frame, whose context has no angles.
 """
 
 from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from biomechanics.calibration import get_movement_pattern
@@ -32,8 +35,43 @@ from biomechanics.profiles.untracked_variant import (
     RDL_VARIANTS,
     UntrackedVariantProfile,
 )
+from biomechanics.utils.frame_context import FrameContext
+from biomechanics.utils.types import CocoKeypoints as CK
+from biomechanics.utils.types import Skeleton3D
+from conftest import (
+    SYNTHETIC_CLOCK_START_S,
+    SYNTHETIC_CONFIDENCE,
+    SYNTHETIC_MIN_DEPTH_RATIO,
+    SyntheticSession,
+    world_squat_points,
+)
 
 GATED_PROFILES = (OverheadPressProfile, RomanianDeadliftProfile)
+# Every class a scheduled program can reach, gated ones included.
+PROFILE_CLASSES = sorted({*PROFILE_REGISTRY.values(), UntrackedProfile}, key=lambda cls: cls.__name__)
+# Profiles whose pre-plumbing readiness predicates took (skeleton_3d, angles).
+LEGACY_READINESS_EXERCISES = ("Barbell Row", "Skull Crusher", "Overhead Tricep Extension")
+PRE_LATCH_FRAMES = 20
+
+
+def _pre_latch_context(capture_mode: str, confidence: float) -> FrameContext:
+    """What the pipeline hands a readiness check: the raw hip-centred skeleton, no angles."""
+    world_points = world_squat_points(SYNTHETIC_MIN_DEPTH_RATIO)
+    centred = world_points - (world_points[CK.LEFT_HIP] + world_points[CK.RIGHT_HIP]) / 2.0
+    confidences = np.full(len(world_points), confidence)
+    skeleton_world = None
+    if capture_mode == "triangulated":
+        skeleton_world = Skeleton3D.from_numpy(world_points, confidences=confidences)
+    return FrameContext(
+        skeleton_3d=Skeleton3D.from_numpy(centred, confidences=confidences),
+        angles=None,
+        timestamp=SYNTHETIC_CLOCK_START_S,
+        phase="idle",
+        in_rep=False,
+        capture_mode=capture_mode,
+        raw_confidences=confidences,
+        skeleton_world=skeleton_world,
+    )
 
 
 @pytest.fixture
@@ -163,9 +201,47 @@ class TestUntrackedProfile:
         assert profile.get_fault_to_cue_map() == {}
 
 
+class TestReadinessBeforeTheLatch:
+    """The pipeline runs these on every pre-latch frame; one that raises ends
+    the pose loop for the rest of the session."""
+
+    @pytest.mark.parametrize("profile_class", PROFILE_CLASSES, ids=lambda cls: cls.__name__)
+    @pytest.mark.parametrize(
+        ("capture_mode", "confidence"),
+        [("single_camera", SYNTHETIC_CONFIDENCE), ("triangulated", SYNTHETIC_CONFIDENCE), ("single_camera", 0.0)],
+        ids=["mono", "rig", "keypoints_lost"],
+    )
+    def test_readiness_checks_accept_a_context_without_angles(
+        self, profile_class: type[ExerciseProfile], capture_mode: str, confidence: float,
+    ):
+        profile = profile_class()
+        ctx = _pre_latch_context(capture_mode, confidence)
+
+        profile_check = profile.get_readiness_check()
+        if profile_check is not None:
+            assert profile_check(ctx) in (True, False)
+        analyzer = profile.create_rep_analyzer(BiomechanicsConfig())
+        analyzer_check = getattr(analyzer, "is_ready", None)
+        if analyzer_check is not None:
+            assert analyzer_check(ctx) in (True, False)
+
+    @pytest.mark.parametrize("exercise_name", LEGACY_READINESS_EXERCISES)
+    def test_a_scheduled_legacy_exercise_survives_its_pre_latch_frames(self, monkeypatch, exercise_name: str):
+        session = SyntheticSession(monkeypatch, multi_camera=False, exercise_name=exercise_name)
+        assert session.pipeline.profile.get_readiness_check() is None
+
+        session.run([0.0] * PRE_LATCH_FRAMES)
+
+        assert session.pipeline.is_ready
+
+
 class TestProfileFlags:
     def test_only_squats_are_offered_for_coaching(self):
         assert [profile.name for profile in coaching_ready_profiles()] == ["squat"]
+
+    @pytest.mark.parametrize("profile_class", PROFILE_CLASSES, ids=lambda cls: cls.__name__)
+    def test_only_squats_report_depth(self, profile_class: type[ExerciseProfile]):
+        assert profile_class.reports_depth is (profile_class is SquatProfile)
 
     def test_only_squats_use_the_bilstm_and_diagnosis_engine(self):
         for exercise_name in ("Barbell Overhead Press", "Barbell Romanian Deadlift", "Reverse Lunge"):

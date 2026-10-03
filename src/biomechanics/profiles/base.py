@@ -10,7 +10,7 @@ Subclasses override only the methods that differ from the default (squat)
 behavior. This is a concrete base class, not an ABC — every method has a
 sensible default so new exercises can be added incrementally. Every hook
 for non-squat exercises (docs/exercises/SHARED-PLUMBING.md §1, §4, §9)
-defaults to today's squat path.
+defaults to today's squat path, except reports_depth, which only the squat sets.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ class ExerciseProfile:
     feeds_body_calibration: bool = True
     # Until coaching_ready, get_profile serves an untracked stand-in instead.
     gate_until_ready: bool = False
-    # Set summaries and recaps speak about depth.
-    reports_depth: bool = True
+    # Set summaries and recaps speak about depth (the squat only).
+    reports_depth: bool = False
     # Readiness HUD hint when the profile's own readiness check fails ("" = generic).
     readiness_hint: str = ""
     # Static start tier per fault type: verdicts below it are recorded, never

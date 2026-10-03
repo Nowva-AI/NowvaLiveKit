@@ -1,12 +1,14 @@
 """
 Raw skeleton recorder and replay (SHARED-PLUMBING.md §8): a live session's raw
 frames and control events, replayed through a fresh pipeline, reproduce its
-latch, reps and faults exactly.
+latch, reps and faults exactly, and a single camera's mount (config and the
+NOWVA_CAMERA_PITCH_DEG override) reproduces its pitch certification.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,9 @@ from biomechanics.replay.raw_skeleton import load_recording, main, replay_record
 from conftest import SYNTHETIC_FPS, SyntheticSession, squat_depth_profile
 
 READINESS_WARM_UP_FRAMES = 10
+PITCH_ENV = "NOWVA_CAMERA_PITCH_DEG"
+MOUNT_PITCH_DEG = "3.5"
+MOUNT_HEIGHT_M = 0.9
 REST_FRAMES = 20
 VALGUS_SHIFT_M = 0.12
 ATHLETE_PARAMS = {
@@ -114,6 +119,44 @@ class TestRawSkeletonReplay:
         replay_recording(path, config)
 
         assert "Config differs" in caplog.text
+
+    def test_the_header_records_the_camera_mount_and_pitch_override(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setenv(PITCH_ENV, MOUNT_PITCH_DEG)
+        config = BiomechanicsConfig()
+        config.capture.mount_height_m = MOUNT_HEIGHT_M
+        session = SyntheticSession(monkeypatch, multi_camera=False, config=config)
+        path = tmp_path / "raw_skeleton.jsonl"
+        session.pipeline.enable_raw_recording(path)
+        session.pipeline.release()
+
+        header = load_recording(path).header
+
+        assert header["camera_pitch_env"] == MOUNT_PITCH_DEG
+        assert header["camera_mount"] == {
+            "mount_source": "none", "mount_pitch_deg": None, "mount_height_m": MOUNT_HEIGHT_M,
+        }
+
+    def test_a_single_camera_replay_reproduces_pitch_certification(self, monkeypatch, tmp_path: Path):
+        from biomechanics import pipeline as pipeline_module
+
+        path = tmp_path / "raw_skeleton.jsonl"
+        monkeypatch.setenv(PITCH_ENV, MOUNT_PITCH_DEG)
+        live = _live_session(monkeypatch, path, multi_camera=False)
+        monkeypatch.delenv(PITCH_ENV)
+        replayed_pipelines: list = []
+
+        class _ObservedPipeline(pipeline_module.BiomechanicsPipeline):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                replayed_pipelines.append(self)
+
+        monkeypatch.setattr(pipeline_module, "BiomechanicsPipeline", _ObservedPipeline)
+        replayed = replay_recording(path, BiomechanicsConfig())
+
+        assert replayed_pipelines[0].pitch_certified
+        assert replayed_pipelines[0]._camera_mount.pitch_deg == pytest.approx(float(MOUNT_PITCH_DEG))
+        assert _outcome(replayed.frames) == _outcome(live)
+        assert PITCH_ENV not in os.environ
 
     def test_an_unknown_recording_version_is_refused(self, tmp_path: Path):
         path = tmp_path / "raw_skeleton.jsonl"

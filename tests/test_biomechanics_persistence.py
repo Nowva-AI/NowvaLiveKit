@@ -757,6 +757,13 @@ class TestRecordedOnlyIsNeverAggregated:
         row = _build_rep_row(_rep_msg(faults_detailed=[_recorded_only_detail()]))
         assert row["faults"][0]["details"]["recorded_only"] is True
 
+    def test_a_top_level_flag_on_a_message_counts_as_recorded_only(self):
+        from db.biomechanics_persistence import _counted_faults
+
+        shallow_rep = {"type": "shallow_rep", "fault_type": "rdl_partial", "recorded_only": True}
+        counted = _fault_detail("press_lockout", 2.0)
+        assert _counted_faults([shallow_rep, counted]) == [counted]
+
 
 class TestEndOfRepFaultTypes:
     def test_rdl_lockout_and_missed_press_are_end_of_rep(self):

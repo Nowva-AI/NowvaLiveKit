@@ -95,3 +95,9 @@ class TestEnvOverrides:
         clean_env.setenv("ENDPOINTING_MIN_DELAY", "0.5")
         options = pipeline_factory.build_turn_handling()
         assert options["endpointing"]["min_delay"] == pytest.approx(0.5)
+
+
+class TestSttKeyterms:
+    def test_press_and_rdl_names_are_keyterms(self) -> None:
+        for name in ("Barbell Romanian Deadlift", "RDL", "Barbell Overhead Press", "Overhead Press", "OHP"):
+            assert name in pipeline_factory.STT_KEYTERMS, name

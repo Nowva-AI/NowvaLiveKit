@@ -103,8 +103,9 @@ def mean_fault_severity(fault_type: str, reps_faults: list[list[dict]]) -> float
 
 # A recorded-only verdict sat below its fault's cue start tier: it is stored,
 # flagged, in the rep's faults, but no count, trend or "most common fault" uses it.
+# Rule verdicts carry the flag in details; fault and shallow_rep messages at the top level.
 def _is_recorded_only(fault: dict) -> bool:
-    return bool((fault.get("details") or {}).get("recorded_only"))
+    return bool(fault.get("recorded_only") or (fault.get("details") or {}).get("recorded_only"))
 
 
 def _counted_faults(rep_faults: list[dict] | None) -> list[dict]:

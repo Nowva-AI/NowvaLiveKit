@@ -12,7 +12,6 @@ from biomechanics.faults.rules.tempo import EccentricTempoRule, StallingRule
 from biomechanics.faults.rules.range_of_motion import RangeOfMotionRule
 from biomechanics.faults.rules.back_rounding import BackRoundingRule
 from biomechanics.faults.rules.lockout import LockoutRule
-from biomechanics.faults.rules.elbow_flare import ElbowFlareRule
 from biomechanics.faults.rules.bar_path import BarPathRule
 from biomechanics.faults.rules.shoulder_stability import ShoulderStabilityRule
 from biomechanics.faults.rules.trunk_stability import TrunkStabilityRule
@@ -29,7 +28,6 @@ __all__ = [
     "RangeOfMotionRule",
     "BackRoundingRule",
     "LockoutRule",
-    "ElbowFlareRule",
     "BarPathRule",
     "ShoulderStabilityRule",
     "TrunkStabilityRule",

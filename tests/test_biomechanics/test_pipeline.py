@@ -935,8 +935,10 @@ class TestExerciseProfiles:
         assert pipe._bilstm is None
         assert not pipe._depth_gated
         assert {rule.fault_type for rule in pipe._rule_engine.rules} == {
-            FaultType.LOCKOUT, FaultType.ELBOW_FLARE, FaultType.BAR_PATH, FaultType.BILATERAL_ASYMMETRY,
+            FaultType.PRESS_LAYBACK, FaultType.PRESS_BAR_FORWARD, FaultType.PRESS_LOCKOUT,
+            FaultType.PRESS_LEG_DRIVE, FaultType.PRESS_UNEVEN, FaultType.PRESS_VELOCITY_LOSS, FaultType.PRESS_GRIP,
         }
+        assert pipe._rep_analyzer is not None
 
     def test_depth_target_survives_a_switch_away_and_back(self, monkeypatch):
         pipe = _pipeline_for(monkeypatch, "Barbell Back Squat")

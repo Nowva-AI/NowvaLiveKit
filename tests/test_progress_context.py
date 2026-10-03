@@ -277,6 +277,19 @@ class TestExerciseFaultLabels:
             assert "hinge" not in label
 
 
+class TestDirectionAwareGripLabel:
+    def test_grip_label_names_which_way_it_is_off(self):
+        assert fault_label("press_grip", {"direction": "wider"}) == "grip too narrow — elbows flaring out"
+        assert fault_label("press_grip", {"direction": "narrower"}) == "grip too wide — forearms leaning in"
+
+    def test_without_a_direction_the_generic_label_stays(self):
+        assert fault_label("press_grip") == FAULT_LABELS["press_grip"]
+        assert fault_label("press_grip", {"value": 3.0}) == FAULT_LABELS["press_grip"]
+
+    def test_details_never_change_other_labels(self):
+        assert fault_label("press_uneven", {"direction": "wider"}) == FAULT_LABELS["press_uneven"]
+
+
 class TestRecordedOnlyNeverBecomesMostCommon:
     def test_session_with_only_recorded_only_uneven_has_no_most_common_fault(self):
         """The press instance of the shared test: from stored rows to the lines."""

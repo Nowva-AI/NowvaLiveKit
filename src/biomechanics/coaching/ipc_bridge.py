@@ -347,6 +347,9 @@ class IPCBridge:
         }
         if label is not None:
             msg["label"] = label
+        # Below its fault's start tier: stored and flagged, never cued.
+        if fault is not None and _is_recorded_only(fault):
+            msg["recorded_only"] = True
         if fault is not None:
             msg.update({
                 "fault_type": fault.fault_type,

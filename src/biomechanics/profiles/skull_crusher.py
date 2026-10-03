@@ -6,7 +6,7 @@ average elbow flexion.
 """
 
 import logging
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
 from biomechanics.faults.fault_types import FaultRule
@@ -88,12 +88,6 @@ class SkullCrusherProfile(ExerciseProfile):
 
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"elbow": angles.elbow_asymmetry}
-
-    def get_readiness_check(self) -> Optional[Callable]:
-        """Arms should be roughly vertical (shoulder flexion ~90°)."""
-        def _skull_crusher_ready(skeleton_3d: Skeleton3D, angles: JointAngles) -> bool:
-            return 70.0 <= angles.avg_shoulder_flexion <= 110.0
-        return _skull_crusher_ready
 
     def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {

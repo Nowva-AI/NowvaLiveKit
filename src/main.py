@@ -41,7 +41,7 @@ COACHING_FORWARD_TYPES = frozenset({
     'cache_cues', 'fault', 'rep_complete', 'shallow_rep', 'rest_complete', 'frame_data',
     'calibration_rep', 'calibration_complete', 'diagnosis_complete', 'rep_diagnosis',
     'assessment_ready', 'assessment_result', 'assessment_rep', 'demo_abort', 'demo_started',
-    'last_rep_snapshot', 'demo_data_ready', 'tracking_quality',
+    'last_rep_snapshot', 'demo_data_ready', 'tracking_quality', 'pipeline_status',
 })
 
 # Suppress SQLAlchemy INFO logs
@@ -570,6 +570,13 @@ class NowvaApp:
 
         return get_profile(exercise_name or DEFAULT_EXERCISE_NAME).name
 
+    @staticmethod
+    def _reports_depth(exercise_name: str | None) -> bool:
+        """Whether that profile has a depth, so the display shows its depth tiles."""
+        from biomechanics.profiles import get_profile
+
+        return get_profile(exercise_name or DEFAULT_EXERCISE_NAME).reports_depth
+
     def _publish_workout_start(self) -> None:
         """Push the workout config to the display so the HUD knows targets."""
         exercise_name = self.state.get("workout.exercise_name") or DEFAULT_EXERCISE_NAME
@@ -587,6 +594,7 @@ class NowvaApp:
             "action": "start",
             "exercise": exercise_name,
             "profile": self._profile_name(exercise_name),
+            "reports_depth": self._reports_depth(exercise_name),
             "total_sets": total_sets,
             "target_reps": target_reps,
             "weight_lbs": weight,
@@ -643,6 +651,7 @@ class NowvaApp:
                     "action": "start",
                     "exercise": message.get("exercise_name"),
                     "profile": self._profile_name(message.get("exercise_name")),
+                    "reports_depth": self._reports_depth(message.get("exercise_name")),
                     "total_sets": message.get("total_sets") or 0,
                     "target_reps": message.get("target_reps") or 0,
                     "weight_lbs": message.get("weight_lbs") or 0.0,
