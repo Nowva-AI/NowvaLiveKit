@@ -9,6 +9,7 @@ Cached cues always take priority over LLM-generated speech.
 import asyncio
 import enum
 import logging
+import math
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,10 @@ from agent.services.coaching_constants import (
     ADJUSTMENT_ON_TARGET_CUE,
     CUE_DISPLAY_LABELS,
     CUE_TEXT_MAP,
+    DEADLIFT_BACK_CUE,
+    DEADLIFT_CLOSED_LOOP,
+    DEADLIFT_CLOSER_CUE,
+    DEADLIFT_STEP_CLOSER_CUE,
     TRACKING_LOST_CUE,
 )
 from biomechanics.coaching.cue_cache import (
@@ -71,6 +76,10 @@ BEST_REP_CUE_KEY = "strong"
 # when it was mild on MILD_REPEAT_MIN_REPS of the last MILD_REPEAT_WINDOW_REPS reps.
 CUE_SEVERITIES = frozenset({"moderate", "severe"})
 SEVERITY_RANK = {"mild": 1, "moderate": 2, "severe": 3}
+# A fault's minimum cue tier is a severity, or "recap": recorded and recapped,
+# never cued mid-set.
+RECAP_ONLY_TIER = "recap"
+MIN_TIER_RANK = {**SEVERITY_RANK, RECAP_ONLY_TIER: max(SEVERITY_RANK.values()) + 1}
 MILD_REPEAT_WINDOW_REPS = 3
 MILD_REPEAT_MIN_REPS = 2
 # After this many cues for one fault in a set, the rest waits for the recap.
@@ -130,6 +139,18 @@ TOE_OUT_TOLERANCE_DEG = 3.0
 # feet are mistracked) is not corrected on a loop for the whole set.
 MAX_ADJUSTMENT_UTTERANCES = 4
 
+# Deadlift (.claude/deadlift/CONTRACT.md §5). Its lines are spoken only in
+# these phases — after a dead stop or standing at the bar, never between
+# touch-and-go reps.
+DEADLIFT_PROFILE = "deadlift"
+DEADLIFT_SPEAKING_PHASES = frozenset({"floor", "stance", "setup", "approach"})
+# Closed-loop foot guidance runs while the lifter stands at the bar, on the
+# bar's offset from the live midfoot (cm, > 0 = bar ahead: step closer).
+BAR_GUIDANCE_PHASE = "stance"
+BAR_GUIDANCE_DISARM_PHASES = frozenset({"setup", "pull"})
+BAR_MIDFOOT_TOLERANCE_CM = 2.0
+BAR_MIDFOOT_STEP_CLOSER_CM = 15.0
+
 
 # =============================================================================
 # PRIORITY LEVELS
@@ -173,6 +194,40 @@ class PendingCueOutcome:
     cue_key: str
     after_rep: int
     clean_reps: int = 0
+
+
+@dataclass(frozen=True)
+class ExerciseCueConfig:
+    """How to coach the active profile, from its cache_cues message. Every
+    default is the squat's: the pipeline omits a field that equals it."""
+    profile: str = "squat"
+    fault_to_cue: Dict[str, str] = field(default_factory=lambda: dict(FAULT_TO_CUE_MAP))
+    min_cue_tiers: Dict[str, str] = field(default_factory=dict)
+    set_idle_timeout_s: float = SET_IDLE_TIMEOUT_S
+    waits_for_diagnosis: bool = False
+    closed_loop: Optional[str] = None
+
+    @classmethod
+    def from_cache_cues(cls, message: Dict[str, Any], profile: str) -> "ExerciseCueConfig":
+        return cls(
+            profile=profile,
+            fault_to_cue=dict(message.get("fault_to_cue") or FAULT_TO_CUE_MAP),
+            min_cue_tiers=dict(message.get("min_cue_tiers") or {}),
+            set_idle_timeout_s=float(message.get("set_idle_timeout_s") or SET_IDLE_TIMEOUT_S),
+            waits_for_diagnosis=bool(message.get("waits_for_diagnosis", False)),
+            closed_loop=message.get("closed_loop"),
+        )
+
+
+def bar_midfoot_cue_key(bar_midfoot_cm: float) -> str:
+    """The closed-loop foot cue for the bar's offset from the live midfoot."""
+    if abs(bar_midfoot_cm) <= BAR_MIDFOOT_TOLERANCE_CM:
+        return ADJUSTMENT_ON_TARGET_CUE
+    if bar_midfoot_cm > BAR_MIDFOOT_STEP_CLOSER_CM:
+        return DEADLIFT_STEP_CLOSER_CUE
+    if bar_midfoot_cm > 0:
+        return DEADLIFT_CLOSER_CUE
+    return DEADLIFT_BACK_CUE
 
 
 def ineffective_cue_faults(effectiveness: List[Dict[str, Any]]) -> Set[str]:
@@ -238,6 +293,47 @@ def _cue_outcome_line(outcome: Dict[str, Any]) -> Optional[str]:
 def _spoken_cue_text(cue_key: Optional[str]) -> Optional[str]:
     text = CUE_TEXT_MAP.get(cue_key or "")
     return text.rstrip("!.") if text else None
+
+
+def _finite_or_none(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _is_fault_event(event: CoachingEvent) -> bool:
+    return bool((event.data or {}).get("fault_type"))
+
+
+def _deadlift_rep_fields(
+    features: Optional[Dict[str, Any]], highlights: Optional[List[str]],
+) -> Dict[str, Any]:
+    features = features or {}
+    return {
+        "bar_speed_mps": _finite_or_none(features.get("concentric_velocity_mps")),
+        "velocity_loss_pct": _finite_or_none(features.get("velocity_loss_pct")),
+        "best_rep_so_far": BEST_REP_HIGHLIGHT in (highlights or []),
+    }
+
+
+def _bar_speed_line(deadlift: Dict[str, Any]) -> Optional[str]:
+    fastest_rep = deadlift.get("fastest_rep")
+    if fastest_rep is None:
+        return None
+    line = f"BAR SPEED: fastest on rep {fastest_rep}"
+    loss_pct = deadlift.get("last_rep_speed_loss_pct")
+    if loss_pct is not None and round(loss_pct) > 0:
+        line += f"; the last rep was {round(loss_pct)} percent slower than the set's fastest reps"
+    elif loss_pct is not None:
+        line += "; the last rep kept that speed"
+    return line + "."
+
+
+def _best_rep_line(deadlift: Dict[str, Any]) -> Optional[str]:
+    best_rep = deadlift.get("best_rep")
+    if best_rep is None:
+        return None
+    return f"BEST REP: rep {best_rep}, the fastest one with nothing worth correcting."
 
 
 # =============================================================================
@@ -323,6 +419,17 @@ class CoachingOrchestrator:
         self._exercise_name: str = ""
         self._is_squat: bool = True
         self._next_exercise: Optional[Dict[str, Any]] = None
+        # The active profile's cue settings, from its cache_cues message
+        self._cue_config: ExerciseCueConfig = ExerciseCueConfig()
+        # Faults that reached their minimum cue tier this set, and in the set
+        # just completed (the diagnosis that picks the next focus arrives after it)
+        self._set_faults_at_min_tier: Set[str] = set()
+        self._completed_set_faults_at_min_tier: Set[str] = set()
+        # Deadlift: the rep's line ("cue", "motivation") held until a dead stop,
+        # and the closed-loop foot guidance
+        self._held_rep_events: Dict[str, CoachingEvent] = {}
+        self._bar_guidance_armed: bool = False
+        self._bar_guidance_corrected: bool = False
 
         # Diagnosis data — populated by set_diagnosis_data(), consumed by recaps
         self._pending_diagnosis: Optional[Dict[str, Any]] = None
@@ -448,6 +555,9 @@ class CoachingOrchestrator:
         self._rep_fault_candidates = {}
         self._set_focus_fault = None
         self._set_cue_history = []
+        self._set_faults_at_min_tier = set()
+        self._held_rep_events = {}
+        self._bar_guidance_armed = False
         self._tracking_lost = False
         self._tracking_lost_cued = False
         self._exercise_done = False
@@ -490,6 +600,24 @@ class CoachingOrchestrator:
         """The exercise the pipeline is now analysing."""
         self._exercise_name = exercise_name
         self._is_squat = is_squat
+
+    def apply_cue_config(self, config: ExerciseCueConfig) -> None:
+        """The active profile's cue settings, from its cache_cues message."""
+        self._cue_config = config
+        self._set_idle_timeout_s = config.set_idle_timeout_s
+        self._bar_guidance_armed = False
+
+    @property
+    def fault_to_cue(self) -> Dict[str, str]:
+        """The active profile's fault -> cue map (the squat's by default)."""
+        return self._cue_config.fault_to_cue
+
+    @property
+    def _is_deadlift(self) -> bool:
+        return self._cue_config.profile == DEADLIFT_PROFILE
+
+    def _expects_diagnosis(self) -> bool:
+        return self._is_squat or self._cue_config.waits_for_diagnosis
 
     def set_next_exercise(self, exercise_name: str, total_sets: Optional[int]) -> None:
         """The workout plan moved on; the next exercise starts once this set is wrapped up."""
@@ -613,9 +741,32 @@ class CoachingOrchestrator:
     def carry_focus_from(self, diagnosis: Dict[str, Any]) -> None:
         """Make a diagnosis's top fixable cause the coming set's focus."""
         focus = self._focus_from_diagnosis(diagnosis)
+        if focus is not None and not self._reached_min_tier(focus):
+            logger.info(
+                f"[ORCHESTRATOR] Diagnosis focus {focus} never reached its minimum cue tier — not adopted"
+            )
+            return
         if focus is not None:
             self._set_focus_fault = focus
             logger.info(f"[ORCHESTRATOR] Next set's focus from the diagnosis: {focus}")
+
+    def _reached_min_tier(self, fault_type: str) -> bool:
+        # In this set or the one just completed. Faults without a minimum tier
+        # (every squat fault) always pass.
+        if fault_type not in self._cue_config.min_cue_tiers:
+            return True
+        return (
+            fault_type in self._set_faults_at_min_tier
+            or fault_type in self._completed_set_faults_at_min_tier
+        )
+
+    def _below_min_tier(self, fault_type: str, severity: str, details_min_tier: Optional[str]) -> bool:
+        # The profile's static tier, raised by this rep's tier from the pipeline
+        min_rank = max(
+            MIN_TIER_RANK.get(self._cue_config.min_cue_tiers.get(fault_type), 0),
+            MIN_TIER_RANK.get(details_min_tier, 0),
+        )
+        return SEVERITY_RANK.get(severity, 0) < min_rank
 
     def _is_unseen_side_view(self, fault_type: str) -> bool:
         return not self._side_view_observable and fault_type in SIDE_VIEW_FAULTS
@@ -726,8 +877,9 @@ class CoachingOrchestrator:
         (older callers), whatever is pending is used as before.
         """
         if expects_diagnosis is None:
-            expects_diagnosis = self._is_squat
-        # Only the squat is diagnosed; nothing is coming for other exercises.
+            expects_diagnosis = self._expects_diagnosis()
+        # Only the squat and profiles that say so are diagnosed; nothing is
+        # coming for other exercises.
         if set_number is None or not expects_diagnosis:
             return self._consume_diagnosis()
         deadline = time.monotonic() + self._diagnosis_wait_s
@@ -857,6 +1009,10 @@ class CoachingOrchestrator:
         if self._adjustment_active and angles_dict.get("rep_phase") == "idle":
             self._maybe_speak_adjustment(angles_dict)
 
+        deadlift_phase = angles_dict.get("deadlift_phase")
+        if deadlift_phase is not None:
+            self._on_deadlift_phase(deadlift_phase, angles_dict.get("bar_midfoot_live_cm"))
+
     def _maybe_speak_adjustment(self, angles_dict: Dict[str, Any]) -> None:
         """Compare the tracked parameter to its target and cue the correction."""
         if self._adjustment_speaking or self._speak_adjustment_fn is None:
@@ -903,6 +1059,88 @@ class CoachingOrchestrator:
             self._adjustment_speaking = False
 
     # ------------------------------------------------------------------
+    # Deadlift: dead-stop speech and closed-loop foot guidance
+    # ------------------------------------------------------------------
+
+    def _on_deadlift_phase(self, phase: str, bar_midfoot_cm: Any) -> None:
+        if phase in DEADLIFT_SPEAKING_PHASES:
+            self._release_held_rep_events()
+        if self._cue_config.closed_loop == DEADLIFT_CLOSED_LOOP:
+            self._guide_bar_midfoot(phase, bar_midfoot_cm)
+
+    def _hold_until_dead_stop(self, event: CoachingEvent) -> None:
+        # A rep judged at a touch-and-go must not talk over the next pull. A
+        # newer line replaces an older one, but praise never replaces a correction.
+        slot = "motivation" if event.event_type == "llm_motivation" else "cue"
+        held = self._held_rep_events.get(slot)
+        if held is not None and _is_fault_event(held) and not _is_fault_event(event):
+            return
+        self._held_rep_events[slot] = event
+        logger.info(f"[ORCHESTRATOR] Holding {event.event_type} {event.cue_key or ''} for the dead stop")
+
+    def _release_held_rep_events(self) -> None:
+        if not self._held_rep_events or self.cues_suppressed or self._tracking_lost:
+            return
+        now = time.monotonic()
+        for event in self._held_rep_events.values():
+            # Stamped now so the dispatcher doesn't drop it as stale, and its
+            # outcome is judged on the reps after it is actually heard.
+            event.timestamp = now
+            if _is_fault_event(event):
+                event.data["after_rep"] = self._set_rep_count
+            self._queue.put_nowait(event)
+            logger.info(f"[ORCHESTRATOR] ⬆ Dead stop — released {event.event_type} {event.cue_key or ''}")
+        self._held_rep_events = {}
+
+    def _guide_bar_midfoot(self, phase: str, bar_midfoot_cm: Any) -> None:
+        # While the lifter stands at the bar: step closer, then fine moves, then
+        # adjust_good once the bar is over the midfoot. Shares the stance
+        # monitor's speaking flag and utterance budget.
+        if phase in BAR_GUIDANCE_DISARM_PHASES:
+            self._bar_guidance_armed = False
+            return
+        offset_cm = _finite_or_none(bar_midfoot_cm)
+        if phase != BAR_GUIDANCE_PHASE or offset_cm is None or self._exercise_done:
+            return
+        if self._adjustment_utterances >= MAX_ADJUSTMENT_UTTERANCES:
+            self._bar_guidance_armed = False
+            return
+        if not self._bar_guidance_armed:
+            if abs(offset_cm) <= BAR_MIDFOOT_TOLERANCE_CM:
+                return
+            self._bar_guidance_armed = True
+            self._bar_guidance_corrected = False
+        if self._adjustment_speaking or self.cues_suppressed:
+            return
+        now = time.monotonic()
+        if now - self._last_feedback_time < self._feedback_interval:
+            return
+
+        cue_key = bar_midfoot_cue_key(offset_cm)
+        if cue_key == ADJUSTMENT_ON_TARGET_CUE:
+            self._bar_guidance_armed = False
+            # Nothing was corrected yet: nothing to confirm
+            if not self._bar_guidance_corrected:
+                return
+        if not self._get_cue_audio(cue_key):
+            logger.info(f"[ORCHESTRATOR] No cached audio for foot guidance '{cue_key}' — skipped")
+            return
+        self._last_feedback_time = now
+        self._adjustment_utterances += 1
+        self._bar_guidance_corrected = True
+        self._adjustment_speaking = True
+        logger.info(f"[ORCHESTRATOR] Foot guidance: bar {offset_cm:+.1f} cm from midfoot → {cue_key}")
+        asyncio.create_task(self._run_guidance_cue(cue_key))
+
+    async def _run_guidance_cue(self, cue_key: str) -> None:
+        try:
+            await self._play_cached(cue_key)
+        except Exception as e:
+            logger.error(f"[ORCHESTRATOR] Foot guidance cue failed: {e}")
+        finally:
+            self._adjustment_speaking = False
+
+    # ------------------------------------------------------------------
     # Event enqueueing (called from IPC handler)
     # ------------------------------------------------------------------
 
@@ -914,12 +1152,13 @@ class CoachingOrchestrator:
         message: str = "",
         observability: Optional[str] = None,
         side: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
     ):
         """Collect a fault for this rep. Whether it gets a cue is decided at
         rep_complete, once the rep's faults are all in (some arrive mid-rep)."""
         if self._resting or self._exercise_done:
             return
-        if not self._add_fault_candidate(cue_key, fault_type, severity, observability, side):
+        if not self._add_fault_candidate(cue_key, fault_type, severity, observability, side, details):
             return
         self._recent_faults.append(fault_type)
         if len(self._recent_faults) > 10:
@@ -932,6 +1171,7 @@ class CoachingOrchestrator:
         severity: str,
         observability: Optional[str],
         side: Optional[str],
+        details: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Keep this rep's worst severity per fault; False if it is never cued mid-set."""
         if self._is_unseen_side_view(fault_type):
@@ -943,10 +1183,24 @@ class CoachingOrchestrator:
             self._approximate_fault_types.add(fault_type)
             logger.info(f"[ORCHESTRATOR] Approximate fault — no cue (type={fault_type})")
             return False
+        details = details or {}
+        # Below its minimum tier the measurement can't back a cue: recorded
+        # upstream and recapped, never spoken mid-set.
+        if self._below_min_tier(fault_type, severity, details.get("min_tier")):
+            logger.info(
+                f"[ORCHESTRATOR] Below its minimum cue tier — no cue (type={fault_type}, severity={severity})"
+            )
+            return False
+        self._set_faults_at_min_tier.add(fault_type)
         # The pipeline leaves cue empty when its own gap was closed; the
         # decision is made here, so fall back to the fault's own cue.
-        if not cue_key and fault_type in FAULT_TO_CUE_MAP:
-            cue_key = FAULT_TO_CUE_MAP[fault_type]
+        fault_to_cue = self._cue_config.fault_to_cue
+        if not cue_key and fault_type in fault_to_cue:
+            cue_key = fault_to_cue[fault_type]
+            # A direction variant (deadlift_hips_up) when that cue exists
+            direction_key = f"{cue_key}_{details.get('direction')}"
+            if direction_key in CUE_TEXT_MAP and self._get_cue_audio(direction_key):
+                cue_key = direction_key
             if side in SIDE_CUE_SIDES:
                 cue_key = f"{cue_key}_{side}"
         current = self._rep_fault_candidates.get(fault_type)
@@ -1007,6 +1261,7 @@ class CoachingOrchestrator:
         highlights: Optional[List[str]] = None,
         set_number: Optional[int] = None,
         faults_detailed: Optional[List[Dict[str, Any]]] = None,
+        features: Optional[Dict[str, Any]] = None,
     ):
         """Count the rep, then decide this rep's single cue and praise."""
         if self._resting or self._exercise_done:
@@ -1017,7 +1272,7 @@ class CoachingOrchestrator:
             details = fault.get("details") or {}
             self._add_fault_candidate(
                 None, fault.get("fault_type", ""), fault.get("severity", ""),
-                details.get("observability"), details.get("side"),
+                details.get("observability"), details.get("side"), details,
             )
         self._set_rep_count += 1  # Track relative reps per set (ignores absolute pipeline number)
         if set_number is not None:
@@ -1036,7 +1291,7 @@ class CoachingOrchestrator:
                     logger.debug(f"[ORCHESTRATOR] affect on_rep_effort failed: {e}")
 
         # Record rep event for set report
-        self._set_rep_events.append({
+        rep_event = {
             "wall_time": time.time(),
             "rep_number": self._set_rep_count,
             "is_clean": is_clean,
@@ -1046,7 +1301,10 @@ class CoachingOrchestrator:
             "faults": faults,
             "ascent_time_s": ascent_time_s,
             "ascent_ratio": ascent_ratio,
-        })
+        }
+        if self._is_deadlift:
+            rep_event.update(_deadlift_rep_fields(features, highlights))
+        self._set_rep_events.append(rep_event)
 
         if is_clean:
             self._clean_streak += 1
@@ -1092,7 +1350,7 @@ class CoachingOrchestrator:
 
         fault_event = self._choose_fault_cue(candidates)
         if fault_event is not None:
-            await self._queue.put(fault_event)
+            await self._enqueue_rep_event(fault_event)
             logger.info(
                 f"[ORCHESTRATOR] ⬆ Enqueued FAULT cue: {fault_event.cue_key} "
                 f"(type={fault_event.data['fault_type']}, severity={fault_event.data['severity']})"
@@ -1102,7 +1360,7 @@ class CoachingOrchestrator:
 
         if fix_praise_key and praise_allowed:
             self._last_positive_rep = self._set_rep_count
-            await self._queue.put(CoachingEvent(
+            await self._enqueue_rep_event(CoachingEvent(
                 priority=CuePriority.POSITIVE_CUE,
                 timestamp=time.monotonic(),
                 event_type="cached_cue",
@@ -1114,7 +1372,7 @@ class CoachingOrchestrator:
         positive_key = self._choose_positive_cue(is_clean, highlights) if praise_allowed else None
         if positive_key and self._get_cue_audio(positive_key):
             self._last_positive_rep = self._set_rep_count
-            await self._queue.put(CoachingEvent(
+            await self._enqueue_rep_event(CoachingEvent(
                 priority=CuePriority.POSITIVE_CUE,
                 timestamp=time.monotonic(),
                 event_type="cached_cue",
@@ -1125,7 +1383,7 @@ class CoachingOrchestrator:
         # Evaluate LLM motivation at "top of rep" (uses per-set rep number)
         if not self.cues_suppressed and self._should_trigger_motivation(self._set_rep_count):
             context = self._build_motivation_context(self._set_rep_count, depth, is_clean)
-            await self._queue.put(CoachingEvent(
+            await self._enqueue_rep_event(CoachingEvent(
                 priority=CuePriority.LLM_MOTIVATION,
                 timestamp=time.monotonic(),
                 event_type="llm_motivation",
@@ -1135,6 +1393,12 @@ class CoachingOrchestrator:
             logger.info(f"[ORCHESTRATOR] Enqueued motivation at rep {self._set_rep_count}")
 
         self._arm_idle_timer()
+
+    async def _enqueue_rep_event(self, event: CoachingEvent) -> None:
+        if self._is_deadlift:
+            self._hold_until_dead_stop(event)
+            return
+        await self._queue.put(event)
 
     def _passes_bandwidth(self, fault_type: str, severity: str) -> bool:
         if severity in CUE_SEVERITIES:
@@ -1311,6 +1575,7 @@ class CoachingOrchestrator:
     async def _complete_set(self, trigger: str) -> None:
         """Close the set: queue its recap and rest, or the exercise recap."""
         self._cancel_idle_timer()
+        self._completed_set_faults_at_min_tier = set(self._set_faults_at_min_tier)
         self._set_number += 1
         set_data = self._build_set_summary()
         set_data["trigger"] = trigger
@@ -1421,6 +1686,8 @@ class CoachingOrchestrator:
                 # Snapshotted: the next exercise may start before this plays
                 "exercise_name": self._exercise_name,
                 "is_squat": self._is_squat,
+                "waits_for_diagnosis": self._expects_diagnosis(),
+                "deadlift": final_set_data.get("deadlift"),
                 "next_exercise": (self._next_exercise or {}).get("exercise_name"),
             },
         ))
@@ -1455,7 +1722,7 @@ class CoachingOrchestrator:
             for ft, cnt in fault_counts.items()
         } if self._set_rep_events else {}
 
-        return {
+        summary = {
             "set_number": self._set_number,
             "exercise_name": self._exercise_name,
             "is_squat": self._is_squat,
@@ -1489,6 +1756,20 @@ class CoachingOrchestrator:
                 }
                 for r in self._set_rep_events
             ],
+        }
+        if self._is_deadlift:
+            summary["deadlift"] = self._deadlift_set_summary()
+        return summary
+
+    def _deadlift_set_summary(self) -> Dict[str, Any]:
+        timed = [r for r in self._set_rep_events if r.get("bar_speed_mps") is not None]
+        fastest = max(timed, key=lambda r: r["bar_speed_mps"]) if timed else None
+        best_reps = [r["rep_number"] for r in self._set_rep_events if r.get("best_rep_so_far")]
+        last_rep = self._set_rep_events[-1] if self._set_rep_events else {}
+        return {
+            "fastest_rep": fastest["rep_number"] if fastest else None,
+            "last_rep_speed_loss_pct": last_rep.get("velocity_loss_pct"),
+            "best_rep": best_reps[-1] if best_reps else None,
         }
 
     def _cue_outcome(self, cue: Dict[str, Any]) -> Dict[str, Any]:
@@ -1706,8 +1987,11 @@ class CoachingOrchestrator:
             # When the latest diagnosis blames the feet, follow the cue with
             # the stance / toe-out check. Only without a load: nobody should
             # move their feet under a loaded bar — that waits for the recap.
+            # Squat only: a squat diagnosis left in _latest_diagnosis must not
+            # arm it during another exercise.
             if (
                 fault_type
+                and self._is_squat
                 and not self._adjustment_active
                 and self.top_cause_id in STANCE_CAUSE_IDS
                 and self._is_bodyweight_set()
@@ -1727,7 +2011,9 @@ class CoachingOrchestrator:
         return load is not None and load[0] <= 0
 
     def _flush_queue(self):
-        """Drop all pending events — called at set boundaries to clear stale cues."""
+        """Drop all pending events — called at set boundaries to clear stale cues.
+        A deadlift line still waiting for a dead stop goes to the recap instead."""
+        self._held_rep_events = {}
         dropped = 0
         while not self._queue.empty():
             try:
@@ -1878,7 +2164,11 @@ class CoachingOrchestrator:
                 )
         return lines
 
-    def _top_adjustment(self, diagnosis: Optional[dict]) -> Optional[str]:
+    def _top_adjustment(self, diagnosis: Optional[dict], is_deadlift: bool = False) -> Optional[str]:
+        # The deadlift diagnosis puts its one numeric delta in the explanation
+        # already; summarize_cue_magnitude only knows squat causes.
+        if is_deadlift:
+            return None
         top = self.top_cause(diagnosis)
         if not top or not top.get("parameter_delta"):
             return None
@@ -1904,7 +2194,7 @@ class CoachingOrchestrator:
                     else f"still on {len(outcome['faulted_after'])} of {len(outcome['reps_after'])} reps after"
                 )
                 parts.append(f"cue '{cue_text}' at rep {outcome['after_rep']}, {result}")
-        adjustment = self._top_adjustment(diagnosis)
+        adjustment = self._top_adjustment(diagnosis, is_deadlift=data.get("deadlift") is not None)
         if adjustment:
             parts.append(f"adjustment: {adjustment}")
         return "; ".join(parts) + "."
@@ -1924,6 +2214,7 @@ class CoachingOrchestrator:
         fault_summary = data.get("fault_summary", {})
         per_rep = data.get("per_rep", [])
         effort = data.get("effort")
+        deadlift = data.get("deadlift")
         spoken_faults = self._spoken_fault_summary(fault_summary)
 
         next_set = set_num + 1
@@ -1975,11 +2266,20 @@ class CoachingOrchestrator:
             if line:
                 parts.append(line)
         parts.extend(self._cue_history_lines(spoken_faults))
-        parts.extend(self._build_rep_highlights(per_rep))
+        if deadlift is not None:
+            # No depth: the best rep is the fastest one with nothing worth correcting
+            parts.extend(self._deadlift_recap_lines(
+                deadlift, spoken_faults, data.get("focus_fault"), total_reps,
+            ))
+            parts.extend(self._build_rep_highlights(per_rep, include_best=False))
+        else:
+            parts.extend(self._build_rep_highlights(per_rep))
 
         # Enrich with diagnosis data if available
         if diagnosis and scoring:
-            parts.extend(self._build_diagnosis_context(diagnosis, scoring))
+            parts.extend(self._build_diagnosis_context(
+                diagnosis, scoring, is_deadlift=deadlift is not None,
+            ))
             parts.extend(
                 build_progress_comparison_lines(self.progress_baseline, scoring)
             )
@@ -2106,13 +2406,13 @@ class CoachingOrchestrator:
             return "A light touch of dry humor is welcome if it comes naturally — never forced."
         return "No humor in this reply — keep it straight, supportive, and forward-looking."
 
-    def _build_rep_highlights(self, per_rep: list) -> List[str]:
+    def _build_rep_highlights(self, per_rep: list, include_best: bool = True) -> List[str]:
         """Compress the per-rep dump into best/roughest highlight lines."""
         highlights: List[str] = []
         if not per_rep:
             return highlights
         clean = [r for r in per_rep if r.get("clean")]
-        if clean:
+        if clean and include_best:
             best = max(clean, key=lambda r: r.get("depth_angle", 0))
             highlights.append(f"Best rep: rep {best['rep']}, their deepest clean rep.")
         faulted = [
@@ -2126,7 +2426,37 @@ class CoachingOrchestrator:
             highlights.append(f"Roughest rep: rep {worst['rep']} — {labels}.")
         return highlights
 
-    def _build_diagnosis_context(self, diagnosis: dict, scoring: dict) -> List[str]:
+    def _deadlift_recap_lines(
+        self,
+        deadlift: Dict[str, Any],
+        spoken_faults: Dict[str, Any],
+        focus_fault: Optional[str],
+        total_reps: int,
+    ) -> List[str]:
+        lines: List[str] = []
+        bar_speed_line = _bar_speed_line(deadlift)
+        if bar_speed_line:
+            lines.append(bar_speed_line)
+        if spoken_faults:
+            main_fault = (
+                focus_fault if focus_fault in spoken_faults
+                else min(
+                    spoken_faults,
+                    key=lambda ft: (-spoken_faults[ft].get("count", 0), fault_cue_priority(ft)),
+                )
+            )
+            lines.append(
+                f"MAIN FAULT: {fault_label(main_fault)} on "
+                f"{spoken_faults[main_fault].get('count', 0)} of {total_reps} reps."
+            )
+        best_rep_line = _best_rep_line(deadlift)
+        if best_rep_line:
+            lines.append(best_rep_line)
+        return lines
+
+    def _build_diagnosis_context(
+        self, diagnosis: dict, scoring: dict, is_deadlift: bool = False,
+    ) -> List[str]:
         """Build diagnosis-enriched context lines for the LLM prompt."""
         parts: List[str] = []
 
@@ -2137,7 +2467,10 @@ class CoachingOrchestrator:
             ("knee", "knee_tracking"), ("symmetry", "symmetry"),
             ("tempo", "tempo"),
         ]
-        if not self._side_view_observable:
+        if is_deadlift:
+            # The deadlift scores its own dimensions (setup, bar path, lockout...)
+            dim_labels = [(key.replace("_", " "), key) for key in dims]
+        elif not self._side_view_observable:
             # Trunk control is a side-view measure
             dim_labels = [pair for pair in dim_labels if pair[1] != "trunk_control"]
         dim_str = ", ".join(
@@ -2158,7 +2491,7 @@ class CoachingOrchestrator:
         top = self.top_cause(diagnosis)
         if top:
             parts.append(f"TOP ISSUE: {top.get('explanation', 'N/A')}")
-            adjustment = self._top_adjustment(diagnosis)
+            adjustment = self._top_adjustment(diagnosis, is_deadlift)
             if adjustment:
                 parts.append(f"ADJUSTMENT: {adjustment}")
 
@@ -2199,7 +2532,8 @@ class CoachingOrchestrator:
         set_coaching_moment("recap")
         # The final set's diagnosis follows workout_complete — wait for it
         diagnosis, scoring = await self._await_set_diagnosis(
-            data.get("diagnosis_set_number"), data.get("is_squat"),
+            data.get("diagnosis_set_number"),
+            data.get("waits_for_diagnosis", data.get("is_squat")),
         )
 
         all_summaries = data.get("all_set_summaries", [])
@@ -2266,6 +2600,11 @@ class CoachingOrchestrator:
             line = _cue_outcome_line(outcome)
             if line:
                 parts.append(f"Last set — {line}")
+        deadlift = data.get("deadlift")
+        if deadlift is not None:
+            for line in (_bar_speed_line(deadlift), _best_rep_line(deadlift)):
+                if line:
+                    parts.append(f"Last set — {line}")
 
         # Diagnosis progression across sets
         diagnosed_sets = [s for s in all_summaries if "scoring" in s]

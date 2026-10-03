@@ -195,7 +195,10 @@ class CoachingService:
         )
 
     async def _fetch_progress_baseline(self, user_id) -> dict | None:
-        """Load last-session baseline and multi-session fault trends."""
+        """Load last-session baseline and multi-session fault trends for the
+        active exercise profile."""
+        exercise = _profile_name(self._current_exercise_name())
+
         def _fetch():
             from db.database import SessionLocal
             from db.biomechanics_persistence import (
@@ -205,8 +208,8 @@ class CoachingService:
             )
             db = SessionLocal()
             try:
-                baseline = get_progress_baseline(db, user_id)
-                fault_trends = get_multi_session_fault_trends(db, user_id)
+                baseline = get_progress_baseline(db, user_id, exercise=exercise)
+                fault_trends = get_multi_session_fault_trends(db, user_id, exercise=exercise)
                 cue_effectiveness = get_cue_effectiveness(db, user_id)
                 return baseline, fault_trends, cue_effectiveness
             finally:
@@ -574,6 +577,7 @@ class CoachingService:
                         message=fault_msg,
                         observability=observability,
                         side=message.get("side"),
+                        details=message.get("details"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — fault dropped")
@@ -610,6 +614,7 @@ class CoachingService:
                         highlights=message.get("highlights"),
                         set_number=message.get("set_number"),
                         faults_detailed=message.get("faults_detailed"),
+                        features=message.get("features"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — rep_complete dropped")
@@ -649,6 +654,10 @@ class CoachingService:
                         "foot_direction_angle_r",
                         "target_stance_ratio",
                         "target_toe_out_deg",
+                        # Deadlift only: phase and closed-loop foot guidance
+                        "deadlift_phase",
+                        "bar_midfoot_live_cm",
+                        "bar_source",
                     ):
                         if extra_key in message:
                             angles_data[extra_key] = message[extra_key]
@@ -797,7 +806,12 @@ class CoachingService:
         logger.info(f"[COACHING SERVICE] Pre-caching {len(cues)} cues for {exercise} ({profile})")
 
         if self._coaching_orchestrator:
+            from agent.services.coaching_orchestrator import ExerciseCueConfig
+
             self._coaching_orchestrator.set_exercise(exercise, is_squat=profile == "squat")
+            self._coaching_orchestrator.apply_cue_config(
+                ExerciseCueConfig.from_cache_cues(message, profile)
+            )
         # One DB session per exercise. The pipeline sends this after the
         # previous exercise's last set and diagnosis, so those stay with it.
         recorder = self._biomech_recorder
@@ -1207,8 +1221,6 @@ class CoachingService:
     def _build_rest_complete_prompt(self) -> str:
         """The next-set line: calm, and names the set's one focus. Any reported
         pain reaches it through the SAFETY line on every coaching prompt."""
-        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
-
         _, next_set, total_sets = self._get_set_numbers()
         parts = [f"[REST COMPLETE] Rest is over. Set {next_set} of {total_sets} starts now."]
         if next_set == 1:
@@ -1227,7 +1239,7 @@ class CoachingService:
                 f"This set's one focus: {fault_label(focus)}. Say it as the action to take — "
                 f"toward the floor, the bar or a direction — not as a fault."
             )
-            cue_text = CUE_TEXT_MAP.get(FAULT_TO_CUE_MAP.get(focus, ""))
+            cue_text = CUE_TEXT_MAP.get(orchestrator.fault_to_cue.get(focus, ""))
             if cue_text:
                 parts.append(f"Mid-set they'll hear the cue '{cue_text}' for it.")
         parts.append(

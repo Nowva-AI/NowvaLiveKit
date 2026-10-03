@@ -116,6 +116,20 @@ FAULT_CUE_PRIORITY: Dict[str, int] = {
     "tempo": 9,
     "depth_drift": 10,
     "velocity_loss": 11,
+    # Deadlift (.claude/deadlift/CONTRACT.md §1). Setup first (shoulders before
+    # hips: the hip band assumes the shoulders are set), then the pull, the top
+    # and the side-to-side faults; bar slowdown is recap-only.
+    "deadlift_bar_position": 20,
+    "deadlift_shoulders_behind": 21,
+    "deadlift_setup_hips": 22,
+    "deadlift_hips_shoot": 23,
+    "deadlift_bar_drift": 24,
+    "deadlift_lockout": 25,
+    "deadlift_lean_back": 26,
+    "deadlift_hip_shift": 27,
+    "deadlift_bar_tilt": 28,
+    "deadlift_bent_arms": 29,
+    "deadlift_velocity_loss": 30,
 }
 DEFAULT_FAULT_CUE_PRIORITY = 12
 
@@ -170,6 +184,8 @@ class CueCache:
         config = config or CoachingConfig()
         self.current_exercise: Optional[str] = None
         self.profile_name: Optional[str] = None
+        # The active exercise profile; IPCBridge.prepare_exercise reads it
+        self.profile = None
         self.cues: Dict[str, str] = {}
         self.fault_to_cue: Dict[str, str] = {}
         self.last_cue_time: float = 0.0
@@ -191,6 +207,7 @@ class CueCache:
 
         profile = get_profile(exercise_name)
         self.current_exercise = exercise_name.lower().replace(" ", "_")
+        self.profile = profile
         self.profile_name = profile.name
         self.cues = profile.get_cue_dict()
         self.fault_to_cue = profile.get_fault_to_cue_map()
@@ -200,6 +217,7 @@ class CueCache:
 
     def get_cue_for_fault(
         self, fault_type: str, timestamp: float, side: Optional[str] = None,
+        variant: Optional[str] = None,
     ) -> Optional[str]:
         """
         Get a cue key for a detected fault, respecting rate limiting.
@@ -209,6 +227,8 @@ class CueCache:
             timestamp: Current time in seconds
             side: "left" or "right" picks the side-specific cue when the
                 exercise has one; anything else gets the base cue
+            variant: picks the "<cue>_<variant>" cue when the exercise has
+                one (the deadlift's hip direction: deadlift_hips_up)
 
         Returns:
             Cue key string if available and not rate-limited, else None
@@ -225,6 +245,8 @@ class CueCache:
         cue_key = self.fault_to_cue.get(fault_type)
         if cue_key is None or cue_key not in self.cues:
             return None
+        if variant and f"{cue_key}_{variant}" in self.cues:
+            cue_key = f"{cue_key}_{variant}"
         if side in SIDE_CUE_SIDES and f"{cue_key}_{side}" in self.cues:
             cue_key = f"{cue_key}_{side}"
 
