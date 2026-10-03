@@ -1,18 +1,20 @@
-"""YAML graph loader — loads symptoms.yaml and causes.yaml into frozen dicts.
+"""YAML graph loader — loads a symptom/cause YAML pair into frozen dicts.
 
-Resolves string function references to actual callables from evidence_tests
-and parameter_deltas modules. Validates all cross-references at import time.
+Resolves string function references to actual callables from an evidence-test
+module and a parameter-delta module. Validates all cross-references at load
+time. load_graph builds any exercise's pair; the squat's is built at import.
 
 Exports:
-    SYMPTOM_GRAPH — MappingProxyType of symptom definitions
-    CAUSE_GRAPH   — MappingProxyType of cause definitions
+    load_graph    — build (symptom graph, cause graph) from a YAML pair
+    SYMPTOM_GRAPH — MappingProxyType of the squat's symptom definitions
+    CAUSE_GRAPH   — MappingProxyType of the squat's cause definitions
 """
 
 from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import Any, Callable
 
 import yaml
@@ -41,13 +43,13 @@ def _load_yaml(filename: str) -> dict:
         return yaml.safe_load(file_handle)
 
 
-def _build_symptom_graph() -> MappingProxyType:
-    raw = _load_yaml("symptoms.yaml")
+def _build_symptom_graph(filename: str, evidence_module: ModuleType) -> MappingProxyType:
+    raw = _load_yaml(filename)
     graph: dict[str, dict[str, Any]] = {}
 
     for symptom_id, definition in raw.items():
         expected_fn_name = definition["expected_value_fn"]
-        expected_fn = _resolve_function(evidence_tests, expected_fn_name)
+        expected_fn = _resolve_function(evidence_module, expected_fn_name)
 
         candidate_causes = []
         for entry in definition["candidate_causes"]:
@@ -72,19 +74,21 @@ def _build_symptom_graph() -> MappingProxyType:
     return MappingProxyType(graph)
 
 
-def _build_cause_graph() -> MappingProxyType:
-    raw = _load_yaml("causes.yaml")
+def _build_cause_graph(
+    filename: str, evidence_module: ModuleType, delta_module: ModuleType
+) -> MappingProxyType:
+    raw = _load_yaml(filename)
     graph: dict[str, dict[str, Any]] = {}
 
     for cause_id, definition in raw.items():
         evidence_fn = _resolve_function(
-            evidence_tests, definition["evidence_test_fn"]
+            evidence_module, definition["evidence_test_fn"]
         )
 
         delta_fn_name = definition.get("parameter_delta_fn")
         delta_fn = None
         if delta_fn_name:
-            delta_fn = _resolve_function(parameter_deltas, delta_fn_name)
+            delta_fn = _resolve_function(delta_module, delta_fn_name)
 
         graph[cause_id] = MappingProxyType(
             {
@@ -100,7 +104,7 @@ def _build_cause_graph() -> MappingProxyType:
 
 
 def _validate_cross_references(
-    symptom_graph: MappingProxyType, cause_graph: MappingProxyType
+    symptom_graph: MappingProxyType, cause_graph: MappingProxyType, causes_filename: str
 ) -> None:
     for symptom_id, symptom_def in symptom_graph.items():
         for candidate in symptom_def["candidate_causes"]:
@@ -108,10 +112,24 @@ def _validate_cross_references(
             if cause_id not in cause_graph:
                 raise ValueError(
                     f"Symptom '{symptom_id}' references cause '{cause_id}' "
-                    f"which does not exist in causes.yaml"
+                    f"which does not exist in {causes_filename}"
                 )
 
 
-SYMPTOM_GRAPH: MappingProxyType = _build_symptom_graph()
-CAUSE_GRAPH: MappingProxyType = _build_cause_graph()
-_validate_cross_references(SYMPTOM_GRAPH, CAUSE_GRAPH)
+def load_graph(
+    symptoms_filename: str,
+    causes_filename: str,
+    evidence_module: ModuleType,
+    delta_module: ModuleType,
+) -> tuple[MappingProxyType, MappingProxyType]:
+    """Symptom and cause graphs from a YAML pair in this directory, with every
+    function name resolved in the given modules and every cause reference checked."""
+    symptom_graph = _build_symptom_graph(symptoms_filename, evidence_module)
+    cause_graph = _build_cause_graph(causes_filename, evidence_module, delta_module)
+    _validate_cross_references(symptom_graph, cause_graph, causes_filename)
+    return symptom_graph, cause_graph
+
+
+SYMPTOM_GRAPH, CAUSE_GRAPH = load_graph(
+    "symptoms.yaml", "causes.yaml", evidence_tests, parameter_deltas
+)

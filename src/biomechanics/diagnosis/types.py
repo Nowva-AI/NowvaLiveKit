@@ -131,12 +131,25 @@ class RepScore(BaseModel):
     composite_score: float
 
 
+class DeadliftRepScore(BaseModel):
+    """A deadlift rep's score: the deadlift's own dimensions (deadlift.diagnosis),
+    in the same shape as RepScore — rep_number, one `<dimension>_score` per
+    dimension (NaN = not measured), composite_score."""
+    rep_number: int
+    setup_score: float
+    coordination_score: float
+    bar_path_score: float
+    lockout_score: float
+    symmetry_score: float
+    composite_score: float
+
+
 class SetScoreSummary(BaseModel):
     mean_score: float
     best_rep_number: int
     worst_rep_number: int
     trend_slope: float
-    per_rep_scores: list[RepScore]
+    per_rep_scores: list[RepScore | DeadliftRepScore]
 
 
 class DiagnosisResult(BaseModel):

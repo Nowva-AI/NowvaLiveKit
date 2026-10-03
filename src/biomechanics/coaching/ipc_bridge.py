@@ -25,6 +25,7 @@ from biomechanics.diagnosis.bridge import (
 )
 from biomechanics.diagnosis.graph.parameter_deltas import dorsi_driven_targets
 from biomechanics.diagnosis.types import (
+    DeadliftRepScore,
     DiagnosisResult,
     HypothesizedCause,
     RepKinematicSummary,
@@ -513,16 +514,28 @@ _DIMENSION_FIELDS = (
     ("symmetry", "symmetry_score"),
     ("tempo", "tempo_score"),
 )
+_DEADLIFT_DIMENSION_FIELDS = (
+    ("setup", "setup_score"),
+    ("coordination", "coordination_score"),
+    ("bar_path", "bar_path_score"),
+    ("lockout", "lockout_score"),
+    ("symmetry", "symmetry_score"),
+)
 
 
-def per_dimension_means(per_rep: List[RepScore]) -> Dict[str, float]:
+def per_dimension_means(per_rep: List[RepScore | DeadliftRepScore]) -> Dict[str, float]:
     """Mean score per dimension over the reps that measured it.
 
     A dimension no rep measured (feet never seen, no timing) is omitted rather
-    than reported as perfect.
+    than reported as perfect. Deadlift rep scores report the deadlift's dimensions.
     """
+    dimension_fields = (
+        _DEADLIFT_DIMENSION_FIELDS
+        if per_rep and isinstance(per_rep[0], DeadliftRepScore)
+        else _DIMENSION_FIELDS
+    )
     means: Dict[str, float] = {}
-    for key, field in _DIMENSION_FIELDS:
+    for key, field in dimension_fields:
         values = [getattr(score, field) for score in per_rep]
         finite = [value for value in values if value == value]
         if finite:

@@ -1,0 +1,131 @@
+# Conventional deadlift causes (docs/deadlift/PLAN.md §7). Tiers as in causes.yaml:
+#   0 = contextual, 1 = immediate (cue-correctable this session),
+#   2 = session-level (programming), 3 = long-term (strength/mobility work).
+#
+# A small local model relays these, so each template is ONE plain sentence:
+# external-focus wording, no jargon, nothing medical, and never a claim about
+# back rounding (it is not measured, PLAN.md §2.10). Each tier-1 cause has a
+# parameter delta returning exactly one number (deadlift_parameter_deltas.py);
+# a number its sentence quotes is filled from that same delta. Every
+# {placeholder} must be filled by deadlift.diagnosis._fill_values.
+
+feet_position:
+  description: "Feet placed so the bar is not over the midfoot"
+  tier: 1
+  evidence_test_fn: test_feet_position
+  parameter_delta_fn: delta_feet_position
+  explanation_template: "Move your feet about {feet_move_cm:.0f} cm {feet_direction} so the bar sits over the middle of your foot."
+
+setup_habit:
+  description: "Bar moves off the midfoot while getting set, feet placed right"
+  tier: 1
+  evidence_test_fn: test_setup_habit
+  parameter_delta_fn: delta_setup_habit
+  explanation_template: "Your feet were in the right spot, but the bar rolled about {bar_roll_cm:.0f} cm {bar_roll_direction} as you got set, so bring your shins to the bar and leave the bar where it is."
+
+hips_too_low:
+  description: "Hips set below the setup band (squatting the pull)"
+  tier: 1
+  evidence_test_fn: test_hips_too_low
+  parameter_delta_fn: delta_hips_up
+  explanation_template: "Start with your hips about {hips_up_cm:.0f} cm higher, with your shoulders just in front of the bar."
+
+hips_too_high:
+  description: "Hips set above the setup band"
+  tier: 1
+  evidence_test_fn: test_hips_too_high
+  parameter_delta_fn: delta_hips_down
+  explanation_template: "Start with your hips about {hips_down_cm:.0f} cm lower, keeping your shoulders just in front of the bar."
+
+hip_hamstring_mobility:
+  description: "Hip and hamstring range keeps the hips high at setup"
+  tier: 3
+  evidence_test_fn: test_hip_hamstring_mobility
+  parameter_delta_fn: null
+  explanation_template: "Your hips stay high at the start, which can mean stiff hips and hamstrings, so add light Romanian deadlifts and hamstring stretches after training."
+
+setup_anthropometry:
+  description: "The lifter's proportions put the best hip height outside the usual band"
+  tier: 0
+  evidence_test_fn: test_setup_anthropometry
+  parameter_delta_fn: null
+  explanation_template: "Your proportions put your best hip height a little outside the usual range, so part of this is your build, not a mistake."
+
+shoulder_position:
+  description: "Shoulders set behind the bar"
+  tier: 1
+  evidence_test_fn: test_shoulder_position
+  parameter_delta_fn: delta_shoulders_forward
+  explanation_template: "Bring your shoulders about {shoulders_forward_cm:.0f} cm forward at the start so they sit just in front of the bar."
+
+slack_not_pulled:
+  description: "Bar pulled off the floor before the body is tight"
+  tier: 1
+  evidence_test_fn: test_slack_not_pulled
+  parameter_delta_fn: delta_chest_up
+  explanation_template: "Your hips rose before your chest as the bar left the floor, so pull the bar tight before it moves and then push the floor away."
+
+weak_off_floor:
+  description: "Legs give out early in the pull, so the hips rise first"
+  tier: 3
+  evidence_test_fn: test_weak_off_floor
+  parameter_delta_fn: null
+  explanation_template: "Your hips come up first off the floor even from a good start, so build your legs with paused deadlifts just off the floor and front squats."
+
+load_too_heavy:
+  description: "Load close to the lifter's limit for this many reps"
+  tier: 2
+  evidence_test_fn: test_load_too_heavy
+  parameter_delta_fn: null
+  explanation_template: "The weight was close to your limit by the end of the set, so go about {reduction_pct:.0f}% lighter next set."
+
+bar_far_at_setup:
+  description: "Bar starts too far from the shins"
+  tier: 1
+  evidence_test_fn: test_bar_far_at_setup
+  parameter_delta_fn: delta_bar_start_closer
+  explanation_template: "The bar started about {bar_start_closer_cm:.0f} cm too far from your shins, so set up with it touching your shins."
+
+lats_not_engaged:
+  description: "Bar not held into the legs during the pull"
+  tier: 1
+  evidence_test_fn: test_lats_not_engaged
+  parameter_delta_fn: delta_bar_closer
+  explanation_template: "The bar drifted about {bar_closer_cm:.0f} cm away from your legs, so push the bar into your legs the whole way up."
+
+glutes_not_finishing:
+  description: "Hips not driven through at the top"
+  tier: 1
+  evidence_test_fn: test_glutes_not_finishing
+  parameter_delta_fn: delta_stand_taller
+  explanation_template: "You stopped a little short of standing tall, so squeeze your glutes at the top until you are standing straight."
+
+over_extension_habit:
+  description: "Finishing the rep by leaning back"
+  tier: 1
+  evidence_test_fn: test_over_extension_habit
+  parameter_delta_fn: delta_less_lean_back
+  explanation_template: "You leaned back at the top, so finish by standing straight with your hips under you instead of leaning back."
+
+# PLAN.md §7's "uneven stance or grip" is split in two so each delta reads the
+# measure that implicated it: the hips' slide (D8) or the bar's tilt (D8b).
+uneven_stance:
+  description: "Feet set off-centre under the bar, or pushing harder through one"
+  tier: 1
+  evidence_test_fn: test_uneven_stance
+  parameter_delta_fn: delta_hips_to_centre
+  explanation_template: "Your hips slid {shift_side_phrase} as you pulled, so centre your feet under the bar and push through both feet equally."
+
+uneven_grip:
+  description: "Hands set unevenly on the bar"
+  tier: 1
+  evidence_test_fn: test_uneven_grip
+  parameter_delta_fn: delta_level_bar
+  explanation_template: "One end of the bar sat about {bar_level_cm:.0f} cm lower than the other as you pulled, so check your hands are the same distance from the middle of the bar."
+
+unilateral_weakness:
+  description: "One side does more of the work as the set goes on"
+  tier: 3
+  evidence_test_fn: test_unilateral_weakness
+  parameter_delta_fn: null
+  explanation_template: "One side seems to do more of the work as the set goes on, so add single-leg work like split squats and single-leg Romanian deadlifts."

@@ -1,0 +1,141 @@
+# Conventional deadlift symptoms (docs/deadlift/PLAN.md §7). Same schema as
+# symptoms.yaml: each reads one per-rep feature (deadlift.diagnosis
+# _extract_feature), aggregates it over the set, and fires when the aggregate
+# exceeds expected + threshold. Thresholds are the faults' mild thresholds
+# (PLAN.md §2.6); severity reaches 1 at three times the threshold.
+#   measurement (faults.observability): bar_3d — the triangulated bar
+#     (approximate on one camera); side_view — the trunk and hips seen from the
+#     side (multi-camera only); lateral_travel — sideways hip travel
+#     (approximate on one camera). Unobservable symptoms never fire.
+#   Priors are expert estimates pending coach-labelled sets; they sum to 1 per symptom.
+
+bar_off_midfoot:
+  description: "Bar not over the middle of the foot at setup (D1)"
+  detection:
+    feature: bar_midfoot_offset_cm    # |bar_midfoot_setup_cm|
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 3.0
+  measurement: bar_3d
+  candidate_causes:
+    - { cause_id: feet_position, prior: 0.65 }
+    - { cause_id: setup_habit, prior: 0.35 }
+
+setup_hips_off:
+  description: "Hips set outside the setup model's band for this body (D4)"
+  detection:
+    feature: setup_hip_band_miss_cm   # cm above or below the band, 0 inside it
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 4.0
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: hips_too_low, prior: 0.35 }
+    - { cause_id: hips_too_high, prior: 0.35 }
+    - { cause_id: hip_hamstring_mobility, prior: 0.15 }
+    - { cause_id: setup_anthropometry, prior: 0.15 }
+
+shoulders_behind_bar:
+  description: "Shoulders behind the bar at setup (D7)"
+  detection:
+    feature: shoulders_behind_bar_cm  # max(0, -shoulder_vs_bar_cm)
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 2.0
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: shoulder_position, prior: 1.00 }
+
+hips_shoot:
+  description: "Hips rise before the chest as the bar leaves the floor (D2)"
+  detection:
+    feature: trunk_change_liftoff_knee_deg   # trunk tip beyond the setup model's prediction
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 10.0
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: hips_too_low, prior: 0.30 }
+    - { cause_id: slack_not_pulled, prior: 0.30 }
+    - { cause_id: weak_off_floor, prior: 0.20 }
+    - { cause_id: load_too_heavy, prior: 0.20 }
+
+bar_drift:
+  description: "Bar drifts away from the legs during the pull (D3)"
+  detection:
+    feature: bar_drift_cm
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 3.0
+  measurement: bar_3d
+  candidate_causes:
+    - { cause_id: bar_far_at_setup, prior: 0.45 }
+    - { cause_id: lats_not_engaged, prior: 0.55 }
+
+incomplete_lockout:
+  description: "Rep not finished standing tall (D6)"
+  detection:
+    feature: lockout_deficit_deg      # worse of the hip and knee extension deficits
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 8.0
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: glutes_not_finishing, prior: 1.00 }
+
+lean_back:
+  description: "Trunk leans back past standing at the top (D5)"
+  detection:
+    feature: lean_back_deg
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 8.0
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: over_extension_habit, prior: 0.60 }
+    - { cause_id: glutes_not_finishing, prior: 0.40 }
+
+hip_shift:
+  description: "Hips slide toward one foot during the pull (D8)"
+  detection:
+    feature: hip_shift_abs            # fraction of the ankle separation
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 0.10
+  measurement: lateral_travel
+  candidate_causes:
+    - { cause_id: uneven_stance, prior: 0.60 }
+    - { cause_id: unilateral_weakness, prior: 0.40 }
+
+bar_tilt:
+  description: "Bar tilts, one end rising later than the other (D8b)"
+  detection:
+    feature: bar_tilt_abs_cm          # height difference of the two bar ends
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 3.0
+  measurement: bar_3d
+  candidate_causes:
+    - { cause_id: uneven_grip, prior: 0.60 }
+    - { cause_id: unilateral_weakness, prior: 0.40 }
+
+velocity_loss:
+  description: "Bar speed drops across the set — the set is near failure (D10)"
+  detection:
+    feature: velocity_loss_pct
+    aggregation: tail_mean            # the set's last two reps
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 20.0
+  measurement: bar_3d
+  candidate_causes:
+    - { cause_id: load_too_heavy, prior: 1.00 }
