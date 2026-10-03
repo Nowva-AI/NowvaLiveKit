@@ -22,7 +22,14 @@ from __future__ import annotations
 import math
 
 from .graph.evidence_tests import _clamp
-from .types import RepKinematicSummary, RepScore, RepTrajectory, RepTrajectorySample, SetScoreSummary
+from .types import (
+    DeadliftRepScore,
+    RepKinematicSummary,
+    RepScore,
+    RepTrajectory,
+    RepTrajectorySample,
+    SetScoreSummary,
+)
 
 WEIGHT_DEPTH = 0.20
 WEIGHT_TRUNK = 0.25
@@ -365,6 +372,13 @@ def score_set(
         score_rep(rep, anthro, rom, trajectory)
         for rep, trajectory in zip(reps, trajectories)
     ]
+    return summarize_rep_scores(per_rep_scores)
+
+
+def summarize_rep_scores(
+    per_rep_scores: list[RepScore | DeadliftRepScore],
+) -> SetScoreSummary:
+    """Set statistics over a set's rep scores, whatever the exercise."""
     # Reps with nothing measurable are left out of the set statistics.
     scored = [score for score in per_rep_scores if math.isfinite(score.composite_score)] or per_rep_scores
     composites = [score.composite_score for score in scored]
