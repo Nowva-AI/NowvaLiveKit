@@ -250,7 +250,7 @@ A tier is cued only if the P95 measurement error against ground truth (§8.4) is
 | D9 | 15° | 5° | 3–5° | mild |
 | D4 | 4 cm | 1.3 cm | model + hip-keypoint bias (§2.7) | per §2.7 |
 | D7 | 2 cm | 0.7 cm | 1–1.5 cm | moderate |
-| D10 | 20 % | ~7 % | bar-velocity noise below 15–20 % (FINDINGS) | moderate until proven |
+| D10 | 20 % | ~7 % | bar-velocity noise below 15–20 % (FINDINGS) | recap only (never cued mid-set) |
 
 ### 2.10 Back rounding: honest proxies
 
