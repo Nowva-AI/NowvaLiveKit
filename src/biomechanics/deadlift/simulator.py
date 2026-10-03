@@ -7,6 +7,13 @@ quick re-pulls, failed and dropped reps, and every v1 fault injected on demand.
 The pull is built bar-first: the bar path and the trunk angle are scripted, the
 shoulders hang the arms from the bar, and the legs are solved to reach the hip,
 so each injected fault has a known size.
+
+By default the setup and knee-pass trunk angles come from the analyser's own
+setup model (setup_model.py), so a clean set is clean by that model's standard.
+RepScript.setup_trunk_deg / knee_pass_trunk_deg script them instead: the poses
+then owe nothing to the model, and RepTruth carries the kinematic ground truth
+(trunk angles, setup hip height, knee flexion at the knee pass) read off the
+emitted poses, for tests that must not grade the model against itself.
 """
 
 from __future__ import annotations
@@ -82,6 +89,11 @@ class RepScript(BaseModel):
     drop_bar: bool = False
     # A failed rep: the bar rises this far and comes back down without a top.
     fail_rise_m: float | None = None
+    # Model-free poses: the trunk angle (deg forward of vertical) at setup and when
+    # the bar reaches the knees, instead of the setup model's solves. A trunk the
+    # legs cannot reach is brought upright until they can (RepTruth has the result).
+    setup_trunk_deg: float | None = None
+    knee_pass_trunk_deg: float | None = None
 
 
 class Scenario(BaseModel):
@@ -104,6 +116,9 @@ class Scenario(BaseModel):
     # Bar axis to the shin line at contact; the analyser's setup model assumes
     # 5 cm, real lifters vary, so a different value tests that assumption.
     shin_bar_m: float = 0.05
+    # The plates hide the feet (confidence 0) whenever the bar is this far off its
+    # rest; None: never hidden.
+    plates_hide_feet_above_m: float | None = None
     seed: int = 7
     start_time: float = 100.0
 
@@ -123,6 +138,13 @@ class RepTruth(NamedTuple):
     floor_time: float
     counted: bool
     touch_and_go: bool
+    # Kinematic truth read off the emitted poses (sagittal, ankle-relative).
+    liftoff_trunk_deg: float = math.nan
+    knee_pass_trunk_deg: float = math.nan
+    knee_pass_knee_flexion_deg: float = math.nan
+    setup_hip_height_m: float = math.nan
+    hip_rise_m: float = math.nan
+    shoulder_rise_m: float = math.nan
 
 
 class SimulatedSet(NamedTuple):
@@ -234,6 +256,17 @@ def _pose_from_bar(
     )
 
 
+def _trunk_deg(pose: _Pose) -> float:
+    return math.degrees(math.atan2(pose.shoulder[0] - pose.hip[0], pose.shoulder[1] - pose.hip[1]))
+
+
+def _knee_flexion_deg(pose: _Pose) -> float:
+    shin = pose.knee
+    thigh = (pose.hip[0] - pose.knee[0], pose.hip[1] - pose.knee[1])
+    cosine = (shin[0] * thigh[0] + shin[1] * thigh[1]) / (math.hypot(*shin) * math.hypot(*thigh))
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
 def _standing_pose(athlete: SimAthlete, bar_rest: tuple[float, float], back_m: float) -> _Pose:
     leg = (athlete.tibia_m + athlete.femur_m) * STANDING_REACH_FRACTION
     hip = (0.0, leg)
@@ -315,8 +348,10 @@ class _Builder:
                 offset + pose.shoulder[0], pose.shoulder[1], sign * athlete.shoulder_half_width_m - shift,
             )
             arm_x = athlete.grip_half_width_m if pose.hands_on_bar else athlete.shoulder_half_width_m + 0.03
-            points[elbow_i] = self._world(offset + pose.elbow[0], pose.elbow[1], sign * arm_x)
-            points[wrist_i] = self._world(offset + pose.wrist[0], pose.wrist[1], sign * arm_x)
+            # The hands ride the tilted bar: the left end low by half the tilt.
+            hand_drop = sign * (pose.bar_tilt_m / 2.0) * (arm_x / HUB_HALF_SPAN_M) if pose.hands_on_bar else 0.0
+            points[elbow_i] = self._world(offset + pose.elbow[0], pose.elbow[1] - hand_drop, sign * arm_x)
+            points[wrist_i] = self._world(offset + pose.wrist[0], pose.wrist[1] - hand_drop, sign * arm_x)
         head = (
             offset + pose.shoulder[0] + 0.03, pose.shoulder[1] + 0.22,
         )
@@ -330,6 +365,10 @@ class _Builder:
         if scenario.keypoint_noise_m > 0.0:
             points = points + self.rng.normal(0.0, scenario.keypoint_noise_m, points.shape)
         confidences = np.full(NUM_KEYPOINTS, 0.9)
+        hide_above = scenario.plates_hide_feet_above_m
+        if hide_above is not None and pose.bar[1] - self.bar_rest[1] > hide_above:
+            confidences[[CK.LEFT_ANKLE, CK.RIGHT_ANKLE, CK.LEFT_FOOT_INDEX, CK.RIGHT_FOOT_INDEX,
+                         CK.LEFT_HEEL, CK.RIGHT_HEEL]] = 0.0
 
         bar_state = None
         if scenario.track_bar:
@@ -366,13 +405,19 @@ class _Builder:
 
     # -- rep geometry --------------------------------------------------
 
-    def _setup_pose(self, script: RepScript) -> _Pose:
+    def _setup_trunk_deg(self, script: RepScript) -> float:
+        if script.setup_trunk_deg is not None:
+            return script.setup_trunk_deg
         athlete = self.athlete
         solution = solve_setup(
             athlete.segments(), self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, self.scenario.shin_bar_m,
         )
-        trunk = solution.trunk_deg if solution is not None else 60.0
-        return _pose_from_bar(self.bar_rest, trunk, script.shoulder_ahead_m, 0.0, 0.0, 0.0, athlete)
+        return solution.trunk_deg if solution is not None else 60.0
+
+    def _setup_pose(self, script: RepScript) -> _Pose:
+        return _pose_from_bar(
+            self.bar_rest, self._setup_trunk_deg(script), script.shoulder_ahead_m, 0.0, 0.0, 0.0, self.athlete,
+        )
 
     def _top_geometry(self, script: RepScript) -> tuple[float, float]:
         """Bar height at the top and the trunk angle there."""
@@ -407,16 +452,23 @@ class _Builder:
 
     def _rep(self, script: RepScript, touch_and_go_in: bool, next_is_touch_and_go: bool) -> None:
         athlete = self.athlete
-        segments = athlete.segments()
-        shin_bar = self.scenario.shin_bar_m
-        setup = solve_setup(segments, self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, shin_bar)
-        knee_pass = solve_knee_pass(segments, self.bar_rest[0], script.shoulder_ahead_m, shin_bar)
-        trunk_setup = setup.trunk_deg if setup is not None else 60.0
-        trunk_knee = knee_pass.trunk_deg if knee_pass is not None else 45.0
-        knee_up = knee_pass.knee_height_m if knee_pass is not None else athlete.tibia_m
+        trunk_setup = self._setup_trunk_deg(script)
+        if script.knee_pass_trunk_deg is not None:
+            # Model-free: the trunk reaches its scripted angle with the bar at the
+            # height of a vertical shin's knee.
+            trunk_knee = script.knee_pass_trunk_deg
+            knee_up = athlete.tibia_m
+        else:
+            knee_pass = solve_knee_pass(
+                athlete.segments(), self.bar_rest[0], script.shoulder_ahead_m, self.scenario.shin_bar_m,
+            )
+            trunk_knee = knee_pass.trunk_deg if knee_pass is not None else 45.0
+            knee_up = knee_pass.knee_height_m if knee_pass is not None else athlete.tibia_m
         top_up, trunk_top = self._top_geometry(script)
 
-        liftoff_time = self.t - self.dt if touch_and_go_in else self.t
+        # The bar leaves its rest (or its touch-and-go low point) on the last frame
+        # before it moves: the eased pull starts there with zero velocity.
+        liftoff_time = self.t - self.dt
         if script.fail_rise_m is not None:
             fail_up = self.bar_rest[1] + script.fail_rise_m
             top_fraction = (fail_up - self.bar_rest[1]) / (top_up - self.bar_rest[1])
@@ -431,17 +483,32 @@ class _Builder:
             self.reps.append(RepTruth(liftoff_time, math.nan, math.nan, math.nan, False, touch_and_go_in))
             return
 
-        knee_pass_time = math.nan
         steps = int(round(script.pull_s * self.scenario.fps))
-        knee_fraction = (knee_up - self.bar_rest[1]) / (top_up - self.bar_rest[1])
+        start_pose = self._pull_pose(script, 0.0, top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
+        previous_pose = start_pose
+        knee_pass: tuple[float, float, _Pose] | None = None
         for step in range(1, steps + 1):
-            fraction = _smooth(step / steps)
-            if math.isnan(knee_pass_time) and fraction >= knee_fraction:
-                previous = _smooth((step - 1) / steps)
-                part = (knee_fraction - previous) / max(1e-9, fraction - previous)
-                knee_pass_time = self.t - self.dt + part * self.dt
-            self._emit(self._pull_pose(script, fraction, top_up, trunk_top, trunk_setup, trunk_knee, knee_up))
+            pose = self._pull_pose(script, _smooth(step / steps), top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
+            if knee_pass is None and pose.bar[1] >= pose.knee[1]:
+                # The bar crosses the knee's height between the previous frame and this one.
+                before = previous_pose.bar[1] - previous_pose.knee[1]
+                after = pose.bar[1] - pose.knee[1]
+                part = -before / (after - before) if after != before else 1.0
+                knee_pass = (self.t - self.dt + part * self.dt, part, previous_pose)
+                knee_pass_pose = pose
+            self._emit(pose)
+            previous_pose = pose
         top_time = self.t - self.dt
+        knee_pass_time = math.nan
+        truth_angles: dict[str, float] = {}
+        if knee_pass is not None:
+            knee_pass_time, part, before_pose = knee_pass
+            truth_angles = {
+                "knee_pass_trunk_deg": _trunk_deg(before_pose) + part * (_trunk_deg(knee_pass_pose) - _trunk_deg(before_pose)),
+                "knee_pass_knee_flexion_deg": _knee_flexion_deg(knee_pass_pose),
+                "hip_rise_m": knee_pass_pose.hip[1] - start_pose.hip[1],
+                "shoulder_rise_m": knee_pass_pose.shoulder[1] - start_pose.shoulder[1],
+            }
         top_pose = self._pull_pose(script, 1.0, top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
         self._hold(top_pose, script.top_hold_s)
 
@@ -456,7 +523,12 @@ class _Builder:
                 fraction = 1.0 - _smooth(step / lower_steps)
                 self._emit(self._pull_pose(clean, fraction, top_up, trunk_top, trunk_setup, trunk_knee, knee_up))
             floor_time = self.t - self.dt
-        self.reps.append(RepTruth(liftoff_time, knee_pass_time, top_time, floor_time, True, touch_and_go_in))
+        self.reps.append(RepTruth(
+            liftoff_time, knee_pass_time, top_time, floor_time, True, touch_and_go_in,
+            liftoff_trunk_deg=_trunk_deg(start_pose),
+            setup_hip_height_m=start_pose.hip[1],
+            **truth_angles,
+        ))
         if not next_is_touch_and_go:
             self._hold(self._setup_pose(script), script.floor_hold_s)
 

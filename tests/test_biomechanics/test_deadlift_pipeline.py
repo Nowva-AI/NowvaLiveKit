@@ -23,6 +23,8 @@ DEADLIFT = "Barbell Conventional Deadlift"
 SQUAT = "Barbell Back Squat"
 FRAME_DT_S = 1.0 / 30.0
 DEPTH_TARGET_RATIO = 0.05
+# The triangulator's confidence contract (utils/keypoint_kalman.py): std = 0.02 * sqrt(1/c - 1).
+TRIANGULATION_STD_SCALE_M = 0.02
 
 
 class _FakeClock:
@@ -88,13 +90,24 @@ def _pipeline(monkeypatch, exercise: str, start_s: float, coaching_ready: bool =
     return pipe, provider, clock
 
 
-def _run_set(pipe, provider, clock, scenario: Scenario, measured_gravity: bool = True) -> list[PipelineFrame]:
+def _run_set(
+    pipe, provider, clock, scenario: Scenario, measured_gravity: bool = True, keypoint_noise_m: float = 0.0,
+) -> list[PipelineFrame]:
+    """keypoint_noise_m: triangulation noise added before the pipeline's Kalman, with
+    the confidence the triangulator gives that much error."""
     sim = simulate(scenario)
     if measured_gravity:
         pipe.set_gravity(sim.gravity_up_world, GRAVITY_SOURCE_MEASURED)
+    rng = np.random.default_rng(scenario.seed)
+    noise_confidence = 1.0 / (1.0 + (keypoint_noise_m / TRIANGULATION_STD_SCALE_M) ** 2)
     results = []
     for frame in sim.frames:
-        provider.push(frame.points, frame.confidences)
+        if keypoint_noise_m > 0.0:
+            points = frame.points + rng.normal(0.0, keypoint_noise_m, frame.points.shape)
+            confidences = np.minimum(frame.confidences, noise_confidence) * (frame.confidences > 0.0)
+            provider.push(points, confidences)
+        else:
+            provider.push(frame.points, frame.confidences)
         if frame.bar is not None:
             pipe.push_bar_state(frame.bar.model_copy(update={"timestamp": clock.time()}))
         results.append(pipe.process_frame())
@@ -180,6 +193,25 @@ class TestDeadliftThroughThePipeline:
         assert result.missing_keypoints == ["left_wrist"]
 
 
+class TestRealWorldInput:
+    """Through the pipeline's Kalman: keypoints as noisy as the platform documents,
+    and plates hiding the feet for the whole pull."""
+
+    @pytest.mark.parametrize("keypoint_noise_m", [0.01, 0.015, 0.02])
+    def test_noisy_triangulation_counts_every_rep_and_reaches_the_stance(self, monkeypatch, keypoint_noise_m: float):
+        scenario = Scenario(bar_noise_m=0.003)
+        pipe, provider, clock = _pipeline(monkeypatch, DEADLIFT, scenario.start_time)
+        results = _run_set(pipe, provider, clock, scenario, keypoint_noise_m=keypoint_noise_m)
+        assert len(_reps(results)) == 3
+        phases = {result.exercise_status.phase for result in results if result.exercise_status is not None}
+        assert DeadliftPhase.STANCE in phases
+
+    def test_plates_hiding_the_feet_through_the_pull_lose_no_rep(self, monkeypatch):
+        scenario = Scenario(plates_hide_feet_above_m=0.03)
+        pipe, provider, clock = _pipeline(monkeypatch, DEADLIFT, scenario.start_time)
+        assert len(_reps(_run_set(pipe, provider, clock, scenario))) == 3
+
+
 class TestGate:
     def test_a_gated_deadlift_counts_and_judges_nothing(self, monkeypatch):
         scenario = Scenario()
@@ -222,6 +254,27 @@ class TestSwitching:
         assert isinstance(pipe._rep_analyzer, DeadliftRepAnalyzer)
         assert pipe._rep_analyzer.gravity_source == GRAVITY_SOURCE_MEASURED
         assert pipe._rep_analyzer._up == pytest.approx(up / np.linalg.norm(up), abs=1e-9)
+
+    def test_a_calibration_installed_later_brings_the_measured_gravity(self, monkeypatch):
+        from biomechanics.deadlift import gravity
+
+        up = np.array([0.0, -0.9986, 0.0523])
+        monkeypatch.setattr(gravity, "load_world_up_for_provider", lambda provider: (up, GRAVITY_SOURCE_MEASURED))
+        pipe, _, _ = _pipeline(monkeypatch, DEADLIFT, 0.0)
+        assert pipe._rep_analyzer.gravity_source != GRAVITY_SOURCE_MEASURED
+        pipe.on_calibration_changed(world_frame_changed=True)
+        assert pipe._rep_analyzer.gravity_source == GRAVITY_SOURCE_MEASURED
+        assert pipe._rep_analyzer._up == pytest.approx(up / np.linalg.norm(up), abs=1e-9)
+
+    def test_a_calibration_change_never_touches_the_squats_gravity(self, monkeypatch):
+        from biomechanics.deadlift import gravity
+
+        monkeypatch.setattr(
+            gravity, "load_world_up_for_provider", lambda provider: pytest.fail("the squat never reads gravity"),
+        )
+        pipe, _, _ = _pipeline(monkeypatch, SQUAT, 0.0)
+        pipe.on_calibration_changed(world_frame_changed=True)
+        assert pipe._gravity_up is None
 
     def test_the_squat_keeps_its_counter_and_leg_tracking(self, monkeypatch):
         pipe, _, _ = _pipeline(monkeypatch, SQUAT, 0.0)

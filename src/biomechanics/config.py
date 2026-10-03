@@ -223,7 +223,9 @@ class FaultsConfig(BaseModel):
     deadlift_shoulders_behind: DeadliftFaultConfig = _deadlift_fault(2.0, 4.0, 6.0, "moderate")
     # Lower than the plan's first 10/15/20: with the bar at the knees, straight legs
     # cap the excess at ~8-12 deg for typical bodies (simulator, J2), so 10/15/20
-    # could almost never reach moderate. Mild stays uncued (error budget §2.9).
+    # could almost never reach moderate. Mild stays uncued (error budget §2.9). The
+    # sizes come from the unvalidated setup model, so the rule cues moderate only
+    # when the hips out-rose the shoulders (rise ratio > 1), else severe only.
     deadlift_hips_shoot: DeadliftFaultConfig = _deadlift_fault(5.0, 8.0, 11.0, "moderate")
     deadlift_bar_drift: DeadliftFaultConfig = _deadlift_fault(3.0, 5.0, 8.0, "moderate")
     deadlift_lockout: DeadliftFaultConfig = _deadlift_fault(8.0, 12.0, 20.0, "moderate")
@@ -316,18 +318,22 @@ class DeadliftConfig(BaseModel):
     Initial values, re-set from real lifts at J6. Distances in metres, speeds in
     m/s, durations in seconds; heights are along measured gravity.
     """
-    # APPROACH -> STANCE: standing still, facing the bar, close enough to guide.
+    # APPROACH -> STANCE: standing settled, facing the bar, close enough to guide.
     stance_still_s: float = 0.5
     stance_max_bar_ahead_m: float = 0.40
     stance_max_bar_lateral_m: float = 0.30
     facing_max_deg: float = 60.0
     # The bar behind the midfoot by more than this is behind the lifter.
     max_bar_behind_m: float = 0.10
-    # STANCE -> SETUP: hands within this band around the bar, still.
-    hands_max_above_bar_m: float = 0.10
-    hands_max_below_bar_m: float = 0.04
-    hands_max_forward_m: float = 0.12
-    setup_still_s: float = 0.3
+    # STANCE -> SETUP: hands within this band around the bar for setup_hold_s. The
+    # wrist joint sits ~7.5 cm above the bar centre; the band leaves room for
+    # 2 cm keypoint noise either side.
+    hands_max_above_bar_m: float = 0.16
+    hands_max_below_bar_m: float = 0.06
+    hands_max_forward_m: float = 0.15
+    setup_hold_s: float = 0.3
+    # A held condition survives lapses this short (a noisy frame, a dropped keypoint).
+    hold_grace_s: float = 0.15
     # Without bar tracking, a setup is a hinge with the wrists below the knees.
     wrist_proxy_min_hinge_deg: float = 30.0
     # SETUP / FLOOR -> PULL and the back-dated liftoff.
@@ -361,11 +367,17 @@ class DeadliftConfig(BaseModel):
     min_setup_frames: int = 3
     # STANCE -> APPROACH.
     walk_away_s: float = 0.5
-    # Standing references (lockout, lean-back, bent arms) and stillness.
+    # Standing references (lockout, lean-back, bent arms). "Settled" is the hips'
+    # and shoulders' median displacement over body_speed_window_s: below walking,
+    # well above what 2 cm (and Kalman-correlated) keypoint noise reads as.
     standing_still_s: float = 1.0
     standing_max_knee_deg: float = 20.0
     standing_max_trunk_deg: float = 20.0
-    still_speed_mps: float = 0.05
+    settled_speed_mps: float = 0.20
+    body_speed_window_s: float = 0.5
+    # The bar is still when its slope is under the speed threshold, or under this
+    # many standard errors of its own noise (the wrist proxy jitters).
+    still_noise_factor: float = 2.5
     # Bar velocity is the slope of its height over this window.
     velocity_window_s: float = 0.1
     # The midfoot is locked from the last still frames of STANCE.
@@ -381,7 +393,9 @@ class DeadliftConfig(BaseModel):
     max_shin_bar_distance_m: float = 0.10
     shoulder_band_low_m: float = 0.0
     shoulder_band_high_m: float = 0.06
-    # A bar state older than this (or a prediction) is not trusted for the setup.
+    # A frame up to this long after the last bar state keeps that bar for its
+    # geometry (hands on bar, facing), with no height: a tracking gap, not a lost
+    # bar. Carried and predicted states never enter the setup features.
     max_bar_gap_s: float = 0.2
 
 
