@@ -29,4 +29,4 @@ class DeadliftHipShiftRule(DeadliftRepRule):
         shift = features.hip_shift_ratio
         if not math.isfinite(shift):
             return None
-        return abs(shift), {"side": "right" if shift > 0.0 else "left"}
+        return abs(shift), {"side": "right" if shift > 0.0 else "left", "grip": features.grip}

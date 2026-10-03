@@ -287,11 +287,50 @@ def _extract_athlete_params(pipeline) -> dict | None:
     return pipeline.body_calibration.to_athlete_params()
 
 
+def _activate_profile(
+    pipeline: BiomechanicsPipeline,
+    session_tracker: SessionTracker,
+    bridge: IPCBridge,
+    exercise_name: str,
+    meta: dict | None,
+    switching: bool,
+) -> None:
+    """Everything an active exercise needs, at startup and on every switch alike
+    (docs/deadlift/PLAN.md §3.4): the diagnosis switch, the profile's own set
+    diagnosis, the session metadata, its gravity and camera-refine safety, and the
+    voice agent's cues (which also tell it which profile is active). For the
+    squat this sets exactly what startup and _switch_exercise always set."""
+    profile = pipeline.profile
+    if switching:
+        session_tracker.on_exercise_changed(profile.uses_diagnosis_engine)
+    else:
+        session_tracker.diagnosis_enabled = profile.uses_diagnosis_engine
+    session_tracker.set_diagnosis = profile.create_set_diagnosis(session_tracker.capture_mode)
+    pipeline.set_session_meta(meta or {})
+    provider = pipeline._multi_camera_provider
+    if provider is not None:
+        set_view_recording = getattr(provider, "set_view_recording", None)
+        if set_view_recording is not None:
+            set_view_recording(profile.allows_camera_refine)
+        if profile.needs_bar_3d:
+            pipeline.set_gravity(*_measured_gravity(provider))
+    bridge.prepare_exercise(exercise_name, pipeline.config)
+
+
+def _measured_gravity(provider) -> tuple:
+    """Gravity measured with the board laid flat, mapped into the current world
+    frame; (None, "body") when no camera has a usable measurement."""
+    from biomechanics.deadlift.gravity import load_world_up_for_provider
+
+    return load_world_up_for_provider(provider)
+
+
 def _switch_exercise(
     pipeline: BiomechanicsPipeline,
     session_tracker: SessionTracker,
     bridge: IPCBridge,
     exercise_name: str,
+    meta: dict | None = None,
 ) -> None:
     """Move the running pipeline to another exercise between sets.
 
@@ -300,8 +339,7 @@ def _switch_exercise(
     exercise's cues, which also tells it which profile is active.
     """
     pipeline.set_exercise(exercise_name)
-    session_tracker.on_exercise_changed(pipeline.profile.uses_diagnosis_engine)
-    bridge.prepare_exercise(exercise_name)
+    _activate_profile(pipeline, session_tracker, bridge, exercise_name, meta, switching=True)
     print(f"[PIPELINE] Exercise set to {exercise_name} ({pipeline.profile.name})")
 
 
@@ -903,20 +941,21 @@ def _restart_demo_bridge(existing: DemoWSBridge | None) -> DemoWSBridge:
     return bridge
 
 
-def _wait_for_start_capture(ipc_client: IPCClient) -> bool:
-    """Block until a start_capture message arrives over IPC. Returns False on disconnect."""
+def _wait_for_start_capture(ipc_client: IPCClient) -> dict | None:
+    """Block until a start_capture message arrives over IPC and return it
+    (it carries the session's exercise_meta). None on disconnect."""
     sock = ipc_client.client_socket
     if sock is None:
-        return False
+        return None
     while True:
         try:
             msg = _recv_framed(sock)
             if msg is None:
-                return False
+                return None
             if msg.get("type") == "start_capture":
-                return True
+                return msg
         except Exception:
-            return False
+            return None
 
 
 def run_biomechanics_pipeline(
@@ -961,6 +1000,8 @@ def run_biomechanics_pipeline(
     config.capture.device_id = cam0_id
 
     fps_counter = FPSCounter()
+    # Session metadata for the exercise (deadlift grip, plates...), sent on start_capture.
+    exercise_meta: dict = {}
     display_sink = get_display_sink()
     camera_calibration: CameraCalibrationSession | None = None
 
@@ -981,10 +1022,12 @@ def run_biomechanics_pipeline(
             print("[PRELOAD] Pose model loaded — waiting for start_capture signal")
             ipc_client.send_message({"type": "pipeline_status", "status": "preloaded"})
 
-            if not _wait_for_start_capture(ipc_client):
+            start_message = _wait_for_start_capture(ipc_client)
+            if start_message is None:
                 print("[PRELOAD] IPC disconnected while waiting for start_capture")
                 ipc_client.disconnect()
                 return
+            exercise_meta = start_message.get("exercise_meta") or {}
 
             pipeline.start_capture()
             print("[PRELOAD] Camera opened — entering frame loop")
@@ -1011,10 +1054,10 @@ def run_biomechanics_pipeline(
 
         bridge = IPCBridge(ipc_client)
         session_tracker = SessionTracker(bridge, config=config.coaching)
-        session_tracker.diagnosis_enabled = pipeline.profile.uses_diagnosis_engine
-
-        # Pre-cache coaching cues for the exercise
-        bridge.prepare_exercise(exercise_name)
+        # Pre-caches the exercise's coaching cues, among the rest.
+        _activate_profile(
+            pipeline, session_tracker, bridge, exercise_name, exercise_meta, switching=False,
+        )
 
         ipc_client.send_message({"type": "status", "value": "initialized"})
         bridge.send_pipeline_status("running", {})
@@ -1453,7 +1496,11 @@ def run_biomechanics_pipeline(
 
             # A factory (board-anchored) camera calibration moves its world frame
             # onto the lifter using the assessment reps just buffered.
-            if camera_calibration is not None and camera_calibration.needs_world_anchor:
+            if (
+                camera_calibration is not None
+                and camera_calibration.needs_world_anchor
+                and pipeline.profile.allows_camera_refine
+            ):
                 camera_calibration.anchor_world_on_lifter()
 
         except KeyboardInterrupt:
@@ -1736,7 +1783,9 @@ def run_biomechanics_pipeline(
                     else:
                         set_collector.reset()
 
-                    if camera_calibration is not None:
+                    # Deadlift sets never start a refine, nor its drift check (their
+                    # frames are not even buffered): the rig calibration stays the squat's.
+                    if camera_calibration is not None and pipeline.profile.allows_camera_refine:
                         camera_calibration.on_rest_start()
 
                     print(f"[REST] Starting {rest_seconds}s rest timer")
@@ -1744,7 +1793,7 @@ def run_biomechanics_pipeline(
                     # Sent during rest, after rest_start finalized the last set
                     # of the previous exercise.
                     exercise_name = incoming.get("exercise_name") or exercise_name
-                    _switch_exercise(pipeline, session_tracker, bridge, exercise_name)
+                    _switch_exercise(pipeline, session_tracker, bridge, exercise_name, incoming.get("meta"))
                     set_collector.thresholds = extract_thresholds_from_rule_engine(pipeline._rule_engine)
                 elif incoming.get("type") == "assessment_mode":
                     session_tracker.set_assessment_mode(incoming.get("enabled", False))

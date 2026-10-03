@@ -14,8 +14,8 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-from biomechanics.coaching.cue_cache import CueCache
-from biomechanics.config import CoachingConfig, IPCConfig
+from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP, CueCache
+from biomechanics.config import BiomechanicsConfig, CoachingConfig, IPCConfig, get_config
 from biomechanics.diagnosis.bridge import (
     build_anthro_dict,
     build_rom_dict,
@@ -105,17 +105,44 @@ class IPCBridge:
     # Exercise preparation
     # ------------------------------------------------------------------
 
-    def prepare_exercise(self, exercise_name: str) -> Dict[str, str]:
-        """Cache cues for an exercise and notify the voice agent."""
+    def prepare_exercise(self, exercise_name: str, config: BiomechanicsConfig | None = None) -> Dict[str, str]:
+        """Cache cues for an exercise and notify the voice agent.
+
+        Fields beyond the cue list are sent only when the profile differs from
+        the squat's defaults (.claude/deadlift/CONTRACT.md §3), so the squat's
+        message never changes."""
         cues = self.cue_cache.prepare_for_exercise(exercise_name)
-        self._send({
+        message: Dict[str, Any] = {
             "type": "cache_cues",
             "exercise_name": exercise_name,
             # The agent learns the active exercise profile from this message.
             "profile": self.cue_cache.profile_name,
             "cues": cues,
-        })
+        }
+        message.update(self._profile_delivery_fields(exercise_name, config or get_config()))
+        self._send(message)
         return cues
+
+    def _profile_delivery_fields(self, exercise_name: str, config: BiomechanicsConfig) -> Dict[str, Any]:
+        profile = getattr(self.cue_cache, "profile", None)
+        if profile is None:
+            from biomechanics.profiles import get_profile
+
+            profile = get_profile(exercise_name)
+        fields: Dict[str, Any] = {}
+        fault_to_cue = profile.get_fault_to_cue_map()
+        if fault_to_cue != FAULT_TO_CUE_MAP:
+            fields["fault_to_cue"] = fault_to_cue
+        min_cue_tiers = profile.min_cue_tiers(config)
+        if min_cue_tiers:
+            fields["min_cue_tiers"] = min_cue_tiers
+        if profile.set_idle_timeout_s is not None:
+            fields["set_idle_timeout_s"] = profile.set_idle_timeout_s
+        if profile.waits_for_diagnosis is not None:
+            fields["waits_for_diagnosis"] = profile.waits_for_diagnosis
+        if profile.closed_loop_cue:
+            fields["closed_loop"] = profile.closed_loop_cue
+        return fields
 
     # ------------------------------------------------------------------
     # Frame data (throttled)
@@ -139,6 +166,13 @@ class IPCBridge:
             "frame_index": frame.frame_index,
             "rep_phase": rep_phase,
         }
+        status = frame.exercise_status
+        if status is not None:
+            # Deadlift: the phase and the live bar-over-midfoot offset the
+            # agent's closed-loop foot guidance speaks from.
+            msg["deadlift_phase"] = status.phase.value
+            msg["bar_midfoot_live_cm"] = status.bar_midfoot_live_cm
+            msg["bar_source"] = status.bar_source
 
         if frame.skeleton_3d is not None and self.shoulder_width_m > 0:
             try:
@@ -329,22 +363,26 @@ class IPCBridge:
         self,
         set_number: int,
         diagnosis_result: DiagnosisResult,
-        score_summary: SetScoreSummary,
+        score_summary: SetScoreSummary | None,
     ) -> None:
-        """Send structured diagnosis and scoring results for a completed set."""
-        per_rep = score_summary.per_rep_scores
-        self._send({
-            "type": "diagnosis_complete",
-            "set_number": set_number,
-            "diagnosis": serialize_diagnosis(diagnosis_result),
-            "scoring": {
+        """Send structured diagnosis and scoring results for a completed set.
+        A set too short to score (one deadlift rep) sends empty scoring."""
+        scoring: Dict[str, Any] = {}
+        if score_summary is not None:
+            per_rep = score_summary.per_rep_scores
+            scoring = {
                 "mean_score": score_summary.mean_score,
                 "per_dimension": per_dimension_means(per_rep),
                 "best_rep": score_summary.best_rep_number,
                 "worst_rep": score_summary.worst_rep_number,
                 "trend_slope": score_summary.trend_slope,
                 "per_rep_scores": [r.model_dump() for r in per_rep],
-            },
+            }
+        self._send({
+            "type": "diagnosis_complete",
+            "set_number": set_number,
+            "diagnosis": serialize_diagnosis(diagnosis_result),
+            "scoring": scoring,
         })
 
     # ------------------------------------------------------------------
@@ -464,6 +502,9 @@ class IPCBridge:
     @staticmethod
     def _rep_depth_category(rep: RepData) -> str:
         """Depth category from the rep's hip height when measured, else its knee angle."""
+        if rep.features.get("dl_schema") is not None:
+            # A deadlift has no depth.
+            return "n/a"
         depth_ratio = rep.features.get("depth_ratio")
         if depth_ratio is not None and depth_ratio == depth_ratio:
             return geometric_depth_category(depth_ratio)

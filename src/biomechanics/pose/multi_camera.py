@@ -98,6 +98,9 @@ class MultiCameraPoseProvider:
         self._capture: MultiCameraCapture | None = None
         # Primary capture time of the last synced set get_pose() returned.
         self.last_capture_timestamp: float = math.nan
+        # Every camera's image of that set, for consumers that run their own
+        # per-view detection (the deadlift's 3D bar tracker).
+        self.last_synced_frames: dict[str, np.ndarray] | None = None
         self._estimator: RTMPoseEstimator | None = None
         self._triangulator: DLTTriangulator | None = None
         self._calibration: CalibrationResult | None = None
@@ -112,6 +115,9 @@ class MultiCameraPoseProvider:
         self._bar_detection_stride = bar_detection_stride
         self._capture_window_open = False
         self._window_frame_count = 0
+        # Off while an exercise whose frames must not feed camera refines is
+        # active (the deadlift); a calibration capture window records regardless.
+        self._view_recording = True
 
     @property
     def is_calibrated(self) -> bool:
@@ -346,6 +352,7 @@ class MultiCameraPoseProvider:
                     primary_skeleton_2d = skeleton_2d
 
         self._record_views(synced.frames, views, synced.timestamp, synced.sequence)
+        self.last_synced_frames = synced.frames
 
         primary_frame = synced.frames[primary_id]
         if self._triangulator is None or len(views) < self._min_views:
@@ -368,6 +375,8 @@ class MultiCameraPoseProvider:
         frame_index: int,
     ) -> None:
         if len(views) < MIN_CALIBRATION_VIEWS:
+            return
+        if not self._view_recording and not self._capture_window_open:
             return
         bar_ends: dict[str, BarbellDetection] = {}
         if self._capture_window_open and self._bar_detector is not None:
@@ -394,6 +403,11 @@ class MultiCameraPoseProvider:
 
     def end_calibration_capture(self) -> None:
         self._capture_window_open = False
+
+    def set_view_recording(self, enabled: bool) -> None:
+        """Whether set frames enter the refine buffer. A calibration capture
+        window (the bootstrap) records either way."""
+        self._view_recording = enabled
 
     @property
     def calibration_frame_count(self) -> int:

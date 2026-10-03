@@ -223,6 +223,7 @@ class DeadliftRepAnalyzer:
         self._seeded_segments: dict[str, float] = {}
         self._learned_grip_offset_m = NAN
         self._rep_counter = None
+        self._grip = ""
         self.reset()
 
     # ------------------------------------------------------------------
@@ -234,6 +235,12 @@ class DeadliftRepAnalyzer:
         up = np.asarray(up_world, dtype=np.float64)
         self._up = up / float(np.linalg.norm(up))
         self.gravity_source = source
+
+    def set_session_meta(self, meta: dict) -> None:
+        """Session metadata from the agent; the grip type is recorded with every rep
+        (a mixed grip rotates the trunk by design, so it explains, never excuses)."""
+        grip = meta.get("grip") or meta.get("grip_type") or ""
+        self._grip = str(grip)
 
     def seed_segments(self, athlete_params: dict[str, float] | None) -> None:
         """Read-only lengths from the session's body measurement, used only where
@@ -1052,6 +1059,7 @@ class DeadliftRepAnalyzer:
             trunk_change_predicted_deg=setup.get("predicted_trunk_change_deg", NAN),
             bar_source=bar_source,
             gravity_source=self.gravity_source,
+            grip=self._grip,
             liftoff_time=liftoff.t,
             top_time=rep.top_time,
             floor_time=rep.floor_time,

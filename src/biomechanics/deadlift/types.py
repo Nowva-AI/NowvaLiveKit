@@ -108,6 +108,8 @@ class DeadliftRepFeatures(BaseModel):
     floor_time: float = NAN
     bar_source: str = BAR_SOURCE_BAR
     gravity_source: str = GRAVITY_SOURCE_MEASURED
+    # From the session metadata: "double", "mixed", "hook" or "" (not asked).
+    grip: str = ""
     dl_schema: int = DEADLIFT_FEATURES_SCHEMA
 
     @property

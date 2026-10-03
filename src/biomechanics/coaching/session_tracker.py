@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from biomechanics.coaching.ipc_bridge import IPCBridge
 from biomechanics.config import CoachingConfig
+from biomechanics.deadlift.rule_base import TIER_RANK
 from biomechanics.diagnosis.bridge import (
     build_anthro_dict,
     build_frame_from_live_pipeline,
@@ -76,6 +77,10 @@ class SessionTracker:
         self._baseline: dict | None = None
         # The diagnosis engine models squats only; off for any other exercise.
         self.diagnosis_enabled: bool = True
+        # An exercise's own set diagnosis (the deadlift's graph), installed by
+        # the pipeline process with the profile; None on the squat path.
+        self.set_diagnosis = None
+        self._set_best_velocity_mps: float = -1.0
 
         # Assessment mode: per-rep rolling-window diagnosis
         self._assessment_mode: bool = False
@@ -143,6 +148,7 @@ class SessionTracker:
             self.current_set_reps = []
             self.set_active = True
             self._set_best_score = -1.0
+            self._set_best_velocity_mps = -1.0
 
         self.current_set_reps.append(rep)
 
@@ -191,6 +197,10 @@ class SessionTracker:
 
         if self._assessment_mode:
             self._run_assessment_diagnosis(rep.rep_number)
+        if self.set_diagnosis is not None and rep.features:
+            rolling = self.set_diagnosis.on_rep(rep.features)
+            if rolling is not None:
+                self.ipc_bridge.send_rep_diagnosis(rep.rep_number, rolling)
 
         self.last_rep_time = now
         self.total_reps += 1
@@ -203,6 +213,8 @@ class SessionTracker:
         trajectory: RepTrajectory | None,
     ) -> list[str]:
         """What went right this rep, for positive reinforcement."""
+        if rep.features.get("dl_schema") is not None:
+            return self._deadlift_highlights(rep)
         highlights: list[str] = []
         if rep.depth_target_met:
             highlights.append("depth_target_met")
@@ -216,6 +228,24 @@ class SessionTracker:
                 if len(self.current_set_reps) > 1:
                     highlights.append("best_rep_so_far")
                 self._set_best_score = score
+        return highlights
+
+    def _deadlift_highlights(self, rep: RepData) -> list[str]:
+        """No depth to praise: a clean rep, and the fastest rep of the set with
+        nothing the coach would correct (no fault at or above its min tier)."""
+        highlights: list[str] = []
+        if rep.is_clean:
+            highlights.append("clean")
+        correctable = any(
+            TIER_RANK.get(fault.severity.value, 0) >= TIER_RANK.get(fault.details.get("min_tier", "mild"), 1)
+            for fault in rep.faults
+        )
+        velocity = rep.features.get("concentric_velocity_mps")
+        if not correctable and isinstance(velocity, float) and velocity == velocity:
+            if velocity > self._set_best_velocity_mps:
+                if self._set_best_velocity_mps >= 0.0:
+                    highlights.append("best_rep_so_far")
+                self._set_best_velocity_mps = velocity
         return highlights
 
     def _run_assessment_diagnosis(self, rep_number: int) -> None:
@@ -272,6 +302,16 @@ class SessionTracker:
                 self.current_set_number, self.current_set_reps
             )
             self.total_sets += 1
+
+        if self.set_diagnosis is not None and self.current_set_reps:
+            outcome = self.set_diagnosis.finish_set(f"set_{self.current_set_number}")
+            if outcome is not None:
+                diagnosis_result, score_summary = outcome
+                self.ipc_bridge.send_diagnosis_complete(
+                    self.current_set_number, diagnosis_result, score_summary,
+                )
+                self._last_set_diagnosis = diagnosis_result
+            self.set_diagnosis.reset()
 
         if self._rep_kinematic_buffer and self._diagnosing:
             anthro = build_anthro_dict(self._athlete_params)

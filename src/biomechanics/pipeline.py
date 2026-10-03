@@ -318,6 +318,7 @@ class BiomechanicsPipeline:
         self._bar_tracker_3d = None
         self._gravity_up: np.ndarray | None = None
         self._gravity_source = GRAVITY_SOURCE_BODY
+        self._session_meta: dict = {}
 
         # Layers 4-6: fault rules, rep counting and the optional BiLSTM, all
         # set by the exercise profile and rebuilt by set_exercise().
@@ -387,6 +388,7 @@ class BiomechanicsPipeline:
             self._rep_counter = self._rep_analyzer.rep_counter
             if self._gravity_up is not None:
                 self._rep_analyzer.set_gravity(self._gravity_up, self._gravity_source)
+            self._rep_analyzer.set_session_meta(self._session_meta)
             self._seed_analyzer_segments()
         else:
             self._rep_counter = self._profile.create_rep_counter(self.config)
@@ -581,6 +583,14 @@ class BiomechanicsPipeline:
         """Adopt a returning user's stored body measurements and scale thresholds once."""
         self.body_calibration = SegmentLengthEstimator.from_athlete_params(params)
         self._apply_body_proportions()
+        self._seed_analyzer_segments()
+
+    def set_session_meta(self, meta: dict) -> None:
+        """What the athlete told the agent about this exercise (deadlift grip,
+        plates, belt, shoes), for the exercise's analyser to record."""
+        self._session_meta = dict(meta)
+        if self._rep_analyzer is not None:
+            self._rep_analyzer.set_session_meta(self._session_meta)
 
     def _apply_body_proportions(self) -> None:
         proportions = self.body_calibration.body_proportions
