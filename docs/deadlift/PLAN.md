@@ -1,6 +1,6 @@
-# Conventional deadlift — plan v14 (built on the multi-exercise platform)
+# Conventional deadlift — plan v15 (built on the multi-exercise platform)
 
-Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
+Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 15: v14 plus the changes an independent review of the implementation forced (§2.3 gates built for the platform's keypoint noise, a pull counted from any phase, events fitted rather than thresholded; §2.5 hip-shift and proxy-tilt statistics; §2.6 D2's cue tier needs the rise ratio; D10 off the proxy). Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
 
 ## 0. Decisions
 
@@ -83,7 +83,7 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 
 ### 2.3 Phases and rep counting (driven by the bar)
 
-**Phases:** `APPROACH` (standing, away from the bar) → `STANCE` (standing over the bar, feet planted) → `SETUP` (hinged, hands on the bar, still) → `PULL` (liftoff → knee pass → top) → `TOP` → `LOWER` → `FLOOR`. From `FLOOR` the athlete goes back to `SETUP`, straight to `PULL` (touch-and-go or quick re-pull), or back to `APPROACH`.
+**Phases:** `APPROACH` (standing, away from the bar) → `STANCE` (standing over the bar, feet planted) → `SETUP` (hinged, hands on the bar) → `PULL` (liftoff → knee pass → top) → `TOP` → `LOWER` → `FLOOR`. From `FLOOR` the athlete goes back to `SETUP`, straight to `PULL` (touch-and-go or quick re-pull), or back to `APPROACH`.
 
 **Rep signal:** bar-centre height above its resting height. Fallback without bar tracking: mid-wrist height above its height in `SETUP`.
 
@@ -91,10 +91,11 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 
 | Transition | Condition (initial values in the `deadlift:` config section, §3.5) |
 |---|---|
-| APPROACH → STANCE | Standing still ≥ 0.5 s, facing the bar (foot forward axis toward it), with the bar ≤ 40 cm ahead of the midfoot horizontally. Within that range the closed loop (§4.3) guides the feet in: a coarse "step closer" beyond 15 cm, then fine cues |
-| STANCE → SETUP | Hands within 10 cm above the bar, still ≥ 0.3 s |
+| APPROACH → STANCE | Standing and settled (hips and shoulders < 0.20 m/s, v15) ≥ 0.5 s, facing the bar (foot forward axis toward it), with the bar ≤ 40 cm ahead of the midfoot horizontally. Within that range the closed loop (§4.3) guides the feet in: a coarse "step closer" beyond 15 cm, then fine cues |
+| STANCE → SETUP | Hands within 6 cm below to 16 cm above the bar centre ≥ 0.3 s (v15: no body stillness, a band 2 cm keypoint noise cannot leave) |
 | SETUP → STANCE / APPROACH | Stands back up without lifting |
 | SETUP → PULL | Bar > rest + 3 cm and vertical velocity > 0.10 m/s |
+| APPROACH / STANCE → PULL | **Grip and rip** (v15): the same liftoff with the hands on the bar; the setup is judged on the last 0.2 s before liftoff |
 | PULL → TOP | Bar ≥ expected top height − 8 cm, \|v\| < 0.05 m/s for ≥ 3 frames, trunk within 35° of vertical |
 | PULL → FLOOR without TOP | **Failed rep** (bar rose ≥ 10 cm but never reached top − 8 cm): an event, not counted |
 | TOP → LOWER | v < −0.10 m/s |
@@ -105,7 +106,8 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 | FLOOR → STANCE / APPROACH | Stands up or steps back (the set may end) |
 | STANCE → APPROACH | Walks away (bar more than 40 cm ahead of the midfoot) or turns away (foot forward axis more than 60° off the bar direction) for ≥ 0.5 s |
 
-- **Liftoff is back-dated** to motion onset: the last frame in a 0.5 s buffer where the bar was within 0.5 cm of rest and moving < 0.02 m/s.
+- **Liftoff is back-dated** to motion onset: the last frame in a 0.5 s buffer where the bar was within the rest band (0.5 cm, or 3 × the rest's noise). The reported event times (liftoff, top arrival, touchdown) are then fitted as the change point of a parabola leaving or reaching the level, so a slow grind is not dated where it crossed the band (v15).
+- **Noise (v15).** Gates are built for the platform's keypoint noise (1.6–2.4 cm, Kalman-correlated, `segment_lengths.py:20-21`): "settled" is a median displacement over 0.5 s, not a short slope; holds survive a 0.15 s lapse; the bar counts as still under 0.02 m/s or 2.5 standard errors of its own noise; the velocity window widens on a noisy bar. A bar missing for ≤ 0.2 s keeps its geometry (a tracking gap); feet hidden by the plates keep their last position once the lifter is at the bar.
 - **Expected top height** = standing mid-wrist height (arms hanging, measured in `APPROACH`) minus the learned wrist → bar offset.
   - *Fallback* when the athlete never stands still with arms hanging: the median top height of the set's counted reps (the first rep uses top − 8 cm against its own peak).
   - The 8 cm margin counts soft and over-extended lockouts; D6 and D5 then judge them.
@@ -117,10 +119,10 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 
 ### 2.4 Standing references and the midfoot lock
 
-- **Standing references.** While standing still in `APPROACH` (≥ 1 s) the analyser records the signed sagittal hip, knee, trunk and elbow angles, and the standing mid-wrist height. D5 (lean-back), D6 (lockout) and D9 (bent arms) are measured against these, which removes per-person keypoint bias.
+- **Standing references.** While standing settled in `APPROACH` or `STANCE` (≥ 1 s) the analyser records the signed sagittal hip, knee, trunk and elbow angles, and the standing mid-wrist height. D5 (lean-back), D6 (lockout) and D9 (bent arms) are measured against these, which removes per-person keypoint bias.
 - **Midfoot.**
   - It is tracked **live during `STANCE`**; the closed-loop guidance (§4.3) uses this live value.
-  - It is **locked when `SETUP` starts**, when the feet are final, by averaging the last ≥ 15 still frames of `STANCE`.
+  - It is **locked when `SETUP` starts** (or at a grip-and-rip liftoff), when the feet are final, by averaging the last ≤ 15 settled `STANCE` frames whose feet were measured.
   - The pull is then judged against the locked midfoot, so plate occlusion during the pull does not matter.
 - **Squat state stays untouched.** The squat setup snapshot and `_standing_reference_hip_cm` are never touched by deadlift reps (§3.3).
 
@@ -140,8 +142,8 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 | `bar_drift_cm` | p90 forward deviation of the bar centre from its liftoff position | pull |
 | `hip_extension_deficit_deg`, `knee_extension_deficit_deg` | signed deficits at the top vs the standing reference | TOP |
 | `lean_back_deg` | signed backward trunk angle at the top vs the standing reference | TOP |
-| `hip_shift_ratio` | (hip_mid − locked midfoot) on the ankle axis ÷ ankle separation; sustained 80th-percentile deviation vs start median (squat method, `rep_features.py:371-390`) | pull |
-| `bar_tilt_cm` | p90 height difference between the two 3D bar ends | pull |
+| `hip_shift_ratio` | (hip_mid − locked midfoot) on the ankle axis ÷ ankle separation; median over the second half of the pull minus the median over its first fifth (v15: the squat's 80th-percentile deviation read 2 cm keypoint noise as a shift) | pull |
+| `bar_tilt_cm` | p90 height difference between the two 3D bar ends (5-frame running median). Wrist proxy: the hands' height difference carried out to the 1.70 m hub span, as the median over the second half of the pull | pull |
 | `elbow_flexion_deg` | p90 elbow flexion vs the standing reference | pull |
 | `concentric_velocity_ms` | bar rise ÷ time from liftoff to top (the true bar, not the squat's shoulder proxy) | pull |
 | `pull_time_s`, `lower_time_s` | phase durations | — |
@@ -164,7 +166,7 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 | D1 ★α | `deadlift_bar_position` | Bar not over midfoot at setup | `bar_midfoot_setup_cm` (the stance value drives the closed loop) | 3 / 5 / 8 cm | mild | `bar_3d` (new class) | `deadlift_bar_midfoot` | 20 |
 | D4 ★ | `deadlift_setup_hips` | Hips too low / too high at setup | `setup_hip_height_cm` vs band | outside band by 4 / 7 / 10 cm | §2.7 (severe until measured) | `side_view` | `deadlift_hips_up` / `deadlift_hips_down` | 22 |
 | D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | `shoulder_vs_bar_cm` | 2 / 4 / 6 cm | moderate | `side_view` | `deadlift_shoulders_over` | 21 |
-| D2 ★ | `deadlift_hips_shoot` | Hips rise before the chest off the floor | `trunk_change_liftoff_knee_deg`; cross-check ratio ≥ 1.0 | 5 / 8 / 11° (v14; was 10 / 15 / 20°, which straight legs make unreachable: the excess caps at ~8–12° for typical bodies) | moderate | `side_view` (≥ 30 fps) | `deadlift_chest_with_hips` | 23 |
+| D2 ★ | `deadlift_hips_shoot` | Hips rise before the chest off the floor | `trunk_change_liftoff_knee_deg`; cross-check ratio ≥ 1.0 | 5 / 8 / 11° (v14; was 10 / 15 / 20°, which straight legs make unreachable: the excess caps at ~8–12° for typical bodies) | moderate when the rise ratio confirms (> 1.0), else severe (v15: the size is the unvalidated model's; a held back angle reads 8–10°) | `side_view` (≥ 30 fps) | `deadlift_chest_with_hips` | 23 |
 | D3 ★α | `deadlift_bar_drift` | Bar drifts away from the legs | `bar_drift_cm` | 3 / 5 / 8 cm | moderate | `bar_3d` | `deadlift_bar_close` | 24 |
 | D6 | `deadlift_lockout` | Incomplete lockout | hip or knee extension deficit | 8 / 12 / 20° | moderate | `side_view` | `deadlift_lockout` | 25 |
 | D5 | `deadlift_lean_back` | Over-extension at the top | `lean_back_deg` | 8 / 12 / 18° | moderate | `side_view` | `deadlift_finish_neutral` | 26 |
