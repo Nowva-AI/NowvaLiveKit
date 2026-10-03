@@ -1,12 +1,14 @@
-"""Draft the spoken lines for every squat coaching cue with an LLM, for human review.
+"""Draft the spoken lines for every squat and deadlift coaching cue with an LLM, for human review.
 
 Writes src/assets/cue_text/cues.json ({cue_key: [line, line, line]}) and a review
 page next to it. A person reviews and edits cues.json; generate_cue_audio.py then
 speaks exactly those lines. Re-runs only draft keys missing from cues.json, so
-reviewed edits survive; --cue re-drafts specific keys.
+reviewed edits survive; --cue re-drafts specific keys, --exercise limits the run
+to one exercise's cues.
 
 Usage:
     python scripts/tools/draft_cue_text.py
+    python scripts/tools/draft_cue_text.py --exercise deadlift
     python scripts/tools/draft_cue_text.py --cue knees_out_left --cue drive
     python scripts/tools/draft_cue_text.py --model gpt-6-astra
 """
@@ -31,13 +33,14 @@ load_dotenv(REPO_ROOT / ".env")
 from agent.agents.prompts.base_prompt import NOVA_IDENTITY  # noqa: E402
 from agent.services.coaching_constants import CUE_TEXT_MAP, TRACKING_LOST_CUE  # noqa: E402
 from agent.services.coaching_orchestrator import FIXED_CUE_SUFFIX  # noqa: E402
-from biomechanics.coaching.cue_cache import SQUAT_CUES, base_cue_key  # noqa: E402
+from biomechanics.coaching.cue_cache import SIDE_CUE_SIDES, SQUAT_CUES, base_cue_key  # noqa: E402
 
 CUE_TEXT_DIR = REPO_ROOT / "src" / "assets" / "cue_text"
 CUES_JSON_PATH = CUE_TEXT_DIR / "cues.json"
 REVIEW_PAGE_PATH = CUE_TEXT_DIR / "review.html"
 
 DEFAULT_MODEL = "gpt-6-astra"
+EXERCISES = ("squat", "deadlift")
 VARIANTS_PER_CUE = 3
 MAX_CUE_WORDS = 4
 MAX_EXPLAIN_WORDS = 16
@@ -160,6 +163,103 @@ SIDE_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
+DEADLIFT_SYSTEM_PROMPT = (
+    f"{NOVA_IDENTITY} "
+    "You are writing the short lines you call out to your athlete during a set of conventional "
+    "deadlifts: between reps while the bar rests on the floor, or while they stand at the bar "
+    "setting their feet. Calm, direct coach voice — warm, never hype, never cheesy. "
+    "External focus: point at the bar, the floor, the feet or a direction, not at muscles. "
+    "No jargon a beginner wouldn't know instantly (never 'hinge', 'lats', 'lumbar', "
+    "'eccentric', 'concentric' or 'hip extension'). Nothing medical, and never say anything "
+    "about the back rounding or a flat back — the cameras can't see the spine. "
+    "A voice engine speaks the lines: no emojis, no ALL CAPS, no stage directions."
+)
+
+# Deadlift cue key (.claude/deadlift/CONTRACT.md §4) -> its coaching moment.
+# Rep faults are judged at the end of the rep and cued at the floor, so their
+# lines set up the next rep.
+DEADLIFT_CUE_SCENARIOS: dict[str, str] = {
+    "deadlift_bar_midfoot": (
+        "At the start of the last rep the bar was not over the middle of the foot. Before the "
+        "next rep, set up with the bar over the middle of the foot."
+    ),
+    "deadlift_hips": (
+        "When the athlete set up to pull, their hips were not at the right height. Before the "
+        "next rep, set the hips at the right height."
+    ),
+    "deadlift_hips_up": (
+        "The athlete set up to pull with their hips too low. Before the next rep, start with "
+        "the hips a bit higher."
+    ),
+    "deadlift_hips_down": (
+        "The athlete set up to pull with their hips too high. Before the next rep, start with "
+        "the hips a bit lower."
+    ),
+    "deadlift_shoulders_over": (
+        "When the athlete set up to pull, their shoulders were behind the bar. Before the next "
+        "rep, set the shoulders over the bar."
+    ),
+    "deadlift_chest_with_hips": (
+        "The athlete's hips rose before their chest as the bar left the floor. Chest and hips "
+        "should rise together, pushing the floor away."
+    ),
+    "deadlift_bar_close": (
+        "The bar drifted away from the athlete's legs on the way up. Keep the bar close to the "
+        "legs the whole way."
+    ),
+    "deadlift_lockout": (
+        "The athlete did not finish standing tall at the top of the rep. Stand all the way up."
+    ),
+    "deadlift_finish_neutral": (
+        "The athlete leaned back at the top of the rep. Finish standing tall, without leaning "
+        "back."
+    ),
+    "deadlift_even_feet": (
+        "The athlete's hips slid to one side during the pull. Push the floor evenly with both "
+        "feet and stay centered."
+    ),
+    "deadlift_level_bar": (
+        "The bar tilted to one side during the pull. Keep the bar level, pulling evenly with "
+        "both hands."
+    ),
+    "deadlift_long_arms": (
+        "The athlete's arms bent during the pull. Keep the arms long and straight, like ropes "
+        "holding the bar."
+    ),
+    "deadlift_step_closer": (
+        "The athlete is standing at the bar setting their feet, and the bar is far out in front "
+        "of their feet. Tell them to step in closer to the bar."
+    ),
+    "deadlift_closer": (
+        "The athlete is standing at the bar setting their feet, and the bar is still a little in "
+        "front of the middle of their foot. Nudge them a bit closer."
+    ),
+    "deadlift_back": (
+        "The athlete is standing at the bar setting their feet, and their shins are too close: "
+        "the bar is behind the middle of the foot. Nudge them back a little."
+    ),
+}
+
+DEADLIFT_SIDE_INSTRUCTIONS: dict[str, str] = {
+    "deadlift_even_feet": (
+        "The hips slide to the athlete's {side}. Every line must say they're drifting {side} "
+        "and to push evenly."
+    ),
+}
+
+# The closed-loop foot cues are guidance, not corrections: adjust_good confirms them.
+DEADLIFT_FOOT_GUIDANCE_KEYS = frozenset({"deadlift_step_closer", "deadlift_closer", "deadlift_back"})
+
+SYSTEM_PROMPTS: dict[str, str] = {"squat": SYSTEM_PROMPT, "deadlift": DEADLIFT_SYSTEM_PROMPT}
+CUE_SCENARIOS_BY_EXERCISE: dict[str, dict[str, str]] = {
+    "squat": CUE_SCENARIOS,
+    "deadlift": DEADLIFT_CUE_SCENARIOS,
+}
+SIDE_INSTRUCTIONS_BY_EXERCISE: dict[str, dict[str, str]] = {
+    "squat": SIDE_INSTRUCTIONS,
+    "deadlift": DEADLIFT_SIDE_INSTRUCTIONS,
+}
+
 
 def _is_rep_count_key(cue_key: str) -> bool:
     return cue_key.startswith("rep_")
@@ -171,6 +271,20 @@ def _load_existing(path: Path) -> dict[str, list[str]]:
     return json.loads(path.read_text())
 
 
+def _deadlift_cue_keys() -> list[str]:
+    keys: list[str] = []
+    for base_key in DEADLIFT_CUE_SCENARIOS:
+        keys.append(base_key)
+        if base_key in DEADLIFT_SIDE_INSTRUCTIONS:
+            keys.extend(f"{base_key}_{side}" for side in SIDE_CUE_SIDES)
+    keys.extend(
+        f"{base_key}{FIXED_CUE_SUFFIX}"
+        for base_key in DEADLIFT_CUE_SCENARIOS
+        if base_key not in DEADLIFT_FOOT_GUIDANCE_KEYS
+    )
+    return keys
+
+
 async def _draft_one(
     client: AsyncOpenAI, model: str, cue_key: str, semaphore: asyncio.Semaphore,
 ) -> list[str]:
@@ -178,7 +292,7 @@ async def _draft_one(
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": SYSTEM_PROMPTS[exercise_for(cue_key)]},
                 {"role": "user", "content": build_cue_prompt(cue_key)},
             ],
             response_format={"type": "json_object"},
@@ -203,28 +317,47 @@ async def _draft_with_llm(model: str, cue_keys: list[str]) -> dict[str, list[str
     return drafted
 
 
-def cue_keys_to_draft() -> list[str]:
-    fix_confirmations = [key for key in CUE_TEXT_MAP if key.endswith(FIXED_CUE_SUFFIX)]
+def cue_keys_to_draft(exercise: str | None = None) -> list[str]:
+    """Every cue key to draft for one exercise, or for all of them (squat first)."""
+    deadlift_keys = _deadlift_cue_keys()
+    if exercise == "deadlift":
+        return deadlift_keys
+    fix_confirmations = [
+        key for key in CUE_TEXT_MAP
+        if key.endswith(FIXED_CUE_SUFFIX) and exercise_for(key) == "squat"
+    ]
     agent_keys = [key for key in fix_confirmations + list(AGENT_CUE_SCENARIOS) if key not in SQUAT_CUES]
-    return list(SQUAT_CUES) + agent_keys
+    squat_keys = list(SQUAT_CUES) + agent_keys
+    if exercise == "squat":
+        return squat_keys
+    return squat_keys + [key for key in deadlift_keys if key not in squat_keys]
+
+
+def exercise_for(cue_key: str) -> str:
+    """Which exercise's prompt and scenarios a cue key is drafted with."""
+    if cue_key.endswith(FIXED_CUE_SUFFIX):
+        cue_key = cue_key[:-len(FIXED_CUE_SUFFIX)]
+    return "deadlift" if base_cue_key(cue_key) in DEADLIFT_CUE_SCENARIOS else "squat"
 
 
 def scenario_for(cue_key: str) -> str:
     if cue_key in AGENT_CUE_SCENARIOS:
         return AGENT_CUE_SCENARIOS[cue_key]
+    exercise = exercise_for(cue_key)
+    scenarios = CUE_SCENARIOS_BY_EXERCISE[exercise]
     if cue_key.endswith(FIXED_CUE_SUFFIX):
-        fault_scenario = CUE_SCENARIOS[cue_key[:-len(FIXED_CUE_SUFFIX)]]
+        fault_scenario = scenarios[cue_key[:-len(FIXED_CUE_SUFFIX)]]
         return (
             f"{fault_scenario} You cued this earlier in the set; the athlete fixed it and has "
             "held it for two reps. Confirm it briefly and name what they did right — praise, "
             "not another correction."
         )
     base_key = base_cue_key(cue_key)
-    scenario = CUE_SCENARIOS[base_key]
+    scenario = scenarios[base_key]
     if base_key == cue_key:
         return scenario
     side = cue_key[len(base_key) + 1:]
-    return f"{scenario} {SIDE_INSTRUCTIONS[base_key].format(side=side)}"
+    return f"{scenario} {SIDE_INSTRUCTIONS_BY_EXERCISE[exercise][base_key].format(side=side)}"
 
 
 def build_cue_prompt(cue_key: str) -> str:
@@ -340,10 +473,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"OpenAI chat model (default {DEFAULT_MODEL})")
     parser.add_argument("--cue", action="append", dest="cues", help="re-draft this cue key (repeatable)")
+    parser.add_argument("--exercise", choices=EXERCISES, help="only this exercise's cues (default: all)")
     args = parser.parse_args()
 
     existing = _load_existing(CUES_JSON_PATH)
-    all_keys = cue_keys_to_draft()
+    all_keys = cue_keys_to_draft(args.exercise)
     if args.cues:
         unknown = [key for key in args.cues if key not in all_keys]
         if unknown:

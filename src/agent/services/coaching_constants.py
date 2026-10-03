@@ -44,6 +44,19 @@ FIXED_CUE_TEXT: dict[str, str] = {
     "slow_down_fixed": "Better, controlled on the way down.",
     "same_depth_fixed": "Right back to your depth.",
     "drive_fixed": "That one moved, good drive.",
+    # Deadlift
+    "deadlift_bar_midfoot_fixed": "Good, bar over midfoot.",
+    "deadlift_hips_fixed": "Good, hips set right.",
+    "deadlift_hips_up_fixed": "Good, hips set higher.",
+    "deadlift_hips_down_fixed": "Good, hips set lower.",
+    "deadlift_shoulders_over_fixed": "Good, shoulders over the bar.",
+    "deadlift_chest_with_hips_fixed": "Better, chest and hips together.",
+    "deadlift_bar_close_fixed": "Good, bar stayed close.",
+    "deadlift_lockout_fixed": "Good, all the way up.",
+    "deadlift_finish_neutral_fixed": "Good, tall with no lean.",
+    "deadlift_even_feet_fixed": "Good, staying centered.",
+    "deadlift_level_bar_fixed": "Good, bar stayed level.",
+    "deadlift_long_arms_fixed": "Good, arms stayed long.",
 }
 
 # Played once when the pipeline loses sight of the athlete mid-set.
@@ -81,11 +94,26 @@ CUE_TEXT_MAP: dict[str, str] = {
     "same_depth": "Match your first rep!",
     "drive": "Drive up hard!",
     "brace": "Brace your core!",
-    # Other exercises, keyed <exercise>_<cue> (their profiles' fault -> cue maps)
-    "deadlift_lockout": "Finish tall, hips through!",
-    "deadlift_flat_back": "Flat back!",
+    # Deadlift corrections (.claude/deadlift/CONTRACT.md §4)
+    "deadlift_bar_midfoot": "Bar over midfoot!",
+    "deadlift_hips": "Set your hip height!",
+    "deadlift_hips_up": "Hips a bit higher!",
+    "deadlift_hips_down": "Hips a bit lower!",
+    "deadlift_shoulders_over": "Shoulders over the bar!",
+    "deadlift_chest_with_hips": "Chest and hips together!",
     "deadlift_bar_close": "Keep the bar close!",
-    "deadlift_even": "Pull evenly!",
+    "deadlift_lockout": "Stand tall!",
+    "deadlift_finish_neutral": "Stand tall, no lean!",
+    "deadlift_even_feet": "Push evenly!",
+    "deadlift_even_feet_left": "Drifting left, push evenly!",
+    "deadlift_even_feet_right": "Drifting right, push evenly!",
+    "deadlift_level_bar": "Keep the bar level!",
+    "deadlift_long_arms": "Long arms!",
+    # Deadlift closed-loop foot guidance, while standing at the bar
+    "deadlift_step_closer": "Step closer.",
+    "deadlift_closer": "A bit closer.",
+    "deadlift_back": "Back a little.",
+    # Other exercises, keyed <exercise>_<cue> (their profiles' fault -> cue maps)
     "rdl_hips_back": "Push your hips back!",
     "rdl_flat_back": "Flat back!",
     "rdl_even": "Hinge evenly!",
@@ -153,10 +181,23 @@ CUE_DISPLAY_LABELS: dict[str, str] = {
     "same_depth": "Same depth",
     "drive": "Drive up!",
     "brace": "Brace core!",
-    "deadlift_lockout": "Finish tall",
-    "deadlift_flat_back": "Flat back",
+    "deadlift_bar_midfoot": "Bar over midfoot",
+    "deadlift_hips": "Hip height",
+    "deadlift_hips_up": "Hips higher",
+    "deadlift_hips_down": "Hips lower",
+    "deadlift_shoulders_over": "Shoulders over bar",
+    "deadlift_chest_with_hips": "Chest with hips",
     "deadlift_bar_close": "Bar close",
-    "deadlift_even": "Pull evenly",
+    "deadlift_lockout": "Stand tall",
+    "deadlift_finish_neutral": "No lean back",
+    "deadlift_even_feet": "Push evenly",
+    "deadlift_even_feet_left": "Drifting left",
+    "deadlift_even_feet_right": "Drifting right",
+    "deadlift_level_bar": "Level the bar",
+    "deadlift_long_arms": "Long arms",
+    "deadlift_step_closer": "Step closer",
+    "deadlift_closer": "Closer",
+    "deadlift_back": "Step back",
     "rdl_hips_back": "Hips back",
     "rdl_flat_back": "Flat back",
     "rdl_even": "Hinge evenly",
@@ -213,6 +254,13 @@ ADJUSTMENT_CUES: dict[str, dict[str, str]] = {
 }
 
 ADJUSTMENT_ON_TARGET_CUE = "adjust_good"
+
+# Closed-loop deadlift foot guidance: while the lifter stands at the bar, Nova
+# moves the feet until the bar is over the midfoot, then says ADJUSTMENT_ON_TARGET_CUE.
+DEADLIFT_CLOSED_LOOP = "deadlift_bar_midfoot"
+DEADLIFT_STEP_CLOSER_CUE = "deadlift_step_closer"
+DEADLIFT_CLOSER_CUE = "deadlift_closer"
+DEADLIFT_BACK_CUE = "deadlift_back"
 
 # Only used when a cue has no pre-generated audio on disk.
 ADJUSTMENT_SYSTEM_PROMPT = (

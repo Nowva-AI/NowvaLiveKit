@@ -328,5 +328,150 @@
     "Step back into view.",
     "Move back into frame.",
     "Back up into view."
+  ],
+  "deadlift_bar_midfoot": [
+    "Bar over midfoot.",
+    "Bar over your laces.",
+    "Bar above mid-foot."
+  ],
+  "deadlift_hips": [
+    "Set your hips.",
+    "Set your hip height.",
+    "Find your hip height."
+  ],
+  "deadlift_hips_up": [
+    "Hips a bit higher.",
+    "Start with hips higher.",
+    "Raise your hips slightly."
+  ],
+  "deadlift_hips_down": [
+    "Hips a bit lower.",
+    "Start with hips lower.",
+    "Sink your hips slightly."
+  ],
+  "deadlift_shoulders_over": [
+    "Shoulders over the bar.",
+    "Shoulders above the bar.",
+    "Bring shoulders over bar."
+  ],
+  "deadlift_chest_with_hips": [
+    "Chest and hips together.",
+    "Push the floor away.",
+    "Lift as one piece."
+  ],
+  "deadlift_bar_close": [
+    "Keep the bar close.",
+    "Bar against your legs.",
+    "Bar stays on legs."
+  ],
+  "deadlift_lockout": [
+    "Stand tall.",
+    "Finish standing tall.",
+    "All the way up."
+  ],
+  "deadlift_finish_neutral": [
+    "Stand tall, no lean.",
+    "Finish tall, don't lean.",
+    "Stop at standing tall."
+  ],
+  "deadlift_even_feet": [
+    "Push evenly.",
+    "Push both feet evenly.",
+    "Even through both feet."
+  ],
+  "deadlift_even_feet_left": [
+    "Drifting left, push evenly.",
+    "Hips left, stay centered.",
+    "Sliding left, stay even."
+  ],
+  "deadlift_even_feet_right": [
+    "Drifting right, push evenly.",
+    "Hips right, stay centered.",
+    "Sliding right, stay even."
+  ],
+  "deadlift_level_bar": [
+    "Keep the bar level.",
+    "Level the bar.",
+    "Pull both sides evenly."
+  ],
+  "deadlift_long_arms": [
+    "Long arms.",
+    "Arms long and straight.",
+    "Arms like ropes."
+  ],
+  "deadlift_step_closer": [
+    "Step closer.",
+    "Step in closer.",
+    "Closer to the bar."
+  ],
+  "deadlift_closer": [
+    "A bit closer.",
+    "Inch a bit closer.",
+    "Shuffle in a touch."
+  ],
+  "deadlift_back": [
+    "Back a little.",
+    "Small step back.",
+    "Ease back a touch."
+  ],
+  "deadlift_bar_midfoot_fixed": [
+    "Good, bar over midfoot.",
+    "Nice, bar over laces.",
+    "That's the spot."
+  ],
+  "deadlift_hips_fixed": [
+    "Good, hips set right.",
+    "Nice hip height.",
+    "That's your start height."
+  ],
+  "deadlift_hips_up_fixed": [
+    "Good, hips set higher.",
+    "Nice, better hip height.",
+    "That's your start height."
+  ],
+  "deadlift_hips_down_fixed": [
+    "Good, hips set lower.",
+    "Nice, better hip height.",
+    "That's your start height."
+  ],
+  "deadlift_shoulders_over_fixed": [
+    "Good, shoulders over bar.",
+    "Nice, shoulders set.",
+    "That's the position."
+  ],
+  "deadlift_chest_with_hips_fixed": [
+    "Good, rose together.",
+    "Nice, one piece.",
+    "That's it, together."
+  ],
+  "deadlift_bar_close_fixed": [
+    "Good, bar stayed close.",
+    "Nice, bar on legs.",
+    "That's a close pull."
+  ],
+  "deadlift_lockout_fixed": [
+    "Good, fully standing.",
+    "Nice, tall finish.",
+    "That's the finish."
+  ],
+  "deadlift_finish_neutral_fixed": [
+    "Good, tall, no lean.",
+    "Nice, clean finish.",
+    "That's the finish."
+  ],
+  "deadlift_even_feet_fixed": [
+    "Good, staying centered.",
+    "Nice, even push.",
+    "That's it, centered."
+  ],
+  "deadlift_level_bar_fixed": [
+    "Good, bar stayed level.",
+    "Nice, level bar.",
+    "That's even."
+  ],
+  "deadlift_long_arms_fixed": [
+    "Good, long arms.",
+    "Nice, arms straight.",
+    "That's it, long arms."
   ]
 }

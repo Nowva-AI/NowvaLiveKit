@@ -32,7 +32,22 @@ FAULT_LABELS = {
     "depth_drift": "reps getting shallower",
     "velocity_loss": "reps slowing down",
     "forward_lean": "leaning forward",
+    # Deadlift
+    "deadlift_bar_position": "bar not over the middle of the foot at the start",
+    "deadlift_setup_hips": "hips set too high or too low at the start",
+    "deadlift_shoulders_behind": "shoulders behind the bar at the start",
+    "deadlift_hips_shoot": "hips rising before the chest off the floor",
+    "deadlift_bar_drift": "bar drifting away from the legs",
+    "deadlift_lockout": "not finishing standing tall",
+    "deadlift_lean_back": "leaning back at the top",
+    "deadlift_hip_shift": "hips sliding to one side",
+    "deadlift_bar_tilt": "bar tilting to one side",
+    "deadlift_bent_arms": "arms bending during the pull",
+    "deadlift_velocity_loss": "bar slowing down",
 }
+
+# Progress is stored per exercise profile ("squat", "deadlift").
+DEFAULT_PROGRESS_EXERCISE = "squat"
 
 
 def _days_ago_phrase(days_ago: int) -> str:
@@ -47,6 +62,10 @@ def fault_label(fault_type: str) -> str:
     return FAULT_LABELS.get(fault_type, fault_type.replace("_", " "))
 
 
+def _exercise_words(exercise: str) -> str:
+    return exercise.replace("_", " ")
+
+
 def _weakest_dimension(per_dimension: dict) -> tuple[str, float] | None:
     if not per_dimension:
         return None
@@ -54,12 +73,15 @@ def _weakest_dimension(per_dimension: dict) -> tuple[str, float] | None:
     return DIMENSION_LABELS.get(key, key), per_dimension[key]
 
 
-def build_greeting_progress_line(baseline: dict | None) -> str | None:
+def build_greeting_progress_line(
+    baseline: dict | None, exercise: str = DEFAULT_PROGRESS_EXERCISE,
+) -> str | None:
     """One compact context block for the workout greeting."""
     if not baseline:
         return None
     parts = [
-        f"PROGRESS CONTEXT: last squat session was {_days_ago_phrase(baseline.get('days_ago', 0))}"
+        f"PROGRESS CONTEXT: last {_exercise_words(exercise)} session was "
+        f"{_days_ago_phrase(baseline.get('days_ago', 0))}"
     ]
     if baseline.get("mean_score") is not None:
         parts.append(f"form score {round(baseline['mean_score'] * 100)} out of 100")
@@ -160,15 +182,17 @@ def build_session_comparison_line(
 
 
 def build_progress_report(
-    score_rows: list[dict], baseline: dict | None
+    score_rows: list[dict], baseline: dict | None,
+    exercise: str = DEFAULT_PROGRESS_EXERCISE,
 ) -> str:
     """Text progress report for the main-menu view_progress tool."""
+    exercise_words = _exercise_words(exercise)
     if not score_rows:
         return (
-            "No squat sessions recorded yet. Their progress tracking starts "
+            f"No {exercise_words} sessions recorded yet. Their progress tracking starts "
             "with their first workout."
         )
-    lines = [f"{len(score_rows)} squat sets recorded."]
+    lines = [f"{len(score_rows)} {exercise_words} sets recorded."]
 
     if baseline:
         summary = f"Last session: {_days_ago_phrase(baseline.get('days_ago', 0))}"
