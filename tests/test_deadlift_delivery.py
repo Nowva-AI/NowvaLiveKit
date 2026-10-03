@@ -739,6 +739,20 @@ class TestClosedLoopGuidance:
         orch = _guided_orchestrator()
         assert asyncio.run(_stand_at_bar(orch, None)) == []
 
+    def test_wrist_proxy_never_guides_the_feet(self):
+        async def _run():
+            orch = _guided_orchestrator()
+            for offset_cm in (25.0, 10.0, -5.0):
+                frame = _frame("stance", offset_cm)
+                frame["bar_source"] = "wrist_proxy"
+                orch.record_angle_sample(frame)
+                await asyncio.sleep(0)
+            return orch
+
+        orch = asyncio.run(_run())
+        orch._play_cached.assert_not_awaited()
+        assert not orch._bar_guidance_armed
+
     def test_only_speaks_while_standing_at_the_bar(self):
         async def _run():
             orch = _guided_orchestrator()

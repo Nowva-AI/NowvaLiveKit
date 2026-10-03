@@ -97,6 +97,16 @@ class TestPullAndTopRules:
         assert fault.severity.value == "moderate"
         assert fault.details["ratio_confirms"] is True
         assert fault.details["model_predicted"] is True
+        assert fault.details["min_tier"] == "moderate"
+
+    @pytest.mark.parametrize("ratio", [0.95, 1.0, math.nan])
+    def test_hips_shoot_the_ratio_does_not_confirm_is_cued_only_when_severe(self, ratio: float):
+        rule = DeadliftHipsShootRule(FAULTS.deadlift_hips_shoot)
+        fault = _judge(rule, _features(trunk_change_liftoff_knee_deg=9.0, hip_shoulder_rise_ratio=ratio,
+                                       trunk_change_predicted_deg=-16.0))
+        assert fault.severity.value == "moderate"
+        assert fault.details["ratio_confirms"] is False
+        assert fault.details["min_tier"] == "severe"
 
     def test_body_vertical_raises_the_gravity_rules_to_moderate(self):
         for rule, field in (
@@ -104,7 +114,9 @@ class TestPullAndTopRules:
             (DeadliftBarDriftRule(FAULTS.deadlift_bar_drift), "bar_drift_cm"),
             (DeadliftLeanBackRule(FAULTS.deadlift_lean_back), "lean_back_deg"),
         ):
-            fault = _judge(rule, _features(**{field: 30.0, "gravity_source": GRAVITY_SOURCE_BODY}))
+            fault = _judge(rule, _features(**{
+                field: 30.0, "gravity_source": GRAVITY_SOURCE_BODY, "hip_shoulder_rise_ratio": 1.2,
+            }))
             assert fault.details["min_tier"] == "moderate"
             assert fault.details["gravity_source"] == GRAVITY_SOURCE_BODY
 
@@ -148,6 +160,10 @@ class TestPullAndTopRules:
                        _features(velocity_loss_pct=32.0, concentric_velocity_mps=0.4))
         assert fault.details["min_tier"] == "recap"
         assert fault.details["velocity_mps"] == pytest.approx(0.4, abs=VALUE_TOLERANCE)
+
+    def test_velocity_loss_is_not_emitted_on_the_wrist_proxy(self):
+        rule = DeadliftVelocityLossRule(FAULTS.deadlift_velocity_loss)
+        assert _judge(rule, _features(velocity_loss_pct=32.0, bar_source=BAR_SOURCE_WRIST_PROXY)) is None
 
 
 class TestUnmeasured:

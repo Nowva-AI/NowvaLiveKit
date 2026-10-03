@@ -2,7 +2,8 @@
 
 The true bar speed (not the squat's shoulder proxy). Fatigue is load advice for
 the recap and the set diagnosis, never a mid-set technique cue: its min tier is
-"recap".
+"recap". Not emitted on the wrist proxy (PLAN.md §6): the wrists' speed is not
+the bar's.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import math
 from typing import Any
 
 from biomechanics.deadlift.rule_base import DeadliftRepRule
-from biomechanics.deadlift.types import DeadliftRepFeatures
+from biomechanics.deadlift.types import BAR_SOURCE_WRIST_PROXY, DeadliftRepFeatures
 from biomechanics.faults.fault_types import FaultType
 
 
@@ -26,6 +27,6 @@ class DeadliftVelocityLossRule(DeadliftRepRule):
 
     def measure(self, features: DeadliftRepFeatures) -> tuple[float, dict[str, Any]] | None:
         loss_pct = features.velocity_loss_pct
-        if not math.isfinite(loss_pct):
+        if not math.isfinite(loss_pct) or features.bar_source == BAR_SOURCE_WRIST_PROXY:
             return None
         return loss_pct, {"velocity_mps": features.concentric_velocity_mps}

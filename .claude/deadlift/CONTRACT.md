@@ -27,7 +27,7 @@ rep is counted: at the dead stop, or at the next liftoff for a touch-and-go rep.
 | D1 | `deadlift_bar_position` | Bar not over midfoot at setup | `abs(bar_midfoot_setup_cm)` cm; `direction`: `"forward"` (bar too far) / `"back"` (bar too close) | `deadlift_bar_midfoot` | — | mild | 20 |
 | D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | cm behind | `deadlift_shoulders_over` | — | moderate | 21 |
 | D4 | `deadlift_setup_hips` | Hips too low / too high at setup | cm outside the setup-model band; `direction`: `"up"` (raise hips) / `"down"` (lower hips) | `deadlift_hips` | `deadlift_hips_up`, `deadlift_hips_down` (by `direction`) | severe | 22 |
-| D2 | `deadlift_hips_shoot` | Hips rise before the chest off the floor | deg of trunk change beyond the model's prediction | `deadlift_chest_with_hips` | — | moderate | 23 |
+| D2 | `deadlift_hips_shoot` | Hips rise before the chest off the floor | deg of trunk change beyond the model's prediction | `deadlift_chest_with_hips` | — | moderate (`details.min_tier` is `"severe"` when `ratio_confirms` is false) | 23 |
 | D3 | `deadlift_bar_drift` | Bar drifts away from the legs | p90 forward drift, cm | `deadlift_bar_close` | — | moderate | 24 |
 | D6 | `deadlift_lockout` | Incomplete lockout | worst of hip/knee extension deficit, deg; `joint`: `"hip"`/`"knee"` | `deadlift_lockout` | — | moderate | 25 |
 | D5 | `deadlift_lean_back` | Over-extension at the top | deg behind standing | `deadlift_finish_neutral` | — | moderate | 26 |
@@ -47,7 +47,7 @@ Every deadlift fault carries the squat keys (`side`, `phase`, `observability`, `
 
 | key | type | values |
 |---|---|---|
-| `min_tier` | `str` | `"mild"`, `"moderate"`, `"severe"` or `"recap"`. The fault's effective minimum cue tier for this rep: the static tier, raised to at least `"moderate"` when the rep was measured from the wrist proxy (D1, D3, D8b) or from the body vertical instead of measured gravity (D2, D3, D5) |
+| `min_tier` | `str` | `"mild"`, `"moderate"`, `"severe"` or `"recap"`. The fault's effective minimum cue tier for this rep: the static tier, raised to at least `"moderate"` when the rep was measured from the wrist proxy (D1, D3, D8b) or from the body vertical instead of measured gravity (D2, D3, D5), and for D2 to `"severe"` when the hip/shoulder rise ratio does not confirm it |
 | `bar_source` | `str` | `"bar"` or `"wrist_proxy"` |
 | `gravity_source` | `str` | `"measured"` or `"body"` |
 | `direction` | `str` | D1 and D4 only (see §1) |
@@ -75,7 +75,8 @@ when absent, the agent keeps today's behaviour (wait only on the squat).
 The existing fields, plus, for the deadlift only:
 - `deadlift_phase`: one of `approach`, `stance`, `setup`, `pull`, `top`, `lower`, `floor`
 - `bar_midfoot_live_cm`: forward offset of the bar centre vs the live midfoot (cm, > 0 = bar
-  ahead of midfoot, i.e. step closer); null outside `stance`
+  ahead of midfoot, i.e. step closer); null outside `stance`, and always null when
+  `bar_source` is `"wrist_proxy"` (the hanging wrists say nothing about where the bar sits)
 - `bar_source`: `"bar"` or `"wrist_proxy"`
 
 `rep_phase` for the deadlift carries the same deadlift phase string, so the squat stance
@@ -125,7 +126,8 @@ Each correction key also gets a `<key>_fixed` praise line, as the squat keys do.
    `deadlift_phase` is `floor`, `stance`, `setup` or `approach`, i.e. after a dead stop; a cue
    pending at a touch-and-go waits for the next dead stop or goes into the recap.
 4. **Set idle timeout** from `cache_cues.set_idle_timeout_s` (default 15 s).
-5. **Closed-loop D1 guidance** (deadlift only): arms whenever `deadlift_phase == "stance"` and
+5. **Closed-loop D1 guidance** (deadlift only, tracked bar only: never when `bar_source` is
+   `"wrist_proxy"`): arms whenever `deadlift_phase == "stance"` and
    `abs(bar_midfoot_live_cm) > 2`; speaks `deadlift_step_closer` (> 15 cm), then
    `deadlift_closer` / `deadlift_back`, then `adjust_good` once within 2 cm; shares the squat
    monitor's speaking flag and utterance budget; disarms at `setup` / `pull`.

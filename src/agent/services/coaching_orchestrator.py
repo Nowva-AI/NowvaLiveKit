@@ -189,6 +189,8 @@ DEADLIFT_SPEAKING_PHASES = frozenset({"floor", "stance", "setup", "approach"})
 BAR_GUIDANCE_PHASE = "stance"
 BAR_GUIDANCE_DISARM_PHASES = frozenset({"setup", "pull"})
 BAR_MIDFOOT_TOLERANCE_CM = 2.0
+# frame_data bar_source of the tracked bar; anything else (the wrist proxy) gets no foot guidance.
+BAR_SOURCE_TRACKED = "bar"
 BAR_MIDFOOT_STEP_CLOSER_CM = 15.0
 
 
@@ -1056,7 +1058,12 @@ class CoachingOrchestrator:
 
         deadlift_phase = angles_dict.get("deadlift_phase")
         if deadlift_phase is not None:
-            self._on_deadlift_phase(deadlift_phase, angles_dict.get("bar_midfoot_live_cm"))
+            # The wrist proxy reads the hanging hands, not the bar on the floor:
+            # no foot guidance from it, whatever the pipeline sends.
+            live_cm = angles_dict.get("bar_midfoot_live_cm")
+            if angles_dict.get("bar_source", BAR_SOURCE_TRACKED) != BAR_SOURCE_TRACKED:
+                live_cm = None
+            self._on_deadlift_phase(deadlift_phase, live_cm)
 
     def _maybe_speak_adjustment(self, angles_dict: Dict[str, Any]) -> None:
         """Compare the tracked parameter to its target and cue the correction."""

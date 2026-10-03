@@ -47,6 +47,10 @@ class DeadliftRepRule(RepFaultRule):
     def measure(self, features: DeadliftRepFeatures) -> tuple[float, dict[str, Any]] | None:
         raise NotImplementedError
 
+    def tier_floor(self, features: DeadliftRepFeatures) -> str:
+        """The lowest tier this rep's own evidence lets the rule be cued at."""
+        return "mild"
+
     def judge_rep(self, features, reference, angles: JointAngles) -> FaultEvent | None:
         if not isinstance(features, DeadliftRepFeatures):
             return None
@@ -63,6 +67,7 @@ class DeadliftRepRule(RepFaultRule):
             min_tier = stricter_tier(min_tier, INDIRECT_MIN_TIER)
         if self.gravity_measured and features.gravity_source == GRAVITY_SOURCE_BODY:
             min_tier = stricter_tier(min_tier, INDIRECT_MIN_TIER)
+        min_tier = stricter_tier(min_tier, self.tier_floor(features))
         thresholds = {
             "mild": self.thresholds.mild * scale,
             "moderate": self.thresholds.moderate * scale,
