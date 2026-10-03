@@ -25,11 +25,13 @@ from biomechanics import pipeline as pipeline_module
 from biomechanics.coaching.ipc_bridge import IPCBridge
 from biomechanics.coaching.session_tracker import SessionTracker
 from biomechanics.config import BiomechanicsConfig, IPCConfig
+from biomechanics.deadlift.simulator import RepScript, Scenario, simulate
 from biomechanics.pipeline_process import (
     DEFAULT_ROM_BASELINE,
     _adopt_measured_athlete_params,
     _switch_exercise,
 )
+from biomechanics.profiles.deadlift import DeadliftProfile
 from biomechanics.utils.segment_lengths import SegmentLengthEstimator
 from biomechanics.utils.types import FaultEvent, PipelineFrame, RepData, Skeleton3D
 from conftest import SYNTHETIC_FPS, squat_depth_profile, world_squat_points
@@ -137,6 +139,10 @@ class _FakeProvider:
         self.sequence = 0
         self.frame = np.zeros((72, 128, 3), dtype=np.uint8)
         self.last_capture_timestamp = math.nan
+        # Uncalibrated and imageless: the deadlift's bar tracker sees no bar here
+        # (it runs on the wrists).
+        self.calibration = None
+        self.last_synced_frames = None
 
     def push(self, points: np.ndarray | None) -> None:
         self._queue.append(points)
@@ -529,17 +535,26 @@ class _OtherExercise(NamedTuple):
     frames_fn: Callable[[], list[np.ndarray | None]]
     # CARRY_OVERS keys this exercise leaves for the squat today, per variant.
     carries: dict[str, tuple[str, ...]]
+    # Run before the switch (the deadlift needs its dev override to be reachable).
+    setup_fn: Callable[[pytest.MonkeyPatch], None] | None = None
 
 
-# EXTENSION POINT (J3): add
-#     _OtherExercise("Barbell Conventional Deadlift", _deadlift_frames,
-#                    {STORED_PARAMS: (), FIRST_TIME: ()}),
-# with _deadlift_frames the J2 simulator's synthetic deadlift reps (bar on the
-# floor), and patch monkeypatch.setattr(DeadliftProfile, "coaching_ready", True)
-# before _after_switch_session so the switch reaches the real profile, not the
-# gated one (PLAN §3.1). PLAN §5.2 targets no carry-over at all for it: no body
-# measurement (feeds_body_calibration=False) and no standing reference (it
-# skips _start_rep_setup). Today the name resolves to the placeholder profile.
+# Three dead-stop conventional deadlifts from the J2 simulator, walked up to and
+# away from, in the same Y-down world frame.
+def _deadlift_frames() -> list[np.ndarray | None]:
+    simulated = simulate(Scenario(reps=[RepScript(), RepScript(), RepScript()]))
+    return [frame.points for frame in simulated.frames]
+
+
+def _deadlift_coaching_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The real profile, not the gated stand-in (PLAN §3.1).
+    monkeypatch.setattr(DeadliftProfile, "coaching_ready", True)
+
+
+# The conventional deadlift (PLAN §5.2) leaves nothing behind: its frames never
+# feed the body measurement (feeds_body_calibration=False), its analyser never
+# touches the squat's standing reference, and the foot-contact anchors restart
+# on the switches into and out of it.
 OTHER_EXERCISES = (
     _OtherExercise(
         "Barbell Romanian Deadlift", _hinge_frames,
@@ -549,6 +564,11 @@ OTHER_EXERCISES = (
     _OtherExercise(
         "Barbell Bench Press", _hinge_frames,
         {STORED_PARAMS: (), FIRST_TIME: (BODY_MEASUREMENTS,)},
+    ),
+    _OtherExercise(
+        "Barbell Conventional Deadlift", _deadlift_frames,
+        {STORED_PARAMS: (), FIRST_TIME: ()},
+        setup_fn=_deadlift_coaching_ready,
     ),
 )
 
@@ -627,6 +647,8 @@ def _after_switch_session(
     session = _SquatSession(monkeypatch, variant, start_tick=-(len(other_frames) + rest_ticks))
     if scenario.count_every_descent:
         session.pipeline.set_depth_target(None)
+    if other.setup_fn is not None:
+        other.setup_fn(monkeypatch)
     session.switch_exercise(other.exercise_name)
     for points in other_frames:
         session.step(points)
@@ -908,3 +930,18 @@ class TestGoldenHarness:
         assert normalised["angle"] == pytest.approx(1.234568, abs=FLOAT_TOLERANCE)
         assert normalised["missing"] is None
         assert normalised["frame_index"] == 12
+
+
+class TestDeadliftBeforeTheSquat:
+    """The deadlift entry of the after-switch golden is only meaningful if the
+    deadlift set before the switch back really ran: rep counted, rules judged."""
+
+    @pytest.mark.parametrize("variant", VARIANTS)
+    def test_the_deadlift_set_counts_its_reps_before_the_switch_back(self, monkeypatch, variant: str):
+        session = _SquatSession(monkeypatch, variant, start_tick=0)
+        _deadlift_coaching_ready(monkeypatch)
+        session.switch_exercise("Barbell Conventional Deadlift")
+        assert session.pipeline.profile.name == "deadlift"
+        reps = [result.rep_data for result in map(session.step, _deadlift_frames()) if result.rep_data is not None]
+        assert [rep.rep_number for rep in reps] == [1, 2, 3]
+        assert all(rep.features["dl_schema"] == 1 for rep in reps)

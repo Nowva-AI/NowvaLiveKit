@@ -217,8 +217,13 @@ class TestSquatCueMaps:
         assert SquatProfile().get_fault_to_cue_map() == SQUAT_FAULT_TO_CUE_MAP
 
     def test_squat_cue_priority_ranks(self):
-        assert FAULT_CUE_PRIORITY == SQUAT_FAULT_CUE_PRIORITY
+        # The squat's ranks are exactly as pinned; other exercises only append
+        # their own prefixed fault types after the default (the deadlift's 20-30).
+        assert {fault: FAULT_CUE_PRIORITY.get(fault) for fault in SQUAT_FAULT_CUE_PRIORITY} == SQUAT_FAULT_CUE_PRIORITY
         assert DEFAULT_FAULT_CUE_PRIORITY == SQUAT_DEFAULT_FAULT_CUE_PRIORITY
+        additions = set(FAULT_CUE_PRIORITY) - set(SQUAT_FAULT_CUE_PRIORITY)
+        assert all(fault.startswith("deadlift_") for fault in additions)
+        assert all(FAULT_CUE_PRIORITY[fault] > DEFAULT_FAULT_CUE_PRIORITY for fault in additions)
 
     def test_rule_order_follows_cue_priority(self):
         assert [fault_type for _, fault_type in SQUAT_RULES] == sorted(

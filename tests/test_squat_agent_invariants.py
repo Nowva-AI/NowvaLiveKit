@@ -155,7 +155,8 @@ class TestSquatCueText:
         assert TRACKING_LOST_CUE == "tracking_lost"
 
     def test_squat_fix_praise_text(self):
-        assert FIXED_CUE_TEXT == SQUAT_FIXED_CUE_TEXT
+        assert {key: FIXED_CUE_TEXT.get(key) for key in SQUAT_FIXED_CUE_TEXT} == SQUAT_FIXED_CUE_TEXT
+        assert all(key.startswith("deadlift_") for key in set(FIXED_CUE_TEXT) - set(SQUAT_FIXED_CUE_TEXT))
         assert {key: CUE_TEXT_MAP.get(key) for key in SQUAT_FIXED_CUE_TEXT} == SQUAT_FIXED_CUE_TEXT
 
     def test_squat_report_labels(self):
@@ -166,7 +167,8 @@ class TestSquatCueText:
 
     def test_praise_keys_for_the_cue_banner(self):
         expected = {"good_rep", "great_depth", "strong", "clean", "perfect", "adjust_good", *SQUAT_FIXED_CUE_TEXT}
-        assert POSITIVE_CUE_KEYS == frozenset(expected)
+        assert expected <= POSITIVE_CUE_KEYS
+        assert all(key.startswith("deadlift_") for key in POSITIVE_CUE_KEYS - expected)
 
 
 class TestSquatOrchestratorConstants:
