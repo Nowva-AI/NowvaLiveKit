@@ -36,7 +36,7 @@ from biomechanics.calibration import (
     extract_thresholds_from_rule_engine,
     get_movement_pattern,
 )
-from biomechanics.coaching.ipc_bridge import IPCBridge
+from biomechanics.coaching.ipc_bridge import IPCBridge, per_dimension_means, serialize_diagnosis
 from biomechanics.coaching.session_tracker import SessionTracker
 from biomechanics.config import BiomechanicsConfig, load_pipeline_config
 from biomechanics.diagnosis.bridge import build_anthro_dict, build_rom_dict
@@ -45,6 +45,7 @@ from biomechanics.diagnosis.engine import HypothesisEngine
 from biomechanics.diagnosis.rep_scoring import score_set
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.diagnosis.types import SetFeatures
+from biomechanics.faults.observability import SINGLE_CAMERA, capture_mode_from_env
 from biomechanics.triangulation.calibration import (
     WORLD_ANCHOR_BOARD,
     CalibrationResult,
@@ -86,12 +87,17 @@ DEMO_FINISH_TIMEOUT_S = 6.0
 GATE_PREARM_SECONDS = 3.0
 
 # ROM baseline used until calibration reps measure the real peaks.
-DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0}
+DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0, "peakHipFlex": 120.0}
 
 # Body measurement accumulates during the assessment reps. Reps finished
 # before it completes are held (their bottom frames are kept) so they still
-# get kinematics; past this wait after the last rep they go through without.
+# get kinematics; past this wait after the last rep they are diagnosed on the
+# best estimate so far (provisional), or without kinematics if there is none.
 ASSESSMENT_MEASUREMENT_WAIT_S = 5.0
+# Real sessions: 28% never passed the assessment and the median lifter waited
+# 88 s for a first workout rep. After this many rounds the workout starts with
+# the top cue carried into the set.
+MAX_ASSESSMENT_ROUNDS = 2
 
 # Camera extrinsics are a property of the rig, so they persist across sessions: one
 # file per camera set (calibration.rig_calibration_path), reused until deleted. Refines
@@ -228,63 +234,36 @@ def _show_status_frame(
     display_sink.show(display)
 
 
+def _format_or_dash(value, fmt: str) -> str:
+    return format(value, fmt) if value is not None else "-"
+
+
 def _save_calibration_report(peaks: dict, profile: dict, cal_reps: int, out_dir: str):
     """Save calibration_profile.json and calibration_profile.md to output dir."""
-    # JSON
     cal_json = {
         "calibration_reps": cal_reps,
         "peaks": peaks,
-        "profile": {k: v for k, v in profile.items() if k != "defaults"},
-        "defaults": profile.get("defaults", {}),
+        "profile": profile,
     }
     json_path = str(Path(out_dir) / "calibration_profile.json")
     with open(json_path, "w") as f:
         json.dump(cal_json, f, indent=2)
     print(f"  Saved: {json_path}")
 
-    # Markdown
-    defaults = profile.get("defaults", {})
-    kv = profile["knee_valgus"]
-    fl = profile["forward_lean"]
-    ba = profile["bilateral_asymmetry"]
-    dp = profile.get("depth", {})
-    d_kv = defaults.get("knee_valgus", {})
-    d_fl = defaults.get("forward_lean", {})
-    d_ba = defaults.get("bilateral_asymmetry", {})
-    d_dp = defaults.get("depth", {})
-
     md_lines = [
         f"# Calibration Profile ({cal_reps} reps)",
         "",
-        "## Observed Peaks",
+        "Capacities are the median rep. Fault thresholds are absolute and are not",
+        "calibrated; only the depth target is per-athlete.",
         "",
-        "| Signal | Value |",
-        "|--------|-------|",
-        f"| Trunk Flexion (peak) | {peaks['trunk_flexion']:.1f}° |",
-        *[f"| Hip Adduction Rep {i+1} | {p:.1f}° |" for i, p in enumerate(peaks.get('hip_adduction_per_rep', []))],
-        f"| **Hip Adduction (avg → band)** | **±{peaks['hip_adduction']:.1f}°** |",
-        f"| Bilateral Asymmetry (peak) | {peaks['asymmetry']:.1f}° |",
-        f"| Peak Dorsiflexion | {peaks['peak_dorsiflexion']:.1f}° |",
-        f"| **Avg Squat Depth** | **{peaks.get('avg_depth', 0):.1f}°** |",
-        *[f"| Squat Depth Rep {i+1} | {d:.1f}° |" for i, d in enumerate(peaks.get('depth_per_rep', []))],
-        "",
-        "## Calibrated Thresholds",
-        "",
-        "### Fault Thresholds (Mild / Moderate / Severe)",
-        "",
-        "| Fault | Calibrated | Default |",
-        "|-------|-----------|---------|",
-        f"| Knee Valgus | {kv['mild']:.1f}° / {kv['moderate']:.1f}° / {kv['severe']:.1f}° | {d_kv.get('mild', '-')}° / {d_kv.get('moderate', '-')}° / {d_kv.get('severe', '-')}° |",
-        f"| Forward Lean | {fl['mild']:.1f}° / {fl['moderate']:.1f}° / {fl['severe']:.1f}° | {d_fl.get('mild', '-')}° / {d_fl.get('moderate', '-')}° / {d_fl.get('severe', '-')}° |",
-        f"| Bilateral Asymmetry | {ba['mild']:.1f}° / {ba['moderate']:.1f}° / {ba['severe']:.1f}° | {d_ba.get('mild', '-')}° / {d_ba.get('moderate', '-')}° / {d_ba.get('severe', '-')}° |",
-        "",
-        "### Depth Thresholds",
-        "",
-        "| Category | Calibrated | Default |",
-        "|----------|-----------|---------|",
-        f"| Deep Squat (below parallel) | {dp.get('parallel_threshold', '-')}° | {d_dp.get('parallel_threshold', '-')}° |",
-        f"| Parallel | {dp.get('half_threshold', '-')}° | {d_dp.get('half_threshold', '-')}° |",
-        f"| Half Squat | {dp.get('quarter_threshold', '-')}° | {d_dp.get('quarter_threshold', '-')}° |",
+        "| Measure | Value |",
+        "|---------|-------|",
+        f"| Ankle dorsiflexion (shin tilt) | {_format_or_dash(peaks.get('peak_dorsiflexion'), '.1f')}° |",
+        f"| Hip flexion | {_format_or_dash(peaks.get('peak_hip_flexion'), '.1f')}° |",
+        f"| Depth reached (femur lengths above parallel) | {_format_or_dash(peaks.get('depth_capacity_ratio'), '.2f')} |",
+        f"| **Depth target** | **{_format_or_dash(profile.get('depth_target_ratio'), '.2f')}** |",
+        f"| Avg knee flexion at bottom | {peaks.get('avg_depth', 0):.1f}° |",
+        *[f"| Depth rep {i+1} | {d:.2f} |" for i, d in enumerate(peaks.get('depth_ratio_per_rep', []))],
         "",
     ]
     md_path = str(Path(out_dir) / "calibration_profile.md")
@@ -308,6 +287,24 @@ def _extract_athlete_params(pipeline) -> dict | None:
     return pipeline.body_calibration.to_athlete_params()
 
 
+def _switch_exercise(
+    pipeline: BiomechanicsPipeline,
+    session_tracker: SessionTracker,
+    bridge: IPCBridge,
+    exercise_name: str,
+) -> None:
+    """Move the running pipeline to another exercise between sets.
+
+    The new profile's rules and rep counting take over, the diagnosis engine
+    only runs for exercises it models, and the voice agent gets the new
+    exercise's cues, which also tells it which profile is active.
+    """
+    pipeline.set_exercise(exercise_name)
+    session_tracker.on_exercise_changed(pipeline.profile.uses_diagnosis_engine)
+    bridge.prepare_exercise(exercise_name)
+    print(f"[PIPELINE] Exercise set to {exercise_name} ({pipeline.profile.name})")
+
+
 def _adopt_measured_athlete_params(pipeline, session_tracker, bridge, baseline: dict) -> dict | None:
     athlete_params = _extract_athlete_params(pipeline)
     if athlete_params is not None:
@@ -322,6 +319,46 @@ def _adopt_measured_athlete_params(pipeline, session_tracker, bridge, baseline: 
     return athlete_params
 
 
+def _adopt_provisional_athlete_params(pipeline, session_tracker, bridge, baseline: dict) -> dict | None:
+    """The best body estimate so far, for a diagnosis that cannot wait for the measurement."""
+    athlete_params = pipeline.body_calibration.provisional_athlete_params()
+    if athlete_params is None:
+        return None
+    session_tracker.set_athlete_params(athlete_params, baseline)
+    bridge.set_athlete_params(athlete_params, baseline)
+    print(
+        f"  [ASSESSMENT] Body measurement unfinished — diagnosing on a provisional estimate: "
+        f"femur={athlete_params['femur_avg_m']:.3f}m tibia={athlete_params['tibia_avg_m']:.3f}m "
+        f"(replaced once the measurement completes)"
+    )
+    return athlete_params
+
+
+def _assessment_result_message(
+    assessment_round: int,
+    has_immediate: bool,
+    diagnosis: dict,
+    scoring: dict,
+    demo: dict,
+    body_measurement: str,
+) -> dict:
+    """passed: no immediate cause. final_round: no further assessment round follows.
+    proceed_anyway: the last round still found causes — the workout starts and the
+    top immediate cause is carried into the set."""
+    final_round = not has_immediate or assessment_round >= MAX_ASSESSMENT_ROUNDS
+    return {
+        "type": "assessment_result",
+        "round": assessment_round,
+        "passed": not has_immediate,
+        "final_round": final_round,
+        "proceed_anyway": has_immediate and final_round,
+        "body_measurement": body_measurement,
+        "diagnosis": diagnosis,
+        "scoring": scoring,
+        "demo": demo,
+    }
+
+
 def _build_calibration_complete_message(
     movement_pattern: str,
     peaks: dict,
@@ -333,7 +370,7 @@ def _build_calibration_complete_message(
         "type": "calibration_complete",
         "movement_pattern": movement_pattern,
         "peaks": peaks,
-        "thresholds": {k: v for k, v in cal_profile.items() if k != "defaults"},
+        "thresholds": cal_profile,
     }
     # Omitted, never None, when the body was not measured: the voice agent
     # persists whatever arrives here.
@@ -810,36 +847,10 @@ class CameraCalibrationSession:
 def _serialize_diagnosis(diagnosis_result, score_summary) -> tuple[dict, dict]:
     """Convert diagnosis engine output into JSON-serializable dicts for IPC."""
     per_rep = score_summary.per_rep_scores
-    n = len(per_rep)
-    diagnosis_dict = {
-        "confidence": diagnosis_result.confidence,
-        "detected_symptoms": [
-            {"symptom_id": s.symptom_id, "severity": s.severity, "contributing_reps": s.contributing_reps}
-            for s in diagnosis_result.detected_symptoms
-        ],
-        "immediate_causes": [
-            {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation, "parameter_delta": c.parameter_delta}
-            for c in diagnosis_result.immediate_causes
-        ],
-        "session_causes": [
-            {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation}
-            for c in diagnosis_result.session_causes
-        ],
-        "contextual_notes": [
-            {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation}
-            for c in diagnosis_result.contextual_notes
-        ],
-        "combined_perturbation": diagnosis_result.combined_perturbation,
-    }
+    diagnosis_dict = serialize_diagnosis(diagnosis_result)
     scoring_dict = {
         "mean_score": score_summary.mean_score,
-        "per_dimension": {
-            "depth": round(sum(r.depth_score for r in per_rep) / n, 3) if n else 0,
-            "trunk_control": round(sum(r.trunk_control_score for r in per_rep) / n, 3) if n else 0,
-            "knee_tracking": round(sum(r.knee_tracking_score for r in per_rep) / n, 3) if n else 0,
-            "symmetry": round(sum(r.symmetry_score for r in per_rep) / n, 3) if n else 0,
-            "tempo": round(sum(r.tempo_score for r in per_rep) / n, 3) if n else 0,
-        },
+        "per_dimension": per_dimension_means(per_rep),
         "best_rep": score_summary.best_rep_number,
         "worst_rep": score_summary.worst_rep_number,
         "trend_slope": score_summary.trend_slope,
@@ -955,6 +966,12 @@ def run_biomechanics_pipeline(
 
     # Initialize pipeline
     try:
+        if config.pose.backend == "rtmpose" and capture_mode_from_env() == SINGLE_CAMERA:
+            raise ValueError(
+                "pose.backend 'rtmpose' estimates 2D only: on a single camera no 3D pose is ever "
+                "produced and the readiness gate never passes. Set pose.backend: mediapipe in "
+                "config/biomechanics.yaml, or run the rig with NOWVA_MULTI_CAMERA=true"
+            )
         pipeline = BiomechanicsPipeline(
             config, exercise_name=exercise_name, defer_capture=preload,
         )
@@ -994,6 +1011,7 @@ def run_biomechanics_pipeline(
 
         bridge = IPCBridge(ipc_client)
         session_tracker = SessionTracker(bridge, config=config.coaching)
+        session_tracker.diagnosis_enabled = pipeline.profile.uses_diagnosis_engine
 
         # Pre-cache coaching cues for the exercise
         bridge.prepare_exercise(exercise_name)
@@ -1032,6 +1050,8 @@ def run_biomechanics_pipeline(
     # Session-scoped body measurements feeding diagnosis: restored from the
     # stored calibration, or adopted once the pipeline finishes measuring.
     athlete_params: dict | None = None
+    # True while athlete_params is the assessment's provisional estimate.
+    athlete_params_provisional = False
     athlete_baseline: dict = dict(DEFAULT_ROM_BASELINE)
 
     # --- Apply existing calibration if provided ---
@@ -1043,6 +1063,9 @@ def run_biomechanics_pipeline(
             # proportions; older flat files are just the thresholds.
             cal_profile = stored.get("thresholds", stored)
             apply_calibration_to_rule_engine(pipeline._rule_engine, cal_profile)
+            stored_target = (stored.get("baseline") or {}).get("depthTargetRatio")
+            if cal_profile.get("depth_target_ratio") is None and stored_target is not None:
+                pipeline.set_depth_target(stored_target)
             print(f"[CALIBRATION] Loaded calibration from {calibration_file}")
 
             # This is the only place a returning user's proportions get
@@ -1069,8 +1092,13 @@ def run_biomechanics_pipeline(
             print(f"[CALIBRATION] Failed to load calibration file: {e}")
 
     # --- Assessment + Calibration phase (if no existing calibration) ---
+    # Only exercises the diagnosis engine models are calibrated. Calibrating
+    # anything else would store its reps as the athlete's squat calibration.
+    movement_pattern = get_movement_pattern(exercise_name)
+    if calibration_mode and movement_pattern is None:
+        print(f"[CALIBRATION] {exercise_name} has no calibration — skipping assessment and calibration")
+        calibration_mode = False
     if calibration_mode:
-        movement_pattern = get_movement_pattern(exercise_name) or "squat"
 
         # ============================================================
         #  PHASE 1: PRE-WORKOUT FORM ASSESSMENT (2-rep loop)
@@ -1208,6 +1236,8 @@ def run_biomechanics_pipeline(
                 session_tracker.set_active = False
 
                 print(f"\n  [ASSESSMENT] Round {assessment_round} — collecting {ASSESSMENT_TARGET_REPS} reps")
+                # Every descent counts while the athlete's range is being learned.
+                pipeline.set_depth_target(None)
 
                 # Reps finished before the body is measured wait here with their
                 # bottom frames, so they still get kinematics once it is.
@@ -1216,11 +1246,17 @@ def run_biomechanics_pipeline(
 
                 while assessment_reps_done < ASSESSMENT_TARGET_REPS or pending_reps:
                     result = pipeline.process_frame()
+                    bridge.update_tracking_quality(
+                        result, active=pipeline.is_ready, in_rep=pipeline.rep_counter.in_rep,
+                    )
+                    bridge.update_camera_status(result)
 
-                    if athlete_params is None:
-                        athlete_params = _adopt_measured_athlete_params(
+                    if athlete_params is None or athlete_params_provisional:
+                        measured = _adopt_measured_athlete_params(
                             pipeline, session_tracker, bridge, athlete_baseline,
                         )
+                        if measured is not None:
+                            athlete_params, athlete_params_provisional = measured, False
 
                     if pipeline.is_ready and result.skeleton_3d is not None:
                         bridge.send_frame_data(result, rep_phase=pipeline.rep_counter.phase)
@@ -1260,9 +1296,17 @@ def run_biomechanics_pipeline(
                         assessment_reps_done >= ASSESSMENT_TARGET_REPS
                         and time.time() - last_rep_time > ASSESSMENT_MEASUREMENT_WAIT_S
                     )
+                    if pending_reps and athlete_params is None and measurement_overdue:
+                        athlete_params = _adopt_provisional_athlete_params(
+                            pipeline, session_tracker, bridge, athlete_baseline,
+                        )
+                        athlete_params_provisional = athlete_params is not None
                     if pending_reps and (athlete_params is not None or measurement_overdue):
                         if athlete_params is None:
-                            print("  [ASSESSMENT] WARNING: body measurement unfinished — reps pass without kinematics")
+                            print(
+                                "  [ASSESSMENT] WARNING: body measurement unfinished and no provisional "
+                                "estimate — reps pass without kinematics"
+                            )
                         for rep_data, bottom_kpts, bottom_angles, standing_kpts, trajectory_samples in pending_reps:
                             session_tracker.on_rep_complete(
                                 rep_data,
@@ -1313,6 +1357,7 @@ def run_biomechanics_pipeline(
                         per_rep_kinematics=kinematic_buffer,
                         anthropometry=anthro,
                         rom=rom,
+                        capture_mode=session_tracker.capture_mode,
                     )
                     diagnosis_result = HypothesisEngine().diagnose(set_features)
                     score_summary = score_set(
@@ -1330,7 +1375,8 @@ def run_biomechanics_pipeline(
                     # Build demo data before announcing the result so the
                     # choreography is ready the moment the agent reacts.
                     pending_demo = None
-                    if has_immediate and not demo_played:
+                    # The demo plays between rounds; the last round goes straight to the workout.
+                    if has_immediate and not demo_played and assessment_round < MAX_ASSESSMENT_ROUNDS:
                         observed_kpts = session_tracker.bottom_frame_for_rep(
                             score_summary.worst_rep_number
                         )
@@ -1341,22 +1387,29 @@ def run_biomechanics_pipeline(
                     if pending_demo is not None:
                         print(f"  [DEMO] Pose stack ready: {len(pending_demo.cues)} cue(s)")
 
-                    ipc_client.send_message(nan_to_none({
-                        "type": "assessment_result",
-                        "round": assessment_round,
-                        "passed": not has_immediate,
-                        "diagnosis": diagnosis_dict,
-                        "scoring": scoring_dict,
-                        "demo": {
+                    result_message = _assessment_result_message(
+                        assessment_round,
+                        has_immediate,
+                        diagnosis_dict,
+                        scoring_dict,
+                        {
                             "available": pending_demo is not None,
                             "cues": [cue.model_dump() for cue in pending_demo.cues]
                             if pending_demo is not None else [],
                         },
-                    }))
+                        body_measurement="provisional" if athlete_params_provisional else "complete",
+                    )
+                    ipc_client.send_message(nan_to_none(result_message))
 
                     if not has_immediate:
                         assessment_passed = True
                         print(f"\n  [ASSESSMENT] PASSED after {assessment_round} round(s)")
+                    elif result_message["proceed_anyway"]:
+                        assessment_passed = True
+                        print(
+                            f"\n  [ASSESSMENT] Issues remain after {assessment_round} rounds — "
+                            f"starting the workout with the top cue carried into the set"
+                        )
                     else:
                         print(f"  [ASSESSMENT] Issues found — user needs to correct and retry")
                         if pending_demo is not None:
@@ -1390,6 +1443,9 @@ def run_biomechanics_pipeline(
                         "type": "assessment_result",
                         "round": assessment_round,
                         "passed": True,
+                        "final_round": True,
+                        "proceed_anyway": False,
+                        "body_measurement": "missing",
                         "diagnosis": {},
                         "scoring": {},
                     })
@@ -1428,10 +1484,16 @@ def run_biomechanics_pipeline(
 
         tracker = CalibrationTracker(target_reps=calibration_reps)
         cal_set_collector = SetDataCollector()
+        # Calibration measures how deep the athlete can go, so no target yet.
+        pipeline.set_depth_target(None)
 
         try:
             while not tracker.is_complete:
                 result = pipeline.process_frame()
+                bridge.update_tracking_quality(
+                    result, active=pipeline.is_ready, in_rep=pipeline.rep_counter.in_rep,
+                )
+                bridge.update_camera_status(result)
 
                 if pipeline.is_ready and result.skeleton_3d is not None:
                     cal_set_collector.record_frame(result, result.skeleton_3d)
@@ -1442,7 +1504,7 @@ def run_biomechanics_pipeline(
                     # Count reps but do NOT report faults during calibration
                     if result.rep_data is not None:
                         depth = result.rep_data.max_depth_angle
-                        tracker.on_rep_complete(depth)
+                        tracker.on_rep_complete(depth, result.rep_data.features)
                         print(f"  [CAL REP {tracker.reps_completed}/{calibration_reps}] depth={depth:.1f}°")
 
                         # Notify voice agent of calibration rep
@@ -1487,11 +1549,19 @@ def run_biomechanics_pipeline(
 
             # Body measurements are session-scoped (per-set resets never touch
             # them); the params adopted during assessment back that up.
-            cal_athlete_params = _extract_athlete_params(pipeline) or athlete_params
+            # A provisional estimate is never persisted as the athlete's body.
+            cal_athlete_params = _extract_athlete_params(pipeline) or (
+                None if athlete_params_provisional else athlete_params
+            )
             # Build real baseline from calibration peaks
             cal_baseline = {
-                "peakDorsi": peaks["peak_dorsiflexion"],
+                "peakDorsi": peaks["peak_dorsiflexion"] if peaks["peak_dorsiflexion"] is not None
+                else DEFAULT_ROM_BASELINE["peakDorsi"],
                 "peakKneeFlex": peaks["avg_depth"],
+                "peakHipFlex": peaks["peak_hip_flexion"] if peaks["peak_hip_flexion"] is not None
+                else DEFAULT_ROM_BASELINE["peakHipFlex"],
+                "depthCapacityRatio": peaks["depth_capacity_ratio"],
+                "depthTargetRatio": cal_profile["depth_target_ratio"],
             }
             athlete_baseline = cal_baseline
 
@@ -1502,11 +1572,10 @@ def run_biomechanics_pipeline(
 
             print(f"\n{'='*60}")
             print(f"  CALIBRATION COMPLETE ({tracker.reps_completed} reps)")
-            print(f"  Peak trunk flexion: {peaks['trunk_flexion']:.1f}°")
-            print(f"  Avg hip adduction:  {peaks['hip_adduction']:.1f}°")
-            print(f"  Peak asymmetry:     {peaks['asymmetry']:.1f}°")
-            print(f"  Peak dorsiflexion:  {peaks['peak_dorsiflexion']:.1f}°")
-            print(f"  Avg squat depth:    {peaks.get('avg_depth', 0):.1f}°")
+            print(f"  Ankle dorsiflexion: {_format_or_dash(peaks['peak_dorsiflexion'], '.1f')}°")
+            print(f"  Hip flexion:        {_format_or_dash(peaks['peak_hip_flexion'], '.1f')}°")
+            print(f"  Depth reached:      {_format_or_dash(peaks['depth_capacity_ratio'], '.2f')} femur lengths above parallel")
+            print(f"  Depth target:       {cal_profile['depth_target_ratio']:.2f}")
             print(f"{'='*60}\n")
 
             # Save calibration report
@@ -1515,6 +1584,7 @@ def run_biomechanics_pipeline(
             # Wire athlete params for diagnosis engine
             if cal_athlete_params is not None:
                 athlete_params = cal_athlete_params
+                athlete_params_provisional = False
                 session_tracker.set_athlete_params(cal_athlete_params, cal_baseline)
                 bridge.set_athlete_params(cal_athlete_params, cal_baseline)
                 print(
@@ -1670,6 +1740,12 @@ def run_biomechanics_pipeline(
                         camera_calibration.on_rest_start()
 
                     print(f"[REST] Starting {rest_seconds}s rest timer")
+                elif incoming.get("type") == "set_exercise":
+                    # Sent during rest, after rest_start finalized the last set
+                    # of the previous exercise.
+                    exercise_name = incoming.get("exercise_name") or exercise_name
+                    _switch_exercise(pipeline, session_tracker, bridge, exercise_name)
+                    set_collector.thresholds = extract_thresholds_from_rule_engine(pipeline._rule_engine)
                 elif incoming.get("type") == "assessment_mode":
                     session_tracker.set_assessment_mode(incoming.get("enabled", False))
                     print(f"[PIPELINE] Assessment mode {'enabled' if incoming.get('enabled') else 'disabled'}")
@@ -1794,12 +1870,21 @@ def run_biomechanics_pipeline(
                 )
 
             result = pipeline.process_frame()
+            # A set is being collected only while ready and not resting.
+            bridge.update_tracking_quality(
+                result, active=pipeline.is_ready and not resting and not workout_finished,
+                in_rep=pipeline.rep_counter.in_rep,
+            )
+            bridge.update_camera_status(result)
 
-            # Returning users without stored params get measured during sets
-            if athlete_params is None:
-                athlete_params = _adopt_measured_athlete_params(
+            # Returning users without stored params get measured during sets;
+            # a provisional assessment estimate is replaced the same way.
+            if athlete_params is None or athlete_params_provisional:
+                measured = _adopt_measured_athlete_params(
                     pipeline, session_tracker, bridge, athlete_baseline,
                 )
+                if measured is not None:
+                    athlete_params, athlete_params_provisional = measured, False
 
             if on_demand_bridge is not None:
                 # Replay shows a frozen past rep — streaming the live pose

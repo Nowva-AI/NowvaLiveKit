@@ -39,6 +39,22 @@ def _make_engine_with_squat_rules() -> RuleEngine:
     return RuleEngine(rules=rules)
 
 
+def _make_engine_with_forward_lean() -> RuleEngine:
+    """An engine holding ForwardLeanRule at the config thresholds.
+
+    The squat no longer registers forward lean (it judges hip shoot instead),
+    but the lunge does, so its proportion scaling still has to hold.
+    """
+    from biomechanics.config import BiomechanicsConfig
+    from biomechanics.faults.rules.forward_lean import ForwardLeanRule
+
+    fl = BiomechanicsConfig().faults.forward_lean
+    rule = ForwardLeanRule(
+        mild_threshold=fl.mild, moderate_threshold=fl.moderate, severe_threshold=fl.severe,
+    )
+    return RuleEngine(rules=[rule])
+
+
 class TestRuleEngineProportionScaling:
     """C8: scaling is idempotent (from base thresholds), valgus is not scaled,
     forward lean scales in lean space so a larger scale is MORE lenient."""
@@ -53,7 +69,7 @@ class TestRuleEngineProportionScaling:
         assert (valgus_rule.mild_threshold, valgus_rule.moderate_threshold, valgus_rule.severe_threshold) == before
 
     def test_forward_lean_thresholds_scaled_in_lean_space(self):
-        engine = _make_engine_with_squat_rules()
+        engine = _make_engine_with_forward_lean()
         fwd_rule = engine.get_rule(FaultType.FORWARD_LEAN)
         base = (fwd_rule.mild_threshold, fwd_rule.moderate_threshold, fwd_rule.severe_threshold)
 
@@ -66,7 +82,7 @@ class TestRuleEngineProportionScaling:
             assert threshold == pytest.approx(expected, abs=0.01)
 
     def test_scaling_is_idempotent(self):
-        engine = _make_engine_with_squat_rules()
+        engine = _make_engine_with_forward_lean()
         fwd_rule = engine.get_rule(FaultType.FORWARD_LEAN)
 
         engine.apply_body_proportion_scaling(_segment_proportions(LONG_FEMUR_LEAN_SCALE))
@@ -77,7 +93,7 @@ class TestRuleEngineProportionScaling:
         assert (fwd_rule.mild_threshold, fwd_rule.moderate_threshold, fwd_rule.severe_threshold) == pytest.approx(once)
 
     def test_rescaling_with_a_new_scale_starts_from_base(self):
-        engine = _make_engine_with_squat_rules()
+        engine = _make_engine_with_forward_lean()
         fwd_rule = engine.get_rule(FaultType.FORWARD_LEAN)
         base_mild = fwd_rule.mild_threshold
 
@@ -90,7 +106,7 @@ class TestRuleEngineProportionScaling:
         from collections import deque
         from biomechanics.utils.types import JointAngles
 
-        engine = _make_engine_with_squat_rules()
+        engine = _make_engine_with_forward_lean()
         fwd_rule = engine.get_rule(FaultType.FORWARD_LEAN)
         base_mild = fwd_rule.mild_threshold
         # A lean just past the base mild threshold: faults at base scale ...
@@ -108,16 +124,23 @@ class TestRuleEngineProportionScaling:
         ) is None
 
 
-class TestForwardLeanRuleEnabled:
+class TestSquatRuleSet:
 
-    def test_forward_lean_rule_in_engine(self):
-        """ForwardLeanRule should be active in the squat-profile rule set."""
+    def test_squat_judges_hip_shoot_not_absolute_lean(self):
+        """Absolute lean is bar position and anatomy; the coachable fault is the chest dropping."""
         engine = _make_engine_with_squat_rules()
-        fwd_rule = engine.get_rule(FaultType.FORWARD_LEAN)
-        assert fwd_rule is not None
-        # Squat profile registers depth, symmetry, bar-tilt asymmetry,
-        # forward lean, knee valgus, heel rise = 6 rules.
-        assert engine.rule_count == 6
+        assert engine.get_rule(FaultType.FORWARD_LEAN) is None
+        assert engine.get_rule(FaultType.HIP_SHOOT) is not None
+
+    def test_squat_registers_every_contract_fault(self):
+        engine = _make_engine_with_squat_rules()
+        registered = {rule.fault_type for rule in engine.rules}
+        assert registered == {
+            FaultType.KNEE_VALGUS, FaultType.HIP_SHOOT, FaultType.HEEL_RISE, FaultType.BALANCE,
+            FaultType.HIP_SHIFT, FaultType.BILATERAL_ASYMMETRY, FaultType.DEPTH,
+            FaultType.FOOT_PLACEMENT, FaultType.LOCKOUT, FaultType.TEMPO, FaultType.DEPTH_DRIFT,
+            FaultType.VELOCITY_LOSS,
+        }
 
 
 class TestForwardLeanBaselineSurvivesScaling:

@@ -73,24 +73,28 @@ def normalize_exercise_name(raw_name: str) -> Optional[str]:
     """
     name_lower = raw_name.lower().strip()
 
+    # A plain "squat" is a bodyweight squat (every recorded quick session was one);
+    # it is a barbell squat only when the user names the bar.
     EXERCISE_ALIASES = {
-        "squat": "Barbell Back Squat",
-        "squats": "Barbell Back Squat",
+        "squat": "Bodyweight Squat",
+        "squats": "Bodyweight Squat",
         "back squat": "Barbell Back Squat",
         "back squats": "Barbell Back Squat",
         "barbell squat": "Barbell Back Squat",
+        "barbell squats": "Barbell Back Squat",
         "barbell back squat": "Barbell Back Squat",
+        "barbell back squats": "Barbell Back Squat",
         "front squat": "Barbell Front Squat",
         "front squats": "Barbell Front Squat",
         "barbell front squat": "Barbell Front Squat",
         "goblet squat": "Goblet Squat",
         "goblet squats": "Goblet Squat",
-        "bodyweight squat": "Barbell Back Squat",
-        "bodyweight squats": "Barbell Back Squat",
-        "bw squat": "Barbell Back Squat",
-        "bw squats": "Barbell Back Squat",
-        "air squat": "Barbell Back Squat",
-        "air squats": "Barbell Back Squat",
+        "bodyweight squat": "Bodyweight Squat",
+        "bodyweight squats": "Bodyweight Squat",
+        "bw squat": "Bodyweight Squat",
+        "bw squats": "Bodyweight Squat",
+        "air squat": "Bodyweight Squat",
+        "air squats": "Bodyweight Squat",
         "deadlift": "Barbell Deadlift",
         "deadlifts": "Barbell Deadlift",
         "barbell deadlift": "Barbell Deadlift",
@@ -116,9 +120,9 @@ async def check_calibration(user_id: str, exercise_name: str) -> Optional[dict]:
     canonical = normalize_exercise_name(exercise_name) or exercise_name
     pattern = get_movement_pattern(canonical)
     if not pattern:
-        logger.warning(
-            f"[CALIBRATION] No movement pattern for exercise_name={exercise_name!r} "
-            f"(canonical={canonical!r}) — calibration lookup skipped"
+        logger.info(
+            f"[CALIBRATION] {exercise_name!r} (canonical={canonical!r}) is not "
+            f"calibrated — calibration lookup skipped"
         )
         return None
 
@@ -130,6 +134,17 @@ async def check_calibration(user_id: str, exercise_name: str) -> Optional[dict]:
             db.close()
 
     return await asyncio.to_thread(_query)
+
+
+def calibration_exercise(exercise_names: list[str]) -> Optional[str]:
+    """The first exercise in a workout that is calibrated (a squat), or None.
+
+    Its stored calibration, body measurements included, serves the whole
+    workout. Assessment only runs when this is also the first exercise.
+    """
+    from biomechanics.calibration import get_movement_pattern
+
+    return next((name for name in exercise_names if get_movement_pattern(name)), None)
 
 
 def start_calibration_mode(state, exercise_name: str, pending_workout: dict):

@@ -54,7 +54,7 @@ state:
   effort_near_limit_ratio: 1.35
 
 style:
-  adapter: cartesia_inline     # cartesia_inline | cartesia_extra | qwen3 | none
+  adapter: auto                # auto (follows the TTS in use) | cartesia_inline | cartesia_extra | elevenlabs_settings | qwen3 | none
   speed_min: 0.9
   speed_max: 1.1
   volume_min: 0.9

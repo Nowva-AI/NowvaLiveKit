@@ -13,6 +13,7 @@ import pytest
 
 from biomechanics.coaching.ipc_bridge import IPCBridge
 from biomechanics.config import IPCConfig
+from biomechanics.diagnosis.bridge import KEYPOINT_TO_BIACROMIAL_RATIO
 from biomechanics.utils.types import JointAngles, PipelineFrame, Skeleton3D
 
 ANGLE_TOLERANCE_DEG = 0.5
@@ -20,6 +21,7 @@ RATIO_TOLERANCE = 0.01
 
 SHOULDER_WIDTH_M = 0.40
 ANKLE_HALF_SPACING_M = 0.15
+HIP_HALF_WIDTH_M = 0.10
 FOOT_LENGTH_M = 0.20
 
 
@@ -38,6 +40,9 @@ def _standing_kpts(toe_out_deg: float = 0.0) -> np.ndarray:
     camera. The athlete faces the camera, so their forward is -Z.
     """
     kpts = np.zeros((21, 3))
+    # Hips define the athlete's forward axis for toe-out.
+    kpts[11] = [HIP_HALF_WIDTH_M, 0.0, 0.0]
+    kpts[12] = [-HIP_HALF_WIDTH_M, 0.0, 0.0]
     kpts[15] = [ANKLE_HALF_SPACING_M, 0.9, 0.0]
     kpts[16] = [-ANKLE_HALF_SPACING_M, 0.9, 0.0]
 
@@ -91,16 +96,24 @@ class TestStanceMetrics:
         assert msg["foot_direction_angle_l"] == pytest.approx(25.0, abs=ANGLE_TOLERANCE_DEG)
         assert msg["foot_direction_angle_r"] == pytest.approx(25.0, abs=ANGLE_TOLERANCE_DEG)
 
+    def test_toe_in_reads_negative(self, bridge_and_client):
+        """Toe-in used to read exactly like toe-out (unsigned arccos)."""
+        bridge, client = bridge_and_client
+        msg = _send_one_frame(bridge, client, _standing_kpts(toe_out_deg=-10.0))
+        assert msg["foot_direction_angle_l"] == pytest.approx(-10.0, abs=ANGLE_TOLERANCE_DEG)
+        assert msg["foot_direction_angle_r"] == pytest.approx(-10.0, abs=ANGLE_TOLERANCE_DEG)
+
     def test_toe_out_is_comparable_to_engine_targets(self, bridge_and_client):
         """Engine targets live in 15-40°; a neutral stance must fall below them."""
         bridge, client = bridge_and_client
         msg = _send_one_frame(bridge, client, _standing_kpts(toe_out_deg=5.0))
         assert 0.0 <= msg["foot_direction_angle_l"] < 15.0
 
-    def test_stance_width_ratio_is_ankle_spread_over_shoulder_width(self, bridge_and_client):
+    def test_stance_width_ratio_is_ankle_spread_over_biacromial_width(self, bridge_and_client):
+        """Shoulder keypoints are joint centres; coaching's shoulder width is wider."""
         bridge, client = bridge_and_client
         msg = _send_one_frame(bridge, client, _standing_kpts())
-        expected = (2 * ANKLE_HALF_SPACING_M) / SHOULDER_WIDTH_M
+        expected = (2 * ANKLE_HALF_SPACING_M) / (SHOULDER_WIDTH_M / KEYPOINT_TO_BIACROMIAL_RATIO)
         assert msg["stance_width_ratio"] == pytest.approx(expected, abs=RATIO_TOLERANCE)
 
     def test_targets_absent_until_athlete_params_are_set(self, bridge_and_client):

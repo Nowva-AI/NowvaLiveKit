@@ -79,7 +79,7 @@ class BarbellCurlProfile(ExerciseProfile):
             ascending_vel_threshold=40.0,
             min_depth_cm=80.0,
             standing_return_cm=10.0,
-            min_rep_duration_frames=15,
+            min_rep_duration_s=0.5,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:
@@ -88,10 +88,10 @@ class BarbellCurlProfile(ExerciseProfile):
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"elbow": angles.elbow_asymmetry}
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "lockout": "Fully extend your arms at the bottom",
-            "range_of_motion": "Curl higher — squeeze the biceps",
-            "shoulder_stability": "Keep elbows pinned — no swinging",
-            "bilateral_asymmetry": "Even out left and right",
+            "lockout": "curl_extend",
+            "range_of_motion": "curl_higher",
+            "shoulder_stability": "curl_elbows",
+            "bilateral_asymmetry": "curl_even",
         }

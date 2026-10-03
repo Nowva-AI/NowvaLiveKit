@@ -13,8 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from biomechanics.coaching.cue_cache import (
-    DEADLIFT_CUES,
-    DEFAULT_CUES,
+    GENERIC_POSITIVE_CUE_KEYS,
     POSITIVE_CUE_KEYS,
     SQUAT_CUES,
     CueCache,
@@ -119,25 +118,39 @@ class TestCueCache:
         assert cue_cache.current_exercise == "squat"
 
     def test_prepare_barbell_back_squat(self, cue_cache):
-        """'Barbell Back Squat' normalizes to 'barbell_back_squat' — not in map, gets DEFAULT_CUES.
-        But 'Back Squat' normalizes to 'back_squat' which IS in the map."""
-        cues = cue_cache.prepare_for_exercise("Back Squat")
-        assert "knees_out" in cues  # SQUAT_CUES
-        assert cue_cache.current_exercise == "back_squat"
+        """Every squat name resolves to the squat profile's cues."""
+        cues = cue_cache.prepare_for_exercise("Barbell Back Squat")
+        assert cues == SQUAT_CUES
+        assert cue_cache.profile_name == "squat"
+        assert cue_cache.current_exercise == "barbell_back_squat"
 
-    def test_prepare_deadlift(self, cue_cache):
-        """Should load DEADLIFT_CUES for deadlift variants."""
-        cues = cue_cache.prepare_for_exercise("romanian_deadlift")
-        assert "hips_through" in cues
-        assert "flat_back" in cues
+    def test_prepare_romanian_deadlift_gets_its_own_cues(self, cue_cache):
+        """The program library's name resolves to the RDL profile, whose cues
+        are its own: nothing borrowed from the squat."""
+        cues = cue_cache.prepare_for_exercise("Barbell Romanian Deadlift")
+        assert cue_cache.profile_name == "romanian_deadlift"
+        assert "rdl_flat_back" in cues
         assert "knees_out" not in cues
+        assert "chest_up" not in cues
+        assert "great_depth" not in cues
 
-    def test_prepare_unknown_exercise_gets_defaults(self, cue_cache):
-        """Unknown exercise should fall back to DEFAULT_CUES."""
-        cues = cue_cache.prepare_for_exercise("overhead_press")
-        assert "good_rep" in cues
+    def test_prepare_overhead_press_gets_press_cues(self, cue_cache):
+        cues = cue_cache.prepare_for_exercise("Barbell Overhead Press")
+        assert {"press_lockout", "press_elbows", "press_bar_path", "press_even"} <= set(cues)
         assert "knees_out" not in cues
         assert "rep_1" in cues
+
+    def test_overhead_press_lockout_fault_gets_the_press_cue(self, cue_cache):
+        """The squat also has a lockout fault; the press must not say "stand tall"."""
+        cue_cache.prepare_for_exercise("Barbell Overhead Press")
+        assert cue_cache.get_cue_for_fault("lockout", 10.0) == "press_lockout"
+
+    def test_prepare_untracked_exercise_gets_only_praise_and_counts(self, cue_cache):
+        cues = cue_cache.prepare_for_exercise("Barbell Bench Press")
+        assert cue_cache.profile_name == "untracked"
+        corrections = {key for key in cues if not key.startswith("rep_")}
+        assert corrections == set(GENERIC_POSITIVE_CUE_KEYS)
+        assert cue_cache.get_cue_for_fault("knee_valgus", 10.0) is None
 
     def test_get_cue_for_fault_mapping(self, cue_cache):
         """Should map fault types to correct cue keys."""
@@ -154,11 +167,11 @@ class TestCueCache:
         assert cue2 is None
 
     def test_higher_priority_fault_preempts_the_gap(self, cue_cache):
-        """Forward lean is the root-cause fault and must not be starved by
-        the more frequent knee/asymmetry faults."""
+        """Knee cave outranks every other squat fault and must not be starved
+        by a lower-priority fault that claimed the slot first."""
         cue_cache.prepare_for_exercise("squat")
-        assert cue_cache.get_cue_for_fault("knee_valgus", 10.0) == "knees_out"
-        assert cue_cache.get_cue_for_fault("forward_lean", 11.0) == "chest_up"
+        assert cue_cache.get_cue_for_fault("hip_shift", 10.0) == "even_it_out"
+        assert cue_cache.get_cue_for_fault("knee_valgus", 11.0) == "knees_out"
 
     def test_get_cue_for_fault_after_gap(self, cue_cache):
         """Cue should be returned after sufficient time gap."""
@@ -196,10 +209,10 @@ class TestCueCache:
         assert positive in POSITIVE_CUE_KEYS
 
     def test_get_positive_cue_deadlift(self, cue_cache):
-        """Deadlift has fewer positive cues — should still work."""
+        """Deadlift praise never includes the squat-only great_depth."""
         cue_cache.prepare_for_exercise("deadlift")
         positive = cue_cache.get_positive_cue()
-        assert positive in {"good_rep", "strong"}
+        assert positive in GENERIC_POSITIVE_CUE_KEYS
 
     def test_returned_dict_is_copy(self, cue_cache):
         """Returned dict should not mutate internal state."""
@@ -276,7 +289,10 @@ class TestIPCBridge:
     def test_send_shallow_rep_message(self, ipc_bridge, mock_ipc_client):
         """Shallow rep should carry the depth class and the deeper cue."""
         fault = make_fault("depth", severity=FaultSeverity.MODERATE, timestamp=10.0)
-        fault.details = {"max_knee_flexion": 51.3, "shallow_rep": True}
+        fault.details = {
+            "depth_ratio": 0.62, "target_ratio": 0.0, "depth_cm_above_parallel": 28.6,
+            "category": "quarter", "shallow_rep": True,
+        }
         ipc_bridge.send_shallow_rep(1, fault=fault, set_number=2)
 
         msg = mock_ipc_client.messages[-1]
@@ -286,7 +302,9 @@ class TestIPCBridge:
         assert msg["cue"] == "deeper"
         assert msg["fault_type"] == "depth"
         assert msg["severity"] == "moderate"
-        assert msg["max_knee_flexion"] == 51.3
+        assert msg["depth_ratio"] == 0.62
+        assert msg["depth_cm_above_parallel"] == 28.6
+        assert msg["category"] == "quarter"
         assert msg["set_number"] == 2
 
     def test_send_shallow_rep_ignores_fault_cooldown(self, ipc_bridge, mock_ipc_client):
@@ -356,12 +374,20 @@ class TestIPCBridge:
         assert msg["status"] == "running"
         assert msg["latency_ms"]["pose"] == 8.0
 
-    def test_depth_categories(self):
-        """Verify depth category thresholds."""
-        assert IPCBridge._depth_category(105.0) == "below_parallel"
-        assert IPCBridge._depth_category(95.0) == "parallel"
-        assert IPCBridge._depth_category(75.0) == "half"
-        assert IPCBridge._depth_category(45.0) == "quarter"
+    def test_depth_category_comes_from_hip_height_when_measured(self):
+        """105° of knee flexion is not 'below parallel' when the hip is 12 cm above the knee."""
+        rep = RepData(
+            rep_number=1, start_time=0.0, end_time=2.0, start_frame=0, end_frame=60,
+            max_depth_angle=105.0, features={"depth_ratio": 0.26},
+        )
+        assert IPCBridge._rep_depth_category(rep) == "half"
+
+    def test_depth_category_falls_back_to_knee_angle_without_features(self):
+        rep = RepData(
+            rep_number=1, start_time=0.0, end_time=2.0, start_frame=0, end_frame=60,
+            max_depth_angle=45.0,
+        )
+        assert IPCBridge._rep_depth_category(rep) == "quarter"
 
 
 # =============================================================================
@@ -718,6 +744,47 @@ class TestDiagnosisIntegration:
         types = [m["type"] for m in mock_ipc_client.messages]
         assert "set_complete" in types
         assert "diagnosis_complete" not in types
+
+
+class TestExerciseChange:
+    def _squat_rep(self, session_tracker, rep_number: int, start_time: float) -> None:
+        session_tracker.on_rep_complete(
+            make_rep(rep_number, start_time=start_time),
+            bottom_kpts=_squat_bottom_kpts_mediapipe(),
+            bottom_angles=_squat_bottom_angles(),
+        )
+
+    def test_exercise_without_diagnosis_sends_no_diagnosis(self, session_tracker, mock_ipc_client):
+        """The squat diagnosis engine must not judge an overhead press."""
+        session_tracker.set_athlete_params(_default_athlete_params(), {})
+        session_tracker.on_exercise_changed(diagnosis_enabled=False)
+
+        self._squat_rep(session_tracker, 1, start_time=0.0)
+        session_tracker.force_end_set()
+
+        types = [m["type"] for m in mock_ipc_client.messages]
+        assert "set_complete" in types
+        assert "diagnosis_complete" not in types
+        assert session_tracker.build_on_demand_demo() is None
+
+    def test_switch_mid_set_closes_the_old_exercise_set(self, session_tracker, mock_ipc_client):
+        self._squat_rep(session_tracker, 1, start_time=0.0)
+        session_tracker.on_exercise_changed(diagnosis_enabled=False)
+
+        set_msgs = [m for m in mock_ipc_client.messages if m["type"] == "set_complete"]
+        assert len(set_msgs) == 1
+        assert not session_tracker.set_active
+        assert session_tracker.get_last_rep_snapshot() is None
+
+    def test_set_numbers_restart_for_the_new_exercise(self, session_tracker, mock_ipc_client):
+        self._squat_rep(session_tracker, 1, start_time=0.0)
+        session_tracker.force_end_set()
+        session_tracker.on_exercise_changed(diagnosis_enabled=True)
+
+        self._squat_rep(session_tracker, 1, start_time=60.0)
+
+        rep_msgs = [m for m in mock_ipc_client.messages if m["type"] == "rep_complete"]
+        assert rep_msgs[-1]["set_number"] == 1
 
 
 class TestBottomFrameTracking:

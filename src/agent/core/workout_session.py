@@ -24,6 +24,7 @@ class SetProgress:
     actual_rpe: Optional[float] = None
     measured_velocity: Optional[float] = None
     completed_at: Optional[str] = None  # ISO format timestamp
+    weight_unit: Optional[str] = None  # "kg" | "lb"; target_weight 0 = bodyweight
 
 
 @dataclass
@@ -90,11 +91,12 @@ class WorkoutSession:
                     set_id=set_data["set_id"],
                     set_number=set_data["set_number"],
                     target_reps=set_data["reps"],
-                    target_weight=set_data.get("intensity_percent"),  # Will calculate actual weight later
+                    target_weight=set_data.get("weight"),
                     intensity_percent=set_data.get("intensity_percent"),
                     rpe_target=set_data.get("rpe"),
                     rest_seconds=set_data.get("rest_seconds", 120),
-                    velocity_threshold=set_data.get("velocity_threshold")
+                    velocity_threshold=set_data.get("velocity_threshold"),
+                    weight_unit=set_data.get("weight_unit"),
                 ))
 
             self.exercises.append(ExerciseProgress(
@@ -130,6 +132,11 @@ class WorkoutSession:
         if exercise:
             return exercise.get_current_set()
         return None
+
+    def last_completed_set(self) -> Optional[SetProgress]:
+        """The set finished most recently (sets complete in workout order)."""
+        completed = [s for ex in self.exercises for s in ex.sets if s.completed]
+        return completed[-1] if completed else None
 
     def mark_set_complete(
         self,
@@ -355,6 +362,7 @@ class WorkoutSession:
         reps: int,
         weight: float = 0.0,
         rest_seconds: int = 120,
+        weight_unit: Optional[str] = "lb",
     ) -> 'WorkoutSession':
         set_list = [
             SetProgress(
@@ -366,6 +374,7 @@ class WorkoutSession:
                 rpe_target=None,
                 rest_seconds=rest_seconds,
                 velocity_threshold=None,
+                weight_unit=weight_unit,
             )
             for i in range(sets)
         ]

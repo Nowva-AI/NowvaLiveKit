@@ -26,6 +26,8 @@ PROCESS_NOISE = 10.0
 UNCERTAINTY_SCALE_M = 0.02
 MIN_OUTPUT_CONFIDENCE = 0.15
 MAX_PREDICTED_FRAMES = 5
+MAX_PREDICTION_S = MAX_PREDICTED_FRAMES / FPS
+LIVE_FPS = 12.0
 NOISE_STD_M = 0.01
 THREE_PX_NOISE_STD_M = 0.0087  # hip-centred per-axis std at 3 px (velocity-clamp audit)
 SEEDS = (0, 1, 2, 3, 4)
@@ -98,7 +100,7 @@ def _timestamp(frame: int) -> float:
 
 def _make_smoother(**overrides: float) -> FixedLagKeypointSmoother:
     settings = dict(lag_frames=LAG_FRAMES, process_noise=PROCESS_NOISE, uncertainty_scale_m=UNCERTAINTY_SCALE_M,
-                    max_predicted_frames=MAX_PREDICTED_FRAMES, min_output_confidence=MIN_OUTPUT_CONFIDENCE)
+                    max_prediction_s=MAX_PREDICTION_S, min_output_confidence=MIN_OUTPUT_CONFIDENCE)
     settings.update(overrides)
     return FixedLagKeypointSmoother(**settings)
 
@@ -214,6 +216,10 @@ class TestConstruction:
     def test_floor_above_ceiling_raises(self) -> None:
         with pytest.raises(ValueError):
             FixedLagKeypointSmoother(measurement_std_floor_m=0.1, measurement_std_ceiling_m=0.05)
+
+    def test_negative_prediction_limit_raises(self) -> None:
+        with pytest.raises(ValueError):
+            FixedLagKeypointSmoother(max_prediction_s=-0.1)
 
 
 class TestInitialisation:
@@ -384,6 +390,21 @@ class TestTiming:
 
 
 class TestMissingKeypoints:
+    def test_prediction_limit_is_time_not_frames(self) -> None:
+        """Live runs ~12 fps: five predicted frames there were 0.42 s of guessing, not 0.17 s."""
+        smoother = _make_smoother()
+        confidences = np.full(KEYPOINT_COUNT, 0.8)
+        for frame in range(30):
+            smoother.update(STANDING_POSE, confidences, START_TIMESTAMP_S + frame / LIVE_FPS)
+        missing = confidences.copy()
+        missing[CK.LEFT_ANKLE] = 0.0
+        held_frames = int(MAX_PREDICTION_S * LIVE_FPS)
+        for miss in range(1, held_frames + 1):
+            output = smoother.update(STANDING_POSE, missing, START_TIMESTAMP_S + (29 + miss) / LIVE_FPS)
+            assert output.current_confidences[CK.LEFT_ANKLE] >= MIN_OUTPUT_CONFIDENCE
+        output = smoother.update(STANDING_POSE, missing, START_TIMESTAMP_S + (30 + held_frames) / LIVE_FPS)
+        assert output.current_confidences[CK.LEFT_ANKLE] == 0.0
+
     def test_zero_confidence_keypoint_moves_estimate_less_than_1cm(self) -> None:
         # Triangulator emits (0, 0, 0) at confidence 0 (C3); mid-descent the knee is ~50 cm from the origin.
         truth, windows = _squat_session(reps=2)
@@ -535,7 +556,7 @@ class TestInnovationGate:
         alternating = [TIMEOUT_OFFSET_M * (1.0 if index % 2 == 0 else -1.0) for index in range(timeout_frames)]
         agreeing_tail = alternating[:timeout_frames - TIMEOUT_AGREEING_FRAMES] + [TIMEOUT_OFFSET_M] * TIMEOUT_AGREEING_FRAMES
         for offsets, expect_snap in ((alternating, False), (agreeing_tail, True)):
-            smoother = _make_smoother(max_predicted_frames=20)
+            smoother = _make_smoother(max_prediction_s=20 / FPS)
             confidences = np.full(KEYPOINT_COUNT, 0.8)
             for frame in range(30):
                 smoother.update(STANDING_POSE, confidences, _timestamp(frame))

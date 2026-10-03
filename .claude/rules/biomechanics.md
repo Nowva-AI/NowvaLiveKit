@@ -7,11 +7,16 @@ globs:
 # Biomechanics Domain Rules
 
 ## Coordinate System
-- Y-axis is vertical (height). Larger Y = higher.
-- `hip_position_cm = (hip_mid_y - ankle_mid_y) * 100`
-  - More negative = standing (hip far above ankle)
-  - Less negative = squat bottom (hip close to ankle)
-- Squat bottoms are local maxima of hip_position_cm; standing peaks are local minima.
+- Every 3D keypoint array (MediaPipe world landmarks, triangulated world frame, every
+  `Skeleton3D`) is **Y-DOWN**: larger Y = LOWER. X = subject's left, +Z = subject's back.
+  Up is `geometry.WORLD_UP = (0, -1, 0)`; use `is_above` / `height_above`, never a bare `[0, 1, 0]`.
+- Derived heights are **Y-up at the source**: `RepTrajectorySample.hip_height_cm`,
+  `shoulder_height_cm`, `hip_y_*`, `knee_y_*` are cm ABOVE the ankle midpoint (larger = higher).
+- `hip_position_cm = (hip_mid_y - ankle_mid_y) * 100` (the squat rep signal) is raw Y-down:
+  - More negative = standing (hip far above ankle); less negative = squat bottom
+  - Squat bottoms are local maxima; standing peaks are local minima.
+- Viewer / diagnosis keypoints (`mediapipe_to_viewer_coords`) are Y-up. The BiLSTM was trained
+  on Y-up data; its feature extractor flips the live Y-down input.
 - All 3D positions in meters unless suffixed otherwise.
 
 ## COCO 17 Keypoint Format

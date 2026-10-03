@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from biomechanics.utils.types import JointAngles, FaultSeverity
 from biomechanics.faults.fault_types import FaultType
-from biomechanics.faults.rules.depth import DepthRule, DepthCategory
+from biomechanics.faults.rules.depth import DepthRule, DepthCategory, depth_category
 from biomechanics.faults.rules.symmetry import SymmetryRule
 from biomechanics.faults.rules.forward_lean import ForwardLeanRule
 from biomechanics.faults.rules.knee_valgus import KneeValgusRule, KNEE_VALGUS_COOLDOWN_S
@@ -28,6 +28,9 @@ from biomechanics.faults.rule_engine import RuleEngine, DEDUP_INTERVAL_S
 
 NAN = float("nan")
 FPS = 30.0
+FEMUR_M = 0.46
+# A hip 19.5 cm above the knee: what 90° of knee flexion looks like with a 30° shin.
+NINETY_DEGREE_KNEE_DEPTH_RATIO = 0.195 / FEMUR_M
 REP_FRAMES = 60
 PEAK_KNEE_FLEXION_DEG = 110.0
 SYMMETRIC_NOISE_DEG = 2.0
@@ -72,7 +75,7 @@ def create_joint_angles(
 
 
 class TestDepthRule:
-    """Test DepthRule for squat depth evaluation."""
+    """DepthRule judges hip height against the athlete's target, never the knee angle."""
 
     @pytest.fixture
     def depth_rule(self):
@@ -82,120 +85,58 @@ class TestDepthRule:
     def history(self):
         return deque(maxlen=90)
 
-    def test_depth_category_classification(self, depth_rule):
-        """Test depth category thresholds."""
-        assert depth_rule.get_depth_category(45.0) == DepthCategory.QUARTER
-        assert depth_rule.get_depth_category(60.0) == DepthCategory.HALF
-        assert depth_rule.get_depth_category(75.0) == DepthCategory.HALF
-        assert depth_rule.get_depth_category(90.0) == DepthCategory.PARALLEL
-        assert depth_rule.get_depth_category(95.0) == DepthCategory.PARALLEL
-        assert depth_rule.get_depth_category(100.0) == DepthCategory.BELOW_PARALLEL
-        assert depth_rule.get_depth_category(110.0) == DepthCategory.BELOW_PARALLEL
+    def test_depth_category_classification(self):
+        assert depth_category(-0.2) == DepthCategory.BELOW_PARALLEL
+        assert depth_category(-0.02) == DepthCategory.PARALLEL
+        assert depth_category(0.0) == DepthCategory.PARALLEL
+        assert depth_category(0.3) == DepthCategory.HALF
+        assert depth_category(0.7) == DepthCategory.QUARTER
+
+    def test_ninety_degrees_of_knee_bend_is_not_parallel(self):
+        """The old rule called 90° parallel while the hip sat ~20 cm above the knee."""
+        assert depth_category(NINETY_DEGREE_KNEE_DEPTH_RATIO) == DepthCategory.HALF
 
     def test_fault_type(self, depth_rule):
-        """Depth rule should report DEPTH fault type."""
         assert depth_rule.fault_type == FaultType.DEPTH
 
-    def test_quarter_squat_fault(self, depth_rule):
-        """Quarter squat should produce MODERATE fault."""
-        angles = create_joint_angles()
-        fault = depth_rule.evaluate_max_depth(
-            max_knee_flexion=50.0,
-            angles=angles,
-            rep_number=1,
-        )
-        assert fault is not None
-        assert fault.severity == FaultSeverity.MODERATE
-        assert fault.details["category"] == DepthCategory.QUARTER
+    def test_within_tolerance_is_no_fault(self, depth_rule):
+        fault = depth_rule.judge_shallow_descent(0.05, 0.0, create_joint_angles(), rep_number=1)
+        assert fault is None
 
-    def test_half_squat_fault(self, depth_rule):
-        """Half squat should produce MILD fault."""
-        angles = create_joint_angles()
-        fault = depth_rule.evaluate_max_depth(
-            max_knee_flexion=75.0,
-            angles=angles,
-            rep_number=1,
-        )
+    def test_short_of_target_is_mild(self, depth_rule):
+        fault = depth_rule.judge_shallow_descent(0.15, 0.0, create_joint_angles(), rep_number=1)
         assert fault is not None
         assert fault.severity == FaultSeverity.MILD
-        assert fault.details["category"] == DepthCategory.HALF
 
-    def test_parallel_no_fault(self, depth_rule):
-        """Parallel squat should not produce fault."""
-        angles = create_joint_angles()
-        fault = depth_rule.evaluate_max_depth(
-            max_knee_flexion=95.0,
-            angles=angles,
-            rep_number=1,
-        )
-        assert fault is None
-
-    def test_below_parallel_no_fault(self, depth_rule):
-        """Below parallel squat should not produce fault."""
-        angles = create_joint_angles()
-        fault = depth_rule.evaluate_max_depth(
-            max_knee_flexion=110.0,
-            angles=angles,
-            rep_number=1,
-        )
-        assert fault is None
-
-    def test_shallow_rep_quarter_class(self, depth_rule):
-        """Depth class 1 should produce the same MODERATE quarter fault."""
-        angles = create_joint_angles()
-        fault = depth_rule.evaluate_depth_class(
-            max_depth_class=1,
-            angles=angles,
-            rep_number=3,
-            max_knee_flexion=52.0,
+    def test_half_squat_is_moderate(self, depth_rule):
+        fault = depth_rule.judge_shallow_descent(
+            NINETY_DEGREE_KNEE_DEPTH_RATIO, 0.0, create_joint_angles(), rep_number=1,
         )
         assert fault is not None
         assert fault.severity == FaultSeverity.MODERATE
-        assert fault.details["category"] == DepthCategory.QUARTER
+        assert fault.details["category"] == DepthCategory.HALF
+
+    def test_quarter_squat_is_severe(self, depth_rule):
+        fault = depth_rule.judge_shallow_descent(0.7, 0.0, create_joint_angles(), rep_number=1)
+        assert fault.severity == FaultSeverity.SEVERE
+
+    def test_judged_against_the_athletes_target(self, depth_rule):
+        """A target above parallel (limited hips) moves what counts as short."""
+        assert depth_rule.judge_shallow_descent(0.3, 0.25, create_joint_angles(), rep_number=1) is None
+        assert depth_rule.judge_shallow_descent(0.3, 0.0, create_joint_angles(), rep_number=1) is not None
+
+    def test_shallow_fault_carries_the_contract_details(self, depth_rule):
+        fault = depth_rule.judge_shallow_descent(0.4, 0.0, create_joint_angles(), rep_number=4)
+        assert fault.rep_number == 4
         assert fault.details["shallow_rep"] is True
-        assert fault.details["max_depth_class"] == 1
-        assert fault.details["max_knee_flexion"] == 52.0
-        assert fault.rep_number == 3
-
-    def test_shallow_rep_half_class(self, depth_rule):
-        """Depth class 2 should produce the MILD half fault."""
-        angles = create_joint_angles()
-        fault = depth_rule.evaluate_depth_class(
-            max_depth_class=2, angles=angles, rep_number=1,
-        )
-        assert fault is not None
-        assert fault.severity == FaultSeverity.MILD
-        assert fault.details["category"] == DepthCategory.HALF
-
-    def test_shallow_rep_fires_regardless_of_measured_angle(self, depth_rule):
-        """The class decides, not the knee angle — the class rejected the rep."""
-        angles = create_joint_angles(knee_flexion_l=120.0, knee_flexion_r=120.0)
-        fault = depth_rule.evaluate_depth_class(
-            max_depth_class=1,
-            angles=angles,
-            rep_number=1,
-            max_knee_flexion=120.0,
-        )
-        assert fault is not None
-        assert fault.details["category"] == DepthCategory.QUARTER
-
-    def test_parallel_class_no_shallow_fault(self, depth_rule):
-        """Classes at or past parallel are acceptable depth."""
-        angles = create_joint_angles()
-        assert depth_rule.evaluate_depth_class(3, angles) is None
-        assert depth_rule.evaluate_depth_class(4, angles) is None
+        assert fault.details["target_ratio"] == 0.0
+        assert fault.details["unit"] == "ratio"
 
     def test_per_frame_path_never_emits(self, depth_rule, history):
-        """S17: depth is reported once per rep by the rep-complete path only,
-        so the per-frame evaluate() must stay silent even for a quarter squat."""
-        for frame, knee in enumerate((30.0, 50.0, 55.0, 40.0)):
-            angles = create_joint_angles(frame=frame, timestamp=frame / FPS, knee_flexion_l=knee, knee_flexion_r=knee)
-            assert depth_rule.evaluate(angles, history, in_rep=True, rep_number=1) is None
-        after = create_joint_angles(frame=4, timestamp=4 / FPS, knee_flexion_l=5.0, knee_flexion_r=5.0)
-        assert depth_rule.evaluate(after, history, in_rep=False, rep_number=2) is None
+        assert depth_rule.evaluate(create_joint_angles(knee_flexion_l=40.0), history, in_rep=True) is None
 
-    def test_nan_max_depth_gives_no_fault(self, depth_rule):
-        assert depth_rule.evaluate_max_depth(max_knee_flexion=NAN, angles=create_joint_angles(), rep_number=1) is None
+    def test_nan_depth_gives_no_fault(self, depth_rule):
+        assert depth_rule.judge_shallow_descent(NAN, 0.0, create_joint_angles(), rep_number=1) is None
 
 
 def _run_symmetry_reps(
@@ -383,8 +324,23 @@ class TestForwardLeanRule:
         assert forward_lean_rule.evaluate(after, history, in_rep=True) is not None
 
 
+def _valgus_angles(
+    valgus_l: float, valgus_r: float, confidence: float = 0.9, timestamp: float = 0.0,
+    hip_adduction: float = 0.0,
+) -> JointAngles:
+    return create_joint_angles(
+        timestamp=timestamp,
+        knee_valgus_l=valgus_l,
+        knee_valgus_r=valgus_r,
+        foot_confidence_l=confidence,
+        foot_confidence_r=confidence,
+        hip_adduction_l=hip_adduction,
+        hip_adduction_r=hip_adduction,
+    )
+
+
 class TestKneeValgusRule:
-    """Test KneeValgusRule for knee cave detection."""
+    """KneeValgusRule (lunge): per-frame knees-over-toes metric, silent without the feet."""
 
     @pytest.fixture
     def knee_valgus_rule(self):
@@ -397,147 +353,51 @@ class TestKneeValgusRule:
         return deque(maxlen=90)
 
     def test_fault_type(self, knee_valgus_rule):
-        """Knee valgus rule should report KNEE_VALGUS fault type."""
         assert knee_valgus_rule.fault_type == FaultType.KNEE_VALGUS
 
     def test_no_fault_when_knees_out(self, knee_valgus_rule, history):
-        """No fault when hip adduction is low (knees tracking over toes)."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=2.0,
-            hip_adduction_r=2.0,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is None
+        assert knee_valgus_rule.evaluate(_valgus_angles(-6.0, -5.0), history, in_rep=True) is None
 
     def test_no_fault_when_not_in_rep(self, knee_valgus_rule, history):
-        """No fault when not in rep even with valgus."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=12.0,
-            hip_adduction_r=12.0,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=False)
-        assert fault is None
+        assert knee_valgus_rule.evaluate(_valgus_angles(20.0, 20.0), history, in_rep=False) is None
 
     def test_mild_valgus(self, knee_valgus_rule, history):
-        """Mild valgus (12-17° adduction) should produce MILD fault."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=14.0,
-            hip_adduction_r=13.0,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
+        fault = knee_valgus_rule.evaluate(_valgus_angles(14.0, 13.0), history, in_rep=True)
         assert fault.severity == FaultSeverity.MILD
 
     def test_moderate_valgus(self, knee_valgus_rule, history):
-        """Moderate valgus (17-24° adduction) should produce MODERATE fault."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=19.0,
-            hip_adduction_r=18.0,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
+        fault = knee_valgus_rule.evaluate(_valgus_angles(19.0, 18.0), history, in_rep=True)
         assert fault.severity == FaultSeverity.MODERATE
 
     def test_severe_valgus(self, knee_valgus_rule, history):
-        """Severe valgus (>24° adduction) should produce SEVERE fault."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=27.0,
-            hip_adduction_r=25.0,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
+        fault = knee_valgus_rule.evaluate(_valgus_angles(27.0, 25.0), history, in_rep=True)
         assert fault.severity == FaultSeverity.SEVERE
 
     def test_identifies_affected_side(self, knee_valgus_rule, history):
-        """Fault should identify which side has worse valgus."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=6.0,
-            hip_adduction_r=12.0,  # Right is worse
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
+        fault = knee_valgus_rule.evaluate(_valgus_angles(6.0, 14.0), history, in_rep=True)
         assert fault.details["affected_side"] == "right"
 
-    def test_toe_based_valgus_used_when_confident(self, knee_valgus_rule, history):
-        """Should use knee_valgus fields when foot confidence is high."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=2.0,  # Low — would NOT trigger via fallback
-            hip_adduction_r=2.0,
-            knee_valgus_l=12.0,  # High — should trigger via toe metric
-            knee_valgus_r=11.0,
-            foot_confidence_l=0.8,
-            foot_confidence_r=0.7,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.details["metric_source"] == "toe"
-        assert fault.details["max_valgus"] == 12.0
+    def test_no_fault_without_the_feet(self, knee_valgus_rule, history):
+        """The hip-adduction fallback read toe-in as valgus; unseen feet now mean silence."""
+        angles = _valgus_angles(20.0, 20.0, confidence=0.1, hip_adduction=19.0)
+        assert knee_valgus_rule.evaluate(angles, history, in_rep=True) is None
 
-    def test_fallback_to_hip_adduction_when_low_confidence(self, knee_valgus_rule, history):
-        """Should fall back to hip_adduction when foot confidence is low."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=12.0,  # Should trigger via fallback
-            hip_adduction_r=11.0,
-            knee_valgus_l=0.0,
-            knee_valgus_r=0.0,
-            foot_confidence_l=0.1,  # Too low
-            foot_confidence_r=0.1,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.details["metric_source"] == "hip_adduction"
+    def test_toe_in_hip_adduction_alone_is_not_valgus(self, knee_valgus_rule, history):
+        """Thigh angle against the world axis is foot angle, not knee cave."""
+        angles = _valgus_angles(0.0, 0.0, hip_adduction=19.0)
+        assert knee_valgus_rule.evaluate(angles, history, in_rep=True) is None
 
-    def test_fallback_when_one_side_low_confidence(self, knee_valgus_rule, history):
-        """Should fall back if either side has low foot confidence."""
-        angles = create_joint_angles(
-            frame=0,
-            hip_adduction_l=12.0,
-            hip_adduction_r=11.0,
-            knee_valgus_l=12.0,
-            knee_valgus_r=11.0,
-            foot_confidence_l=0.8,
-            foot_confidence_r=0.1,  # One side too low → fallback
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is not None
-        assert fault.details["metric_source"] == "hip_adduction"
-
-    def test_no_fault_with_toe_metric_below_threshold(self, knee_valgus_rule, history):
-        """No fault when toe-based valgus is below threshold."""
-        angles = create_joint_angles(
-            frame=0,
-            knee_valgus_l=2.0,
-            knee_valgus_r=3.0,
-            foot_confidence_l=0.9,
-            foot_confidence_r=0.9,
-        )
-        fault = knee_valgus_rule.evaluate(angles, history, in_rep=True)
-        assert fault is None
+    def test_no_fault_below_threshold(self, knee_valgus_rule, history):
+        assert knee_valgus_rule.evaluate(_valgus_angles(2.0, 3.0), history, in_rep=True) is None
 
     def test_nan_valgus_is_skipped(self, knee_valgus_rule, history):
-        angles = create_joint_angles(
-            frame=0, knee_valgus_l=NAN, knee_valgus_r=30.0, foot_confidence_l=0.9, foot_confidence_r=0.9,
-        )
-        assert knee_valgus_rule.evaluate(angles, history, in_rep=True) is None
-
-    def test_nan_hip_adduction_fallback_is_skipped(self, knee_valgus_rule, history):
-        angles = create_joint_angles(frame=0, hip_adduction_l=NAN, hip_adduction_r=NAN)
-        assert knee_valgus_rule.evaluate(angles, history, in_rep=True) is None
+        assert knee_valgus_rule.evaluate(_valgus_angles(NAN, 30.0), history, in_rep=True) is None
 
     def test_cooldown_is_time_based_not_frame_based(self, knee_valgus_rule, history):
-        first = create_joint_angles(frame=0, timestamp=50.0, hip_adduction_l=15.0, hip_adduction_r=15.0)
-        assert knee_valgus_rule.evaluate(first, history, in_rep=True) is not None
-        within = create_joint_angles(frame=0, timestamp=50.0 + KNEE_VALGUS_COOLDOWN_S / 2, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        assert knee_valgus_rule.evaluate(_valgus_angles(15.0, 15.0, timestamp=50.0), history, in_rep=True) is not None
+        within = _valgus_angles(15.0, 15.0, timestamp=50.0 + KNEE_VALGUS_COOLDOWN_S / 2)
         assert knee_valgus_rule.evaluate(within, history, in_rep=True) is None
-        after = create_joint_angles(frame=0, timestamp=50.0 + KNEE_VALGUS_COOLDOWN_S, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        after = _valgus_angles(15.0, 15.0, timestamp=50.0 + KNEE_VALGUS_COOLDOWN_S)
         assert knee_valgus_rule.evaluate(after, history, in_rep=True) is not None
 
     def test_no_proportion_scaling(self, knee_valgus_rule):
@@ -624,9 +484,9 @@ class TestRuleEngine:
         """Two rules reporting the same fault type: the engine's dedup window
         must be measured in seconds even when frame_index never advances."""
         engine = RuleEngine(rules=[KneeValgusRule(), KneeValgusRule()])
-        angles = create_joint_angles(frame=0, timestamp=20.0, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        angles = _valgus_angles(15.0, 15.0, timestamp=20.0)
         assert len(engine.evaluate(angles, in_rep=True, phase="bottom")) == 1
-        later = create_joint_angles(frame=0, timestamp=20.0 + DEDUP_INTERVAL_S + KNEE_VALGUS_COOLDOWN_S, hip_adduction_l=15.0, hip_adduction_r=15.0)
+        later = _valgus_angles(15.0, 15.0, timestamp=20.0 + DEDUP_INTERVAL_S + KNEE_VALGUS_COOLDOWN_S)
         assert len(engine.evaluate(later, in_rep=True, phase="bottom")) == 1
 
     def test_nan_frame_produces_no_faults_and_no_state_change(self, engine):
@@ -644,10 +504,10 @@ class TestRuleEngine:
         angles = create_joint_angles(
             frame=0,
             trunk_flexion=60.0,  # Forward lean
-            hip_adduction_l=15.0,  # Knee valgus
-            hip_adduction_r=15.0,
-            hip_flexion_l=80.0,  # Asymmetry
-            hip_flexion_r=65.0,
+            knee_valgus_l=15.0,  # Knee valgus, feet seen
+            knee_valgus_r=15.0,
+            foot_confidence_l=0.9,
+            foot_confidence_r=0.9,
         )
         faults = engine.evaluate(angles, in_rep=True, phase="bottom")
 
@@ -664,39 +524,31 @@ class TestRuleEngine:
         engine.reset()
         assert engine.history_length == 0
 
-    def test_rep_complete_evaluation(self, engine):
-        """Engine should evaluate depth on rep completion."""
-        angles = create_joint_angles(frame=0)
-        faults = engine.evaluate_rep_complete(
-            max_depth_angle=55.0,  # Quarter squat
-            angles=angles,
-            rep_number=1,
-        )
+    def test_shallow_descent_becomes_a_depth_fault(self, engine):
+        engine.set_depth_target(0.0)
+        faults = engine.judge_shallow_descent(0.6, create_joint_angles(), rep_number=4)
         assert len(faults) == 1
         assert faults[0].fault_type == "depth"
-        assert faults[0].severity == FaultSeverity.MODERATE
-
-    def test_shallow_rep_evaluation(self, engine):
-        """Engine should turn a rejected depth class into a depth fault."""
-        angles = create_joint_angles(frame=0)
-        faults = engine.evaluate_shallow_rep(
-            max_depth_class=1,
-            angles=angles,
-            rep_number=4,
-            max_knee_flexion=48.0,
-        )
-        assert len(faults) == 1
-        assert faults[0].fault_type == "depth"
-        assert faults[0].severity == FaultSeverity.MODERATE
+        assert faults[0].rep_number == 4
         assert faults[0].details["shallow_rep"] is True
+        assert faults[0].details["observability"] == "observable"
 
-    def test_shallow_rep_evaluation_without_depth_rule(self, engine):
+    def test_no_depth_fault_without_a_target(self, engine):
+        """Assessment and calibration count every descent."""
+        engine.set_depth_target(None)
+        assert engine.judge_shallow_descent(0.6, create_joint_angles(), rep_number=1) == []
+        assert engine.reaches_depth_target(0.9)
+
+    def test_target_tolerance_decides_what_counts(self, engine):
+        engine.set_depth_target(0.0)
+        assert engine.reaches_depth_target(0.05)
+        assert not engine.reaches_depth_target(0.2)
+
+    def test_shallow_descent_without_depth_rule(self, engine):
         """Profiles with no depth rule simply produce nothing."""
         engine.remove_rule(FaultType.DEPTH)
-        faults = engine.evaluate_shallow_rep(
-            max_depth_class=1, angles=create_joint_angles(), rep_number=1,
-        )
-        assert faults == []
+        engine.set_depth_target(0.0)
+        assert engine.judge_shallow_descent(0.6, create_joint_angles(), rep_number=1) == []
 
     def test_get_rule(self, engine):
         """Should be able to get specific rule by type."""

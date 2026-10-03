@@ -211,3 +211,15 @@ nova-penthouse/*
 graphify-out/cache/
 graphify-out/20*/
 graphify-out/.graphify_python
+
+# Pre-IK audit (.claude/preik-audit/): the experiment scripts and REPORT/NOTES
+# markdown are tracked; their outputs are regenerable and large (~84 MB, one
+# 60 MB .npz), and research/src/ is vendored third-party reference source
+# (OpenCap, EasyMocap, Pose2Sim, RTMlib) that we should not carry in-repo.
+.claude/preik-audit/**/*.json
+.claude/preik-audit/**/*.txt
+.claude/preik-audit/**/*.out
+.claude/preik-audit/**/*.jpg
+.claude/preik-audit/**/*.npy
+.claude/preik-audit/**/*.npz
+.claude/preik-audit/research/src/

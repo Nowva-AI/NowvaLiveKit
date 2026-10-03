@@ -17,6 +17,8 @@ from biomechanics.faults.hip_position_counter import SignalRepCounter, SignalRep
 from biomechanics.utils.types import JointAngles
 
 FPS = 30.0
+# The live default: single-camera MediaPipe.
+LIVE_FPS = 12.0
 STAND_S = 2.0
 GAP_S = 1.5
 FEMUR_M = 0.46
@@ -70,12 +72,12 @@ def _session() -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
     return signal, windows
 
 
-def _run(counter: SignalRepCounter, signal: np.ndarray) -> tuple[list[str], int, int]:
+def _run(counter: SignalRepCounter, signal: np.ndarray, fps: float = FPS) -> tuple[list[str], int, int]:
     phases: list[str] = []
     reps = 0
     rejected = 0
     for i, value in enumerate(signal):
-        rep_data, feedback = counter.update(signal_value=float(value), timestamp=1000.0 + i / FPS)
+        rep_data, feedback = counter.update(signal_value=float(value), timestamp=1000.0 + i / fps)
         phases.append(counter.phase)
         reps += rep_data is not None
         rejected += feedback is not None
@@ -127,6 +129,18 @@ class TestNoPauseReps:
         assert rejected == 0
         _assert_timing(noisy, truth, windows, phases, counter)
 
+    def test_rep_started_marks_each_rep_start_once(self):
+        signal, windows = _session()
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        start_frames: list[int] = []
+        for i, value in enumerate(signal):
+            counter.update(signal_value=float(value), timestamp=1000.0 + i / FPS)
+            if counter.rep_started:
+                start_frames.append(i)
+        assert len(start_frames) == len(REP_SCHEDULE)
+        for start_frame, (start, _, _, end) in zip(start_frames, windows):
+            assert start <= start_frame <= end
+
     def test_never_in_rep_while_standing(self):
         signal, windows = _session()
         counter = SignalRepCounter(HipPositionCounterConfig())
@@ -139,12 +153,13 @@ class TestNoPauseReps:
 
 class TestStandingNoise:
 
+    @pytest.mark.parametrize("fps", [FPS, LIVE_FPS])
     @pytest.mark.parametrize("seed", NOISE_SEEDS)
-    def test_standing_noise_produces_no_reps_or_feedback(self, seed: int):
-        standing = np.full(int(10 * FPS), _hip_signal_cm(0.0))
+    def test_standing_noise_produces_no_reps_or_feedback(self, seed: int, fps: float):
+        standing = np.full(int(10 * fps), _hip_signal_cm(0.0))
         noisy = standing + np.random.default_rng(seed).normal(0.0, STANDING_NOISE_CM, len(standing))
         counter = SignalRepCounter(HipPositionCounterConfig())
-        phases, reps, rejected = _run(counter, noisy)
+        phases, reps, rejected = _run(counter, noisy, fps)
         assert reps == 0
         assert rejected == 0
         assert phases[-1] == SignalRepState.IDLE.value
@@ -214,3 +229,128 @@ class TestDepthWithoutKneeAngles:
         assert math.isnan(counter._max_depth_angle)
         counter._record_angles(JointAngles(knee_flexion_l=math.nan, knee_flexion_r=math.nan)) if hasattr(counter, "_record_angles") else None
         assert math.isnan(counter._max_depth_angle)
+
+
+# Hip stops ~6.7 cm short of standing: past standing_return_cm, inside the top quarter.
+SHORT_LOCKOUT_FRACTION = 0.35
+# Piston reps turn around ~8.5 cm short of standing (19% of the range, inside
+# the top quarter) at a brisk pace, so the turnaround is quick.
+PISTON_TOP_FRACTION = 0.4
+PISTON_DESCENT_S = 0.8
+PISTON_ASCENT_S = 0.7
+REDIP_FRACTION = 0.5
+LONG_HOLD_S = 14.0
+# Brisk bodyweight reps (1.1 s each): well past the minimum rep duration.
+QUICK_DESCENT_S = 0.55
+QUICK_ASCENT_S = 0.55
+QUICK_REPS = 5
+
+
+def _moves(*segments: tuple, fps: float = FPS) -> np.ndarray:
+    """("hold", depth, seconds) or ("move", start, end, seconds) -> hip signal, cosine-eased."""
+    depths: list[float] = []
+    for segment in segments:
+        if segment[0] == "hold":
+            _, depth, seconds = segment
+            depths.extend([depth] * int(round(seconds * fps)))
+            continue
+        _, start, end, seconds = segment
+        frames = int(round(seconds * fps))
+        for i in range(frames):
+            tau = (i + 1) / frames
+            depths.append(start + (end - start) * 0.5 * (1.0 - math.cos(math.pi * tau)))
+    return np.array([_hip_signal_cm(depth) for depth in depths])
+
+
+def _run_at(counter: SignalRepCounter, signal: np.ndarray, fps: float) -> tuple[list[str], int]:
+    phases: list[str] = []
+    reps = 0
+    for i, value in enumerate(signal):
+        rep_data, _ = counter.update(signal_value=float(value), timestamp=1000.0 + i / fps)
+        phases.append(counter.phase)
+        reps += rep_data is not None
+    return phases, reps
+
+
+class TestRepsThatNeverReturnToTheBaseline:
+    @pytest.mark.parametrize("fps", [FPS, LIVE_FPS])
+    def test_lockout_short_of_standing_still_completes_the_rep(self, fps: float):
+        """A top that stops >3 cm short of the baseline once left the counter in-rep for the set."""
+        assert _hip_signal_cm(SHORT_LOCKOUT_FRACTION) - _hip_signal_cm(0.0) > HipPositionCounterConfig().standing_return_cm
+        signal = _moves(
+            ("hold", 0.0, STAND_S),
+            ("move", 0.0, 1.0, 1.0), ("move", 1.0, SHORT_LOCKOUT_FRACTION, 1.0),
+            ("hold", SHORT_LOCKOUT_FRACTION, GAP_S),
+            ("move", SHORT_LOCKOUT_FRACTION, 1.0, 1.0), ("move", 1.0, SHORT_LOCKOUT_FRACTION, 1.0),
+            ("hold", SHORT_LOCKOUT_FRACTION, GAP_S),
+            fps=fps,
+        )
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        phases, reps = _run_at(counter, signal, fps)
+        assert reps == 2
+        assert phases[-1] == SignalRepState.IDLE.value
+
+    @pytest.mark.parametrize("fps", [FPS, LIVE_FPS])
+    def test_piston_reps_that_turn_around_near_the_top_each_count(self, fps: float):
+        """At 12 fps the velocity turns only after the hip has left the top quarter."""
+        signal = _moves(
+            ("hold", 0.0, STAND_S),
+            ("move", 0.0, 1.0, PISTON_DESCENT_S), ("move", 1.0, PISTON_TOP_FRACTION, PISTON_ASCENT_S),
+            ("move", PISTON_TOP_FRACTION, 1.0, PISTON_DESCENT_S), ("move", 1.0, PISTON_TOP_FRACTION, PISTON_ASCENT_S),
+            ("move", PISTON_TOP_FRACTION, 1.0, PISTON_DESCENT_S), ("move", 1.0, 0.0, PISTON_ASCENT_S),
+            ("hold", 0.0, GAP_S),
+            fps=fps,
+        )
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        _, reps = _run_at(counter, signal, fps)
+        assert reps == 3
+
+    @pytest.mark.parametrize("fps", [FPS, LIVE_FPS])
+    def test_dip_back_down_mid_ascent_is_still_one_rep(self, fps: float):
+        signal = _moves(
+            ("hold", 0.0, STAND_S),
+            ("move", 0.0, 1.0, 1.0), ("move", 1.0, REDIP_FRACTION, 0.6),
+            ("move", REDIP_FRACTION, 0.9, 0.6), ("move", 0.9, 0.0, 1.0),
+            ("hold", 0.0, GAP_S),
+            fps=fps,
+        )
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        phases, reps = _run_at(counter, signal, fps)
+        assert reps == 1
+        assert phases[-1] == SignalRepState.IDLE.value
+
+    def test_failed_rep_held_at_the_bottom_times_out(self):
+        signal = _moves(
+            ("hold", 0.0, STAND_S),
+            ("move", 0.0, 1.0, 1.0), ("hold", 1.0, LONG_HOLD_S),
+        )
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        phases, reps = _run_at(counter, signal, FPS)
+        assert reps == 0
+        assert phases[-1] == SignalRepState.IDLE.value
+
+    def test_counter_recovers_after_a_timed_out_rep(self):
+        signal = _moves(
+            ("hold", 0.0, STAND_S),
+            ("move", 0.0, 1.0, 1.0), ("hold", 1.0, LONG_HOLD_S), ("move", 1.0, 0.0, 1.5),
+            ("hold", 0.0, STAND_S),
+            ("move", 0.0, 1.0, 1.0), ("move", 1.0, 0.0, 1.0),
+            ("hold", 0.0, GAP_S),
+        )
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        phases, reps = _run_at(counter, signal, FPS)
+        assert reps == 1
+        assert phases[-1] == SignalRepState.IDLE.value
+
+
+class TestFrameRate:
+    @pytest.mark.parametrize("fps", [FPS, LIVE_FPS])
+    def test_quick_reps_count_at_the_live_frame_rate(self, fps: float):
+        """Minimums counted in frames made a 12 fps rep last 1.25 s or silently vanish."""
+        segments: list[tuple] = [("hold", 0.0, STAND_S)]
+        for _ in range(QUICK_REPS):
+            segments += [("move", 0.0, 1.0, QUICK_DESCENT_S), ("move", 1.0, 0.0, QUICK_ASCENT_S), ("hold", 0.0, GAP_S)]
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        phases, reps = _run_at(counter, _moves(*segments, fps=fps), fps)
+        assert reps == QUICK_REPS
+        assert phases[-1] == SignalRepState.IDLE.value

@@ -1,8 +1,11 @@
 """Per-rep quality scoring for squat biomechanics.
 
-Scores each rep on the five dimensions the squat profile actually detects —
-depth, trunk control, knee tracking, symmetry, tempo — and produces a weighted
-composite score. All scores are in [0, 1] where 1.0 = perfect.
+Scores each rep on five dimensions — depth against the athlete's own target,
+trunk control (lean beyond what their build and ankles need, and the chest
+dropping out of the hole), knee tracking, side-to-side hip shift, and tempo —
+and produces a weighted composite. All scores are in [0, 1], 1.0 = perfect.
+Penalties are one-sided: sitting more upright than needed or pushing the
+knees out is never scored as a fault. Position control outweighs depth.
 
 Fault dimensions are measured over the loaded portion of the rep rather than a
 single bottom frame, using a high percentile so one mistracked frame cannot
@@ -18,14 +21,14 @@ from __future__ import annotations
 
 import math
 
-from .graph.evidence_tests import _clamp, expected_trunk_lean_geometric
+from .graph.evidence_tests import _clamp
 from .types import RepKinematicSummary, RepScore, RepTrajectory, RepTrajectorySample, SetScoreSummary
 
-WEIGHT_DEPTH = 0.42
-WEIGHT_TRUNK = 0.20
-WEIGHT_KNEES = 0.16
-WEIGHT_TEMPO = 0.12
-WEIGHT_SYMMETRY = 0.10
+WEIGHT_DEPTH = 0.20
+WEIGHT_TRUNK = 0.25
+WEIGHT_KNEES = 0.25
+WEIGHT_TEMPO = 0.15
+WEIGHT_SYMMETRY = 0.15
 
 # Percentile of the per-frame series used for each metric. Fault metrics take
 # the high end (worst sustained value), depth takes the low end (deepest
@@ -44,15 +47,24 @@ MIN_FEMUR_LENGTH_M = 0.20
 
 # Hip-above-knee height as a fraction of femur length: 0.0 is parallel (hip
 # joint centre level with knee joint centre), ~1.0 is standing with a vertical
-# thigh. Depth decays linearly across that span.
-DEPTH_DECAY_RATIO = 1.0
+# thigh. A rep within the tolerance of the athlete's target scores full depth;
+# beyond it the score decays linearly over DEPTH_DECAY_RATIO.
+DEPTH_TARGET_TOLERANCE_RATIO = 0.08
+DEPTH_DECAY_RATIO = 0.75
 
 TRUNK_TOLERANCE_DEGREES = 3.0
 TRUNK_DECAY_RANGE_DEGREES = 20.0
+HIP_SHOOT_TOLERANCE_DEGREES = 4.0
+HIP_SHOOT_DECAY_RANGE_DEGREES = 14.0
 
 KNEE_PERFECT_ZONE_DEGREES = 4.0
 KNEE_DECAY_RANGE_DEGREES = 12.0
+# Knees pushed out past the toes only costs score well beyond normal.
+KNEE_LATERAL_TOLERANCE_DEGREES = 15.0
 
+# Sideways hip travel as a fraction of ankle separation.
+SYMMETRY_TOLERANCE_RATIO = 0.03
+SYMMETRY_DECAY_RANGE_RATIO = 0.15
 SYMMETRY_TOLERANCE_CM = 1.0
 SYMMETRY_DECAY_RANGE_CM = 5.0
 
@@ -99,8 +111,11 @@ def _hip_above_knee_ratio(
 def _sample_ratios(
     trajectory: RepTrajectory, femur_cm: float
 ) -> list[float]:
+    """Depth ratio per frame: the measured one, or hip-above-knee from Y-up heights."""
     return [
-        _hip_above_knee_ratio(
+        sample.depth_ratio
+        if math.isfinite(sample.depth_ratio)
+        else _hip_above_knee_ratio(
             sample.hip_y_l, sample.hip_y_r, sample.knee_y_l, sample.knee_y_r, femur_cm
         )
         for sample in trajectory.samples
@@ -115,12 +130,23 @@ def _loaded_samples(
         return []
 
     ratios = _sample_ratios(trajectory, femur_cm)
-    cutoff = min(ratios) + LOADED_WINDOW_RATIO
+    finite = [ratio for ratio in ratios if math.isfinite(ratio)]
+    if not finite:
+        return []
+    cutoff = min(finite) + LOADED_WINDOW_RATIO
     return [
         sample
         for sample, ratio in zip(trajectory.samples, ratios)
-        if ratio <= cutoff
+        if math.isfinite(ratio) and ratio <= cutoff
     ]
+
+
+def _expected_pitch(rep: RepKinematicSummary) -> float:
+    """The lean this athlete's build and ankles need (balance model), best available."""
+    for value in (rep.expected_pitch_with_ankles, rep.expected_pitch_athlete, rep.expected_pitch_reference):
+        if math.isfinite(value):
+            return value
+    return math.nan
 
 
 def score_depth(
@@ -133,6 +159,8 @@ def score_depth(
 
     if trajectory is not None and trajectory.samples:
         ratios = _sample_ratios(trajectory, femur_cm)
+    elif math.isfinite(rep.depth_ratio):
+        ratios = [rep.depth_ratio]
     else:
         ratios = [
             _hip_above_knee_ratio(
@@ -145,7 +173,11 @@ def score_depth(
         ]
 
     deepest_ratio = _percentile(ratios, DEEPEST_PERCENTILE)
-    return _clamp(1.0 - deepest_ratio / DEPTH_DECAY_RATIO)
+    if math.isnan(deepest_ratio):
+        return math.nan
+    target = rom.get("depth_target_ratio", 0.0)
+    shortfall = deepest_ratio - target - DEPTH_TARGET_TOLERANCE_RATIO
+    return _clamp(1.0 - max(0.0, shortfall) / DEPTH_DECAY_RATIO)
 
 
 def score_trunk_control(
@@ -154,28 +186,41 @@ def score_trunk_control(
     rom: dict,
     trajectory: RepTrajectory | None = None,
 ) -> float:
-    expected_lean = expected_trunk_lean_geometric(anthro)
+    expected_lean = _expected_pitch(rep)
     loaded = _loaded_samples(trajectory, _femur_length_cm(anthro))
 
     if loaded:
-        deviations = [abs(sample.trunk_pitch - expected_lean) for sample in loaded]
-        deviation = _percentile(deviations, WORST_PERCENTILE)
+        excess = _percentile([sample.trunk_pitch - expected_lean for sample in loaded], WORST_PERCENTILE)
     else:
-        deviation = abs(rep.trunk_pitch_at_bottom - expected_lean)
+        excess = rep.trunk_pitch_at_bottom - expected_lean
 
-    if deviation <= TRUNK_TOLERANCE_DEGREES:
-        return 1.0
-    return _clamp(
-        1.0 - (deviation - TRUNK_TOLERANCE_DEGREES) / TRUNK_DECAY_RANGE_DEGREES
-    )
+    if not (math.isfinite(excess) or math.isfinite(rep.hip_shoot_deg)):
+        return math.nan
+    lean_score = 1.0
+    if math.isfinite(excess) and excess > TRUNK_TOLERANCE_DEGREES:
+        lean_score = _clamp(1.0 - (excess - TRUNK_TOLERANCE_DEGREES) / TRUNK_DECAY_RANGE_DEGREES)
+
+    shoot_score = 1.0
+    if math.isfinite(rep.hip_shoot_deg) and rep.hip_shoot_deg > HIP_SHOOT_TOLERANCE_DEGREES:
+        shoot_score = _clamp(
+            1.0 - (rep.hip_shoot_deg - HIP_SHOOT_TOLERANCE_DEGREES) / HIP_SHOOT_DECAY_RANGE_DEGREES
+        )
+    return min(lean_score, shoot_score)
 
 
 def _score_single_knee(deviation_deg: float) -> float:
-    abs_deviation = abs(deviation_deg)
-    if abs_deviation <= KNEE_PERFECT_ZONE_DEGREES:
+    if math.isnan(deviation_deg):
+        return math.nan
+    if deviation_deg < 0.0:
+        # Knees out past the toes: only a long way out is a fault.
+        lateral = -deviation_deg
+        if lateral <= KNEE_LATERAL_TOLERANCE_DEGREES:
+            return 1.0
+        return _clamp(1.0 - (lateral - KNEE_LATERAL_TOLERANCE_DEGREES) / KNEE_DECAY_RANGE_DEGREES)
+    if deviation_deg <= KNEE_PERFECT_ZONE_DEGREES:
         return 1.0
     return _clamp(
-        1.0 - (abs_deviation - KNEE_PERFECT_ZONE_DEGREES) / KNEE_DECAY_RANGE_DEGREES
+        1.0 - (deviation_deg - KNEE_PERFECT_ZONE_DEGREES) / KNEE_DECAY_RANGE_DEGREES
     )
 
 
@@ -188,17 +233,14 @@ def score_knee_tracking(
     loaded = _loaded_samples(trajectory, _femur_length_cm(anthro))
 
     if loaded:
-        valgus_l = _percentile(
-            [abs(sample.knee_valgus_l) for sample in loaded], WORST_PERCENTILE
-        )
-        valgus_r = _percentile(
-            [abs(sample.knee_valgus_r) for sample in loaded], WORST_PERCENTILE
-        )
+        valgus_l = _percentile([sample.knee_valgus_l for sample in loaded], WORST_PERCENTILE)
+        valgus_r = _percentile([sample.knee_valgus_r for sample in loaded], WORST_PERCENTILE)
     else:
         valgus_l = rep.knee_valgus_l
         valgus_r = rep.knee_valgus_r
 
-    return 0.5 * _score_single_knee(valgus_l) + 0.5 * _score_single_knee(valgus_r)
+    sides = [score for score in (_score_single_knee(valgus_l), _score_single_knee(valgus_r)) if math.isfinite(score)]
+    return sum(sides) / len(sides) if sides else math.nan
 
 
 def score_symmetry(
@@ -207,8 +249,14 @@ def score_symmetry(
     rom: dict,
     trajectory: RepTrajectory | None = None,
 ) -> float:
-    loaded = _loaded_samples(trajectory, _femur_length_cm(anthro))
+    if math.isfinite(rep.hip_shift_ratio):
+        shift = abs(rep.hip_shift_ratio)
+        if shift <= SYMMETRY_TOLERANCE_RATIO:
+            return 1.0
+        return _clamp(1.0 - (shift - SYMMETRY_TOLERANCE_RATIO) / SYMMETRY_DECAY_RANGE_RATIO)
 
+    # Without a measured hip shift, fall back to pelvic level at the bottom.
+    loaded = _loaded_samples(trajectory, _femur_length_cm(anthro))
     if loaded:
         asymmetry_cm = _percentile(
             [abs(sample.hip_y_l - sample.hip_y_r) for sample in loaded],
@@ -217,6 +265,8 @@ def score_symmetry(
     else:
         asymmetry_cm = abs(rep.hip_y_l_at_bottom - rep.hip_y_r_at_bottom)
 
+    if math.isnan(asymmetry_cm):
+        return math.nan
     if asymmetry_cm <= SYMMETRY_TOLERANCE_CM:
         return 1.0
     return _clamp(
@@ -227,10 +277,10 @@ def score_symmetry(
 def _score_phase_duration(
     duration_seconds: float, ideal_min: float, ideal_max: float
 ) -> float:
-    # A missing or non-positive duration means the phase was never timed.
-    # Scoring it zero would punish the athlete for a pipeline gap.
-    if duration_seconds <= 0.0:
-        return 1.0
+    # A missing or non-positive duration means the phase was never timed:
+    # unmeasured, neither a fault nor a perfect score.
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0.0:
+        return math.nan
     if ideal_min <= duration_seconds <= ideal_max:
         return 1.0
 
@@ -255,7 +305,8 @@ def score_tempo(
     )
     # Weakest phase wins: a dive-bombed descent is a bad rep however clean the
     # ascent was, and averaging would let the good half hide it.
-    return min(eccentric, concentric)
+    timed = [score for score in (eccentric, concentric) if math.isfinite(score)]
+    return min(timed) if timed else math.nan
 
 
 def score_rep(
@@ -270,12 +321,24 @@ def score_rep(
     symmetry = score_symmetry(rep, anthro, rom, trajectory)
     tempo = score_tempo(rep, anthro, rom, trajectory)
 
+    # Unmeasured dimensions are left out of the composite, never scored
+    # perfect: a rep whose knees were not seen earns no knee credit.
+    weighted = [
+        (score, weight)
+        for score, weight in (
+            (depth, WEIGHT_DEPTH),
+            (trunk_control, WEIGHT_TRUNK),
+            (knee_tracking, WEIGHT_KNEES),
+            (symmetry, WEIGHT_SYMMETRY),
+            (tempo, WEIGHT_TEMPO),
+        )
+        if math.isfinite(score)
+    ]
+    total_weight = sum(weight for _, weight in weighted)
     composite = (
-        depth * WEIGHT_DEPTH
-        + trunk_control * WEIGHT_TRUNK
-        + knee_tracking * WEIGHT_KNEES
-        + symmetry * WEIGHT_SYMMETRY
-        + tempo * WEIGHT_TEMPO
+        sum(score * weight for score, weight in weighted) / total_weight
+        if total_weight > 0.0
+        else math.nan
     )
 
     return RepScore(
@@ -302,11 +365,13 @@ def score_set(
         score_rep(rep, anthro, rom, trajectory)
         for rep, trajectory in zip(reps, trajectories)
     ]
-    composites = [score.composite_score for score in per_rep_scores]
+    # Reps with nothing measurable are left out of the set statistics.
+    scored = [score for score in per_rep_scores if math.isfinite(score.composite_score)] or per_rep_scores
+    composites = [score.composite_score for score in scored]
 
     mean_score = sum(composites) / len(composites)
-    best = max(per_rep_scores, key=lambda s: s.composite_score)
-    worst = min(per_rep_scores, key=lambda s: s.composite_score)
+    best = max(scored, key=lambda s: s.composite_score)
+    worst = min(scored, key=lambda s: s.composite_score)
 
     trend_slope = _compute_trend_slope(composites)
 

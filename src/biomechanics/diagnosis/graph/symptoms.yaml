@@ -1,58 +1,185 @@
-excessive_trunk_lean:
-  description: "Trunk pitches forward excessively at the bottom position"
-  detection:
-    feature: trunk_pitch_at_bottom
-    aggregation: mean
-  expected_value_fn: expected_trunk_lean_geometric
-  severity_scoring: relative_excess
-  threshold: 5.0
-  candidate_causes:
-    - { cause_id: anthropometric_femur_torso_ratio, prior: 0.25 }
-    - { cause_id: narrow_stance, prior: 0.20 }
-    - { cause_id: narrow_foot_angle, prior: 0.15 }
-    - { cause_id: limited_ankle_df, prior: 0.20 }
-    - { cause_id: limited_hip_flexion, prior: 0.10 }
-    - { cause_id: bracing_failure, prior: 0.10 }
+# Each symptom reads one per-rep feature (engine._extract_feature), aggregates it
+# over the set, and fires when the aggregate exceeds expected + threshold.
+#   measurement: what the feature is measured from (faults.observability) —
+#     vertical / frontal (observable on one camera), sagittal / lateral_travel
+#     (approximate on one camera), side_view / foot_contact (multi-camera only).
+#     Side-view squat judgements (trunk lean, hip shoot, balance, rep speed) are
+#     rig-only by product decision. Unobservable symptoms never fire.
+#   Priors are relative weights among a symptom's candidate causes (they sum to 1);
+#   they are expert estimates pending coach-labelled reps (FINDINGS.md D6).
 
-knee_not_tracking_toes:
-  description: "Knees drift medially instead of tracking over foot direction"
+excessive_trunk_lean:
+  description: "Trunk pitches further forward at the bottom than the shoulders-over-midfoot balance needs"
   detection:
-    feature: knee_valgus_max
-    aggregation: max
-  expected_value_fn: expected_knee_valgus_baseline
+    feature: excess_trunk_lean      # actual pitch - reference proportions' balanced pitch
+    aggregation: median
+  expected_value_fn: expected_zero
   severity_scoring: relative_excess
   threshold: 6.0
+  measurement: side_view
   candidate_causes:
-    - { cause_id: weak_hip_abductors, prior: 0.30 }
-    - { cause_id: foot_collapse_arch, prior: 0.20 }
-    - { cause_id: knee_track_cue, prior: 0.25 }
+    - { cause_id: anthropometric_femur_torso_ratio, prior: 0.25 }
+    - { cause_id: limited_ankle_df, prior: 0.20 }
+    - { cause_id: heel_elevation, prior: 0.10 }
+    - { cause_id: bracing_failure, prior: 0.15 }
+    - { cause_id: hip_dominant_initiation, prior: 0.15 }
     - { cause_id: narrow_stance, prior: 0.15 }
-    - { cause_id: weight_too_heavy, prior: 0.10 }
 
-asymmetric_depth:
-  description: "One hip drops noticeably lower than the other at bottom"
+hip_shoot:
+  description: "Hips rise faster than the chest out of the bottom (good-morning squat)"
   detection:
-    feature: hip_y_asymmetry
-    aggregation: mean
-  expected_value_fn: expected_hip_symmetry
+    feature: hip_shoot_deg
+    aggregation: median
+  expected_value_fn: expected_zero
   severity_scoring: relative_excess
-  threshold: 2.0
+  threshold: 6.0
+  measurement: side_view
   candidate_causes:
-    - { cause_id: unilateral_hip_mobility_limit, prior: 0.50 }
-    - { cause_id: weight_shift_cue, prior: 0.35 }
+    - { cause_id: quad_strength_limit, prior: 0.30 }
+    - { cause_id: weight_too_heavy, prior: 0.30 }
+    - { cause_id: bracing_failure, prior: 0.25 }
+    - { cause_id: hip_dominant_initiation, prior: 0.15 }
+
+knee_not_tracking_toes:
+  description: "Knees cave inside the toe line over the bottom and the way up"
+  detection:
+    feature: knee_valgus_max
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 6.0
+  measurement: frontal
+  candidate_causes:
+    - { cause_id: limited_ankle_df, prior: 0.20 }
+    - { cause_id: heel_elevation, prior: 0.10 }
+    - { cause_id: stance_toe_mismatch, prior: 0.15 }
+    - { cause_id: knee_track_cue, prior: 0.25 }
+    - { cause_id: weak_hip_abductors, prior: 0.15 }
     - { cause_id: weight_too_heavy, prior: 0.15 }
 
-depth_limit:
-  description: "Unable to achieve hip-below-knee depth (parallel or deeper)"
+hip_shift:
+  description: "Pelvis slides toward one side during the rep"
   detection:
-    feature: depth_deficit
-    aggregation: last
-  expected_value_fn: expected_depth_zero
+    feature: hip_shift_abs
+    aggregation: median
+  expected_value_fn: expected_zero
   severity_scoring: relative_excess
-  threshold: 0.5
+  threshold: 0.08
+  measurement: lateral_travel
   candidate_causes:
-    - { cause_id: limited_ankle_df, prior: 0.25 }
-    - { cause_id: limited_hip_flexion, prior: 0.25 }
+    - { cause_id: foot_placement_asymmetry, prior: 0.20 }
+    - { cause_id: weight_shift_cue, prior: 0.25 }
+    - { cause_id: unilateral_ankle_df, prior: 0.20 }
+    - { cause_id: unilateral_hip_mobility_limit, prior: 0.20 }
+    - { cause_id: strength_asymmetry, prior: 0.15 }
+
+depth_limit:
+  description: "Hip does not reach knee height (parallel)"
+  detection:
+    feature: depth_deficit          # femur lengths the hip stays above the knee
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 0.08
+  measurement: vertical
+  candidate_causes:
+    - { cause_id: limited_ankle_df, prior: 0.20 }
+    - { cause_id: heel_elevation, prior: 0.10 }
+    - { cause_id: limited_hip_flexion, prior: 0.15 }
+    - { cause_id: hip_anatomy, prior: 0.10 }
+    - { cause_id: narrow_stance, prior: 0.10 }
+    - { cause_id: narrow_foot_angle, prior: 0.05 }
+    - { cause_id: depth_cue_unfamiliar, prior: 0.15 }
+    - { cause_id: weight_too_heavy, prior: 0.15 }
+
+heel_rise:
+  description: "Heels lift off the floor during the rep"
+  detection:
+    feature: heel_rise_max_cm
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 1.5
+  measurement: foot_contact
+  candidate_causes:
+    - { cause_id: limited_ankle_df, prior: 0.30 }
+    - { cause_id: heel_elevation, prior: 0.15 }
+    - { cause_id: knee_dominant_initiation, prior: 0.20 }
+    - { cause_id: weight_forward_cue, prior: 0.20 }
     - { cause_id: narrow_stance, prior: 0.15 }
-    - { cause_id: narrow_foot_angle, prior: 0.15 }
-    - { cause_id: depth_cue_unfamiliar, prior: 0.20 }
+
+balance_forward:
+  description: "Weight drifts onto the toes at the bottom"
+  detection:
+    feature: balance_forward
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 0.15
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: weight_forward_cue, prior: 0.35 }
+    - { cause_id: knee_dominant_initiation, prior: 0.25 }
+    - { cause_id: limited_ankle_df, prior: 0.20 }
+    - { cause_id: weight_too_heavy, prior: 0.20 }
+
+velocity_loss:
+  description: "Rep speed drops sharply across the set — the set is near failure"
+  detection:
+    feature: velocity_loss_pct
+    aggregation: tail_mean          # the set's last two reps, not its single noisiest one
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 20.0
+  measurement: side_view
+  candidate_causes:
+    - { cause_id: weight_too_heavy, prior: 1.00 }
+
+incomplete_lockout:
+  description: "Athlete does not stand all the way up between reps"
+  detection:
+    feature: lockout_deficit_ratio
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 0.05
+  measurement: vertical
+  candidate_causes:
+    - { cause_id: lockout_cue, prior: 0.60 }
+    - { cause_id: weight_too_heavy, prior: 0.40 }
+
+fast_descent:
+  description: "Athlete drops into the bottom instead of controlling the descent"
+  detection:
+    feature: fast_descent_s         # seconds shorter than a controlled descent
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 0.05
+  measurement: vertical
+  candidate_causes:
+    - { cause_id: eccentric_control_cue, prior: 1.00 }
+
+head_cranked_up:
+  description: "Neck extends sharply — looking up at the ceiling at the bottom"
+  detection:
+    feature: neck_extension_deg
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 20.0
+  measurement: sagittal
+  candidate_causes:
+    - { cause_id: gaze_cue, prior: 1.00 }
+
+uneven_setup:
+  description: "Feet set up staggered or flared unevenly before the rep"
+  detection:
+    feature: setup_asymmetry        # max of stagger (ankle-to-toe lengths) and toe-out difference / 60°
+    aggregation: median
+  expected_value_fn: expected_zero
+  severity_scoring: relative_excess
+  threshold: 0.12
+  measurement: sagittal
+  candidate_causes:
+    - { cause_id: foot_placement_asymmetry, prior: 1.00 }

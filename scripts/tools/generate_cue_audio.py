@@ -1,491 +1,303 @@
-"""
-Generate pre-cached coaching cue audio using the OpenAI Realtime API.
+"""Speak the reviewed coaching cue lines with ElevenLabs Flash v2.5, in Nova's live voice.
 
-Each cue has a detailed scenario prompt that describes the coaching situation,
-letting the model naturally produce short, varied cues. 10 variants per cue
-give natural variety during workouts.
-
-After generation, builds an HTML review page (src/assets/cues/review.html)
-where you can see every prompt sent and listen to each resulting variant.
+Reads src/assets/cue_text/cues.json (drafted by draft_cue_text.py, then reviewed by a
+person) and writes src/assets/cues/wav/{cue_key}_{variant}.wav: 24 kHz mono 16-bit PCM,
+the format AudioCueService loads. A manifest beside the clips records the line and voice
+each clip was spoken from, so re-runs only re-speak lines that changed. Finishes with a
+review page (src/assets/cues/review.html) to listen to every clip.
 
 Usage:
-    python scripts/generate_cue_audio.py
-    python scripts/generate_cue_audio.py --variants 5 --voice cedar
+    python scripts/tools/generate_cue_audio.py                 # new or edited lines only
+    python scripts/tools/generate_cue_audio.py --force         # re-speak everything
+    python scripts/tools/generate_cue_audio.py --cue knees_out_left
+    python scripts/tools/generate_cue_audio.py --variants 3
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
+import html
+import io
 import json
 import os
-import struct
 import sys
-from collections import OrderedDict
+import wave
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
+import aiohttp
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / ".env")
 
-import websockets
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+load_dotenv(REPO_ROOT / ".env")
 
-REALTIME_WS_URL = "wss://api.openai.com/v1/realtime"
-
-# ── System prompt for the Realtime API session ──────────────────────────
-SYSTEM_PROMPT = (
-    "You are a coach that is friendly and funny, and you are standing right next "
-    "to your athlete on the gym floor. You are generating single coaching cues — "
-    "1 to 3 words MAX, NEVER more than 3 words. Each cue must take less than 1.5 seconds to say. "
-    "Only say ONE short cue — never chain multiple cues together. "
-    "Be creative, nice, supportive, and encouraging. "
-    "This is the situation that is currently happening. "
+# The live agent's neutral ElevenLabs settings, so cached cues and live speech
+# are one voice.
+from affect.tts_adapters import ELEVENLABS_DEFAULT_SIMILARITY  # noqa: E402
+from affect.voice_style import (  # noqa: E402
+    ELEVENLABS_DEFAULT_SPEED,
+    ELEVENLABS_DEFAULT_STABILITY,
 )
 
-# ── Per-cue scenario prompts ───────────────────────────────────────────
-# Each prompt describes the exact coaching scenario so the model naturally
-# produces a varied but contextually correct cue.
+CUES_JSON_PATH = REPO_ROOT / "src" / "assets" / "cue_text" / "cues.json"
+CUES_DIR = REPO_ROOT / "src" / "assets" / "cues"
+CUES_WAV_DIR = CUES_DIR / "wav"
+MANIFEST_PATH = CUES_DIR / "manifest.json"
+REVIEW_PAGE_PATH = CUES_DIR / "review.html"
 
-CUE_PROMPTS = OrderedDict()
+ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+TTS_MODEL = "eleven_flash_v2_5"
+# Raw 16-bit PCM at the loader's rate — no resampling.
+OUTPUT_FORMAT = "pcm_24000"
+# The ElevenLabs plugin's default, used by the live agent when
+# ELEVENLABS_VOICE_ID is unset.
+DEFAULT_VOICE_ID = "hpp4J3VqNfWAUOO0d1Us"
+DEFAULT_VARIANTS = 3
+REQUEST_TIMEOUT_S = 60
 
-# ── Squat corrections ──
-CUE_PROMPTS["knees_out"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. His knees are caving in during the "
-    "ascent. "
-)
-CUE_PROMPTS["chest_up"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. His chest is dropping forward and "
-    "his upper back is starting to round as he comes out of the hole."
-)
-CUE_PROMPTS["deeper"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. He's cutting his reps short and not "
-    "hitting parallel — he needs to get lower. "
-)
-CUE_PROMPTS["heels_down"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. His heels are coming off the ground "
-    "and he's shifting forward onto his toes. "
-)
-CUE_PROMPTS["even_it_out"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. He's shifting to one side — his "
-    "squat is asymmetric and he's favoring his right leg."
-)
-CUE_PROMPTS["slow_down"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. He's dropping too fast into the hole "
-    "and losing control of the eccentric."
-)
-CUE_PROMPTS["brace"] = (
-    "You are giving your athlete "
-    "corrections during their set of squats. His core is soft — he's not bracing "
-    "properly and his midsection is collapsing under the load."
-)
+# Must match agent.services.audio_cue_service: it reads the clips with this
+# format hardcoded, so anything else plays as noise.
+SAMPLE_RATE = 24000
+NUM_CHANNELS = 1
+SAMPLE_WIDTH_BYTES = 2
 
-# ── Intra-set stance / toe-out coaching ──
-# The two _explain cues run long on purpose: they are spoken once, right
-# after "chest up", to tell the lifter WHY they are about to be asked to
-# move their feet. The rest are polling cues fired every 1.5s.
-CUE_PROMPTS["stance_explain"] = (
-    "Your athlete keeps pitching forward in the squat, and you can see the "
-    "cause is their stance being too narrow. Tell them in ONE short sentence "
-    "that the lean is coming from their stance and that they should step "
-    "their feet out wider."
-)
-CUE_PROMPTS["stance_wider"] = (
-    "Your athlete is standing between reps adjusting their stance, and their "
-    "feet are still a bit too close together. Nudge them to widen slightly."
-)
-CUE_PROMPTS["stance_narrower"] = (
-    "Your athlete is standing between reps adjusting their stance and has "
-    "overshot — their feet are now too wide. Nudge them to bring it in a bit."
-)
-CUE_PROMPTS["toe_out_explain"] = (
-    "Your athlete keeps pitching forward in the squat, and you can see the "
-    "cause is their toes pointing too straight ahead. Tell them in ONE short "
-    "sentence that the lean is coming from their foot angle and that they "
-    "should turn their toes out more."
-)
-CUE_PROMPTS["toe_out_more"] = (
-    "Your athlete is standing between reps adjusting their feet, and their "
-    "toes still need to point out a bit further. Nudge them to turn out more."
-)
-CUE_PROMPTS["toe_out_less"] = (
-    "Your athlete is standing between reps adjusting their feet and has "
-    "overshot — their toes are turned out too far. Nudge them to ease back."
-)
-CUE_PROMPTS["adjust_good"] = (
-    "Your athlete has just moved their feet into exactly the position you "
-    "asked for. Confirm it and tell them to hold that."
-)
 
-# Cues whose response needs different length rules than the 1-3 word default.
-# Passed per-response, which overrides the session instructions.
-EXPLAIN_INSTRUCTIONS = (
-    "You are a coach standing next to your athlete on the gym floor. Say ONE "
-    "natural sentence of 10 to 16 words that names the cause of their problem "
-    "and the fix. Warm and direct, no filler, no lists."
-)
+async def _synthesize(
+    session: aiohttp.ClientSession, api_key: str, voice_id: str, payload: dict,
+) -> bytes:
+    async with session.post(
+        ELEVENLABS_TTS_URL.format(voice_id=voice_id),
+        params={"output_format": OUTPUT_FORMAT},
+        headers={"xi-api-key": api_key},
+        json=payload,
+        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S),
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError(f"HTTP {response.status}: {(await response.text())[:300]}")
+        return await response.read()
 
-CUE_INSTRUCTION_OVERRIDES = {
-    "stance_explain": EXPLAIN_INSTRUCTIONS,
-    "toe_out_explain": EXPLAIN_INSTRUCTIONS,
-}
 
-# ── Deadlift corrections ──
-CUE_PROMPTS["hips_through"] = (
-    "You are giving your athlete "
-    "corrections during their set of deadlifts. He's finishing the pull but his "
-    "hips are staying behind — he's not driving them through to full lockout. "
-   
-)
-CUE_PROMPTS["flat_back"] = (
-    "You are giving your athlete "
-    "corrections during their set of deadlifts. His back is rounding during the "
-    "pull — his spine is flexing and he's losing his neutral position."
-)
-CUE_PROMPTS["lockout"] = (
-    "You are giving your athlete "
-    "corrections during their set of deadlifts. He's getting the bar to the top "
-    "but not fully locking out — his hips and knees aren't finishing."
-)
+def _load_manifest() -> dict[str, dict]:
+    if not MANIFEST_PATH.exists():
+        return {}
+    return json.loads(MANIFEST_PATH.read_text())
 
-# ── Positive reinforcement ──
-CUE_PROMPTS["good_rep"] = (
-    "Your athlete just "
-    "completed a solid rep with good form. Give them a short (1-3 words MAX) "
-    "positive reinforcement — let them know that was a good one."
-)
-CUE_PROMPTS["great_depth"] = (
-    "Your athlete just "
-    "hit excellent depth on their squat — well below parallel with great control. "
-    "Give them a short (1-3 words MAX) positive cue acknowledging that depth."
-)
-CUE_PROMPTS["strong"] = (
-    "Your athlete just "
-    "powered through a heavy rep that looked really strong and explosive. Give "
-    "them a short (1-3 words MAX) hype cue — pump them up."
-)
-CUE_PROMPTS["clean"] = (
-    "Your athlete just "
-    "executed a rep with textbook technique — everything was dialed in. Give "
-    "them a short (1-3 words MAX) positive cue about how clean that rep was."
-)
-CUE_PROMPTS["perfect"] = (
-    "Your athlete just "
-    "performed a flawless rep — perfect depth, perfect form, great bar speed. "
-    "Give them a short (1-3 words MAX) enthusiastic cue to celebrate that rep."
-)
 
-# ── Rep counts ──
-_NUM_WORDS = {
-    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
-    11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
-    16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
-}
-for i in range(1, 21):
-    _word = _NUM_WORDS[i]
-    CUE_PROMPTS[f"rep_{i}"] = (
-        f"Say the word '{_word}' out loud with energy and authority, "
-        f"like a coach counting rep {i} of a set. Just say '{_word}' — "
-        f"nothing else, no other numbers, just the single word '{_word}'."
+def load_cue_lines(path: Path) -> dict[str, list[str]]:
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must map cue keys to lists of lines")
+    for cue_key, lines in data.items():
+        if not isinstance(lines, list) or not lines or not all(
+            isinstance(line, str) and line.strip() for line in lines
+        ):
+            raise ValueError(f"{path}: '{cue_key}' needs a non-empty list of non-empty lines")
+    return data
+
+
+def wav_filename(cue_key: str, variant: int) -> str:
+    return f"{cue_key}_{variant}.wav"
+
+
+def parse_wav_filename(filename: str) -> tuple[str, int] | None:
+    """Mirror of AudioCueService._load_from_disk: key, then the number after the last underscore."""
+    if not filename.endswith(".wav"):
+        return None
+    stem = filename[:-len(".wav")]
+    cue_key, separator, variant = stem.rpartition("_")
+    if not separator or not cue_key or not variant.isdigit():
+        return None
+    return cue_key, int(variant)
+
+
+def stale_variant_files(cue_key: str, variant_count: int, filenames: list[str]) -> list[str]:
+    """Clips of this key beyond the current variant count — e.g. old voice takes
+    that would otherwise keep playing at random alongside the new ones."""
+    stale = []
+    for filename in filenames:
+        parsed = parse_wav_filename(filename)
+        if parsed is not None and parsed[0] == cue_key and parsed[1] >= variant_count:
+            stale.append(filename)
+    return sorted(stale)
+
+
+def needs_synthesis(manifest_entry: dict | None, text: str, voice_id: str, force: bool) -> bool:
+    if force or manifest_entry is None:
+        return True
+    return (
+        manifest_entry.get("text") != text
+        or manifest_entry.get("voice_id") != voice_id
+        or manifest_entry.get("model") != TTS_MODEL
     )
 
-# Category groupings for the review page
-CUE_CATEGORIES = OrderedDict([
-    ("Squat Corrections", ["knees_out", "chest_up", "deeper", "heels_down", "even_it_out", "slow_down", "brace"]),
-    ("Deadlift Corrections", ["hips_through", "flat_back", "lockout"]),
-    ("Positive Reinforcement", ["good_rep", "great_depth", "strong", "clean", "perfect"]),
-    ("Rep Counts", [f"rep_{i}" for i in range(1, 21)]),
-])
 
-
-# ── Generation ──────────────────────────────────────────────────────────
-
-async def generate_all_cues(voice: str, model: str, variants: int, output_dir: Path):
-    """Connect to Realtime API and generate all cue variants."""
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("ERROR: OPENAI_API_KEY not set")
-        return
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    total = len(CUE_PROMPTS) * variants
-    generated = 0
-    skipped = 0
-
-    print(f"Generating {total} cue audio files ({len(CUE_PROMPTS)} cues x {variants} variants)")
-    print(f"Voice: {voice} | Model: {model}")
-    print(f"Output: {output_dir}\n")
-
-    url = f"{REALTIME_WS_URL}?model={model}"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "OpenAI-Beta": "realtime=v1",
+def build_tts_payload(text: str) -> dict:
+    return {
+        "text": text,
+        "model_id": TTS_MODEL,
+        "voice_settings": {
+            "stability": ELEVENLABS_DEFAULT_STABILITY,
+            "similarity_boost": ELEVENLABS_DEFAULT_SIMILARITY,
+            "speed": ELEVENLABS_DEFAULT_SPEED,
+        },
     }
 
-    async with websockets.connect(url, additional_headers=headers) as ws:
-        # Wait for session.created
-        msg = json.loads(await ws.recv())
-        assert msg["type"] == "session.created", f"Expected session.created, got {msg['type']}"
-        print("Connected to Realtime API\n")
 
-        # Configure session
-        await ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "voice": voice,
-                "modalities": ["audio", "text"],
-                "instructions": SYSTEM_PROMPT,
-                "turn_detection": None,
-            }
-        }))
-
-        # Wait for session.updated
-        while True:
-            msg = json.loads(await ws.recv())
-            if msg["type"] == "session.updated":
-                break
-
-        for cue_key, prompt in CUE_PROMPTS.items():
-            for variant in range(variants):
-                filepath = output_dir / f"{cue_key}_{variant}.pcm"
-
-                # Skip if already generated (allows resuming interrupted runs)
-                if filepath.exists() and filepath.stat().st_size > 0:
-                    skipped += 1
-                    generated += 1
-                    continue
-
-                # Send the scenario prompt as a user message
-                item_id = f"item_{cue_key}_{variant}"
-                await ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {
-                        "id": item_id,
-                        "type": "message",
-                        "role": "user",
-                        "content": [{
-                            "type": "input_text",
-                            "text": prompt,
-                        }]
-                    }
-                }))
-
-                # Request response. A per-response instruction override lets
-                # the longer explanation cues escape the 1-3 word session rule.
-                response_config = {"modalities": ["audio", "text"]}
-                override = CUE_INSTRUCTION_OVERRIDES.get(cue_key)
-                if override:
-                    response_config["instructions"] = override
-                await ws.send(json.dumps({
-                    "type": "response.create",
-                    "response": response_config,
-                }))
-
-                # Collect audio deltas until response.done
-                audio_chunks = []
-                response_text = ""
-                response_item_id = None
-                while True:
-                    msg = json.loads(await ws.recv())
-                    msg_type = msg["type"]
-
-                    if msg_type == "response.audio.delta":
-                        audio_chunks.append(base64.b64decode(msg["delta"]))
-                    elif msg_type == "response.audio_transcript.delta":
-                        response_text += msg.get("delta", "")
-                    elif msg_type == "response.output_item.added":
-                        response_item_id = msg.get("item", {}).get("id")
-                    elif msg_type == "response.done":
-                        break
-                    elif msg_type == "error":
-                        print(f"  ERROR on {cue_key} v{variant}: {msg.get('error', msg)}")
-                        break
-
-                # Save audio bytes
-                if audio_chunks:
-                    audio_bytes = b"".join(audio_chunks)
-                    filepath.write_bytes(audio_bytes)
-                    generated += 1
-                    transcript_str = f' "{response_text.strip()}"' if response_text.strip() else ""
-                    print(f"  [{generated}/{total}] {cue_key} v{variant} —{transcript_str} ({len(audio_bytes):,} bytes)")
-                else:
-                    generated += 1
-                    print(f"  [{generated}/{total}] {cue_key} v{variant} — FAILED (no audio)")
-
-                # Delete conversation items to prevent context buildup
-                for del_id in [item_id, response_item_id]:
-                    if del_id:
-                        await ws.send(json.dumps({
-                            "type": "conversation.item.delete",
-                            "item_id": del_id,
-                        }))
-
-                await asyncio.sleep(0.05)
-
-    if skipped:
-        print(f"\nSkipped {skipped} existing files (delete to regenerate)")
-    print(f"Done! {generated} cue files in {output_dir}")
+def pcm_to_wav_bytes(pcm_bytes: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(NUM_CHANNELS)
+        wav_file.setsampwidth(SAMPLE_WIDTH_BYTES)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm_bytes)
+    return buffer.getvalue()
 
 
-# ── Review page ─────────────────────────────────────────────────────────
-
-def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
-    """Convert raw PCM bytes to a WAV file in memory."""
-    data_size = len(pcm_bytes)
-    header = struct.pack(
-        '<4sI4s4sIHHIIHH4sI',
-        b'RIFF',
-        36 + data_size,
-        b'WAVE',
-        b'fmt ',
-        16,
-        1,  # PCM format
-        channels,
-        sample_rate,
-        sample_rate * channels * sample_width,
-        channels * sample_width,
-        sample_width * 8,
-        b'data',
-        data_size,
-    )
-    return header + pcm_bytes
-
-
-def build_review_page(output_dir: Path, variants: int, voice: str, model: str):
-    """Build an HTML page to review all generated cues with playback."""
-
-    print("\nBuilding review page...")
-
-    # Convert PCM files to WAV for browser playback
-    wav_dir = output_dir / "wav"
-    wav_dir.mkdir(exist_ok=True)
-
-    for pcm_file in output_dir.glob("*.pcm"):
-        wav_file = wav_dir / f"{pcm_file.stem}.wav"
-        if not wav_file.exists() or wav_file.stat().st_mtime < pcm_file.stat().st_mtime:
-            pcm_bytes = pcm_file.read_bytes()
-            wav_file.write_bytes(pcm_to_wav(pcm_bytes))
-
-    # Build cue rows grouped by category
-    cue_rows = ""
-    for category, keys in CUE_CATEGORIES.items():
-        cue_rows += f'<tr class="category-header"><td colspan="{variants + 2}">{category}</td></tr>\n'
-        for key in keys:
-            prompt = CUE_PROMPTS.get(key, "?")
-            # Escape HTML in prompt
-            prompt_escaped = prompt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            players = ""
-            for v in range(variants):
-                wav_path = f"wav/{key}_{v}.wav"
-                wav_full = wav_dir / f"{key}_{v}.wav"
-                if wav_full.exists():
-                    players += f'<td><button onclick="playAudio(\'{wav_path}\', this)">&#9654; v{v}</button></td>'
-                else:
-                    players += '<td class="missing">—</td>'
-            cue_rows += (
-                f'<tr>'
-                f'<td class="cue-key">{key}</td>'
-                f'<td class="prompt">{prompt_escaped}</td>'
-                f'{players}'
-                f'</tr>\n'
-            )
-
-    variant_headers = "".join(f"<th>v{v}</th>" for v in range(variants))
-
-    html = f"""<!DOCTYPE html>
+def build_review_page(
+    cue_lines: dict[str, list[str]], variant_count: int, voice_id: str, existing_files: set[str],
+) -> str:
+    rows = []
+    for cue_key, lines in cue_lines.items():
+        cells = []
+        for variant, line in enumerate(lines[:variant_count]):
+            filename = wav_filename(cue_key, variant)
+            if filename in existing_files:
+                player = (
+                    f'<button onclick="playClip(\'wav/{html.escape(filename)}\', this)">'
+                    f'&#9654;</button>'
+                )
+            else:
+                player = '<span class="missing">missing</span>'
+            cells.append(f"<td>{player} {html.escape(line)}</td>")
+        rows.append(f'<tr><td class="key">{html.escape(cue_key)}</td>{"".join(cells)}</tr>')
+    headers = "".join(f"<th>Take {variant + 1}</th>" for variant in range(variant_count))
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Cue Audio Review — {voice}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cue Audio Review</title>
 <style>
-  * {{ box-sizing: border-box; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 2rem; background: #0a0a0a; color: #e0e0e0; }}
-  h1 {{ color: #fff; margin-bottom: 0.5rem; }}
-  .meta {{ color: #888; margin-bottom: 1.5rem; font-size: 0.9rem; }}
-  .meta span {{ color: #aaa; }}
-  .system-prompt {{ background: #1a1a2e; border: 1px solid #333; border-radius: 8px; padding: 1rem; margin-bottom: 2rem; font-size: 0.85rem; white-space: pre-wrap; color: #ccc; }}
-  .system-prompt h3 {{ margin-top: 0; color: #7c8aff; }}
+  :root {{ --bg: #fafafa; --fg: #1a1a1a; --muted: #666; --line: #ddd; --accent: #1e7a46; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --bg: #0a0a0a; --fg: #e0e0e0; --muted: #888; --line: #222; --accent: #4ade80; }}
+  }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0;
+         padding: 16px; background: var(--bg); color: var(--fg); }}
+  p {{ color: var(--muted); }}
+  .wrap {{ overflow-x: auto; }}
   table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ padding: 8px 10px; text-align: left; border-bottom: 1px solid #1a1a1a; vertical-align: top; }}
-  th {{ background: #111; color: #999; font-size: 0.8rem; position: sticky; top: 0; z-index: 1; }}
-  .category-header td {{ background: #1a1a2e; color: #7c8aff; font-weight: 600; padding: 12px 10px; font-size: 0.95rem; }}
-  .cue-key {{ font-weight: 600; color: #fff; white-space: nowrap; width: 120px; }}
-  .prompt {{ color: #999; font-size: 0.8rem; line-height: 1.4; max-width: 500px; }}
-  .missing {{ color: #555; }}
-  button {{ background: #1e3a2f; color: #4ade80; border: 1px solid #2d5a3f; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.8rem; white-space: nowrap; }}
-  button:hover {{ background: #2d5a3f; }}
-  button.playing {{ background: #4ade80; color: #000; }}
+  th, td {{ padding: 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }}
+  .key {{ font-weight: 600; white-space: nowrap; }}
+  .missing {{ color: var(--muted); }}
+  button {{ background: none; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px;
+            padding: 2px 8px; cursor: pointer; }}
+  button.playing {{ background: var(--accent); color: var(--bg); }}
 </style>
 </head>
 <body>
 <h1>Cue Audio Review</h1>
-<div class="meta">
-  Voice: <span>{voice}</span> &nbsp;|&nbsp; Model: <span>{model}</span> &nbsp;|&nbsp;
-  Variants: <span>{variants}</span> &nbsp;|&nbsp; Cues: <span>{len(CUE_PROMPTS)}</span>
-</div>
-<div class="system-prompt">
-  <h3>System Prompt (Realtime API Session)</h3>{SYSTEM_PROMPT}
-</div>
+<p>ElevenLabs {TTS_MODEL} · voice {html.escape(voice_id)} · {len(cue_lines)} cues · lines from
+src/assets/cue_text/cues.json</p>
+<div class="wrap">
 <table>
-<thead>
-  <tr><th>Cue Key</th><th>Prompt Sent</th>{variant_headers}</tr>
-</thead>
+<thead><tr><th>Cue</th>{headers}</tr></thead>
 <tbody>
-{cue_rows}
+{chr(10).join(rows)}
 </tbody>
 </table>
+</div>
 <script>
 let currentAudio = null;
-let currentBtn = null;
-function playAudio(path, btn) {{
-  if (currentAudio) {{ currentAudio.pause(); currentAudio = null; }}
-  if (currentBtn) {{ currentBtn.classList.remove('playing'); currentBtn = null; }}
-  const audio = new Audio(path);
-  audio.onended = () => {{ btn.classList.remove('playing'); currentAudio = null; currentBtn = null; }};
-  btn.classList.add('playing');
-  currentBtn = btn;
-  currentAudio = audio;
-  audio.play();
+let currentButton = null;
+function playClip(path, button) {{
+  if (currentAudio) {{ currentAudio.pause(); }}
+  if (currentButton) {{ currentButton.classList.remove("playing"); }}
+  currentAudio = new Audio(path);
+  currentButton = button;
+  button.classList.add("playing");
+  currentAudio.onended = () => button.classList.remove("playing");
+  currentAudio.play();
 }}
 </script>
 </body>
-</html>"""
-
-    review_path = output_dir / "review.html"
-    review_path.write_text(html)
-    print(f"Review page: {review_path}")
-    print(f"Open in browser: file://{review_path.resolve()}")
+</html>
+"""
 
 
-# ── Main ────────────────────────────────────────────────────────────────
+async def generate(
+    cue_lines: dict[str, list[str]], cue_keys: list[str], variant_count: int,
+    voice_id: str, api_key: str, force: bool,
+) -> int:
+    CUES_WAV_DIR.mkdir(parents=True, exist_ok=True)
+    manifest = _load_manifest()
+    existing = [path.name for path in CUES_WAV_DIR.glob("*.wav")]
+    written = skipped = failed = removed = 0
+    print(f"ElevenLabs {TTS_MODEL} · voice {voice_id} · {SAMPLE_RATE} Hz mono → {CUES_WAV_DIR}\n")
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate coaching cue audio via OpenAI Realtime API")
-    parser.add_argument("--variants", type=int, default=10, help="Variants per cue (default: 10)")
-    parser.add_argument("--voice", default=os.getenv("REALTIME_VOICE", "cedar"), help="Voice name (default: REALTIME_VOICE env or cedar)")
-    parser.add_argument("--model", default=os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview"), help="Realtime model")
+    try:
+        async with aiohttp.ClientSession() as session:
+            for cue_key in cue_keys:
+                for filename in stale_variant_files(cue_key, variant_count, existing):
+                    (CUES_WAV_DIR / filename).unlink()
+                    manifest.pop(filename, None)
+                    removed += 1
+                for variant, text in enumerate(cue_lines[cue_key][:variant_count]):
+                    filename = wav_filename(cue_key, variant)
+                    path = CUES_WAV_DIR / filename
+                    if path.exists() and not needs_synthesis(manifest.get(filename), text, voice_id, force):
+                        skipped += 1
+                        continue
+                    try:
+                        pcm_bytes = await _synthesize(session, api_key, voice_id, build_tts_payload(text))
+                    except Exception as error:
+                        print(f"  {filename:30} FAILED — {error}")
+                        failed += 1
+                        continue
+                    path.write_bytes(pcm_to_wav_bytes(pcm_bytes))
+                    manifest[filename] = {"text": text, "voice_id": voice_id, "model": TTS_MODEL}
+                    duration_s = len(pcm_bytes) / (SAMPLE_RATE * NUM_CHANNELS * SAMPLE_WIDTH_BYTES)
+                    print(f"  {filename:30} {duration_s:4.2f}s  \"{text}\"")
+                    written += 1
+    finally:
+        MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+
+    print(f"\n{written} written, {skipped} unchanged, {removed} stale removed, {failed} failed")
+    return 1 if failed else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--variants", type=int, default=DEFAULT_VARIANTS,
+                        help=f"clips per cue (default {DEFAULT_VARIANTS})")
+    parser.add_argument("--force", action="store_true", help="re-speak lines that are unchanged")
+    parser.add_argument("--cue", action="append", dest="cues", help="only this cue key (repeatable)")
     args = parser.parse_args()
 
-    output_dir = Path(__file__).parent.parent.parent / "src" / "assets" / "cues"
+    if not CUES_JSON_PATH.exists():
+        print(f"{CUES_JSON_PATH} not found — run scripts/tools/draft_cue_text.py and review it first")
+        return 1
+    cue_lines = load_cue_lines(CUES_JSON_PATH)
+    cue_keys = args.cues or list(cue_lines)
+    unknown = [key for key in cue_keys if key not in cue_lines]
+    if unknown:
+        print(f"Not in {CUES_JSON_PATH.name}: {', '.join(unknown)}")
+        return 1
 
-    asyncio.run(generate_all_cues(
-        voice=args.voice,
-        model=args.model,
-        variants=args.variants,
-        output_dir=output_dir,
-    ))
+    api_key = os.getenv("ELEVEN_API_KEY")
+    if not api_key:
+        print("ELEVEN_API_KEY is not set — add it to .env")
+        return 1
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID") or DEFAULT_VOICE_ID
 
-    build_review_page(output_dir, args.variants, args.voice, args.model)
+    status = asyncio.run(generate(cue_lines, cue_keys, args.variants, voice_id, api_key, args.force))
+
+    existing_files = {path.name for path in CUES_WAV_DIR.glob("*.wav")}
+    REVIEW_PAGE_PATH.write_text(build_review_page(cue_lines, args.variants, voice_id, existing_files))
+    print(f"Review page: file://{REVIEW_PAGE_PATH}")
+    return status
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

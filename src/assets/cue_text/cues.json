@@ -1,0 +1,332 @@
+{
+  "knees_out": [
+    "Spread the floor apart.",
+    "Drive your feet outward.",
+    "Push the floor sideways."
+  ],
+  "knees_out_left": [
+    "Left knee, push out.",
+    "Left knee, press outward.",
+    "Left knee, move out."
+  ],
+  "knees_out_right": [
+    "Right knee, push out.",
+    "Right knee, track outward.",
+    "Right knee, press outward."
+  ],
+  "chest_up": [
+    "Rise in one piece.",
+    "Come up as one.",
+    "Move upward as one."
+  ],
+  "heels_down": [
+    "Plant your whole foot.",
+    "Keep your foot flat.",
+    "Press heel, big toe."
+  ],
+  "heels_down_left": [
+    "Keep left heel down.",
+    "Plant your left heel.",
+    "Ground your left heel."
+  ],
+  "heels_down_right": [
+    "Keep right heel down.",
+    "Plant your right heel.",
+    "Press right heel down."
+  ],
+  "whole_foot": [
+    "Plant your whole foot.",
+    "Keep your heels grounded.",
+    "Keep your heels heavy."
+  ],
+  "even_it_out": [
+    "Stay centered, push evenly.",
+    "Both feet, equal push.",
+    "Press the floor evenly."
+  ],
+  "even_it_out_left": [
+    "Drifting left. Stay centered.",
+    "Sliding left. Stay centered.",
+    "Shifting left. Stay centered."
+  ],
+  "even_it_out_right": [
+    "Drifting right. Stay centered.",
+    "Sliding right. Stay centered.",
+    "Shifting right. Stay centered."
+  ],
+  "level_bar": [
+    "Keep the bar level.",
+    "Push evenly, stay level.",
+    "Same push, both feet."
+  ],
+  "deeper": [
+    "Sit a little lower.",
+    "Go a touch deeper.",
+    "Take it slightly lower."
+  ],
+  "square_feet": [
+    "Square up your feet.",
+    "Match your foot positions.",
+    "Set both feet evenly."
+  ],
+  "square_feet_left": [
+    "Left foot, match right.",
+    "Left foot, even up.",
+    "Left foot, square up."
+  ],
+  "square_feet_right": [
+    "Right foot, match left.",
+    "Right foot, mirror left.",
+    "Right foot, square up."
+  ],
+  "lockout": [
+    "Stand tall between reps.",
+    "Finish each rep upright.",
+    "Rise to full height."
+  ],
+  "slow_down": [
+    "Slow the way down.",
+    "Lower with more control.",
+    "Ease toward the floor."
+  ],
+  "same_depth": [
+    "Match that first depth.",
+    "Reach your starting depth.",
+    "As low as before."
+  ],
+  "drive": [
+    "Push the floor away.",
+    "Drive through the floor.",
+    "Press the floor down."
+  ],
+  "brace": [
+    "Big breath. Stand solid.",
+    "Breathe in. Hold firm.",
+    "Deep breath. Stay steady."
+  ],
+  "stance_explain": [
+    "That's coming from your narrow stance, so step your feet out wider.",
+    "That's happening because your feet are too close, so step them wider.",
+    "Your stance is too narrow here, so move your feet farther apart."
+  ],
+  "stance_wider": [
+    "Feet a little wider.",
+    "Widen your stance slightly.",
+    "Step slightly farther apart."
+  ],
+  "stance_narrower": [
+    "Bring your feet closer.",
+    "Narrow your stance slightly.",
+    "Feet in a little."
+  ],
+  "toe_out_explain": [
+    "That's coming from your toes pointing too straight ahead; turn them out more.",
+    "Your feet are aimed too far forward, so point your toes farther out.",
+    "Your toes point too straight ahead, so turn your feet out a little."
+  ],
+  "toe_out_more": [
+    "Toes out a little.",
+    "Turn toes out more.",
+    "Point toes farther out."
+  ],
+  "toe_out_less": [
+    "Turn toes in slightly.",
+    "Point toes more forward.",
+    "Ease toes inward."
+  ],
+  "adjust_good": [
+    "That's it. Stay there.",
+    "Good. Keep feet there.",
+    "Right there. Hold that."
+  ],
+  "good_rep": [
+    "That was solid.",
+    "Good rep.",
+    "Nicely done."
+  ],
+  "great_depth": [
+    "Good depth there.",
+    "That's the right depth.",
+    "You hit your depth."
+  ],
+  "strong": [
+    "Best rep so far.",
+    "That was your strongest.",
+    "Your best one yet."
+  ],
+  "clean": [
+    "That was clean.",
+    "Smooth all the way.",
+    "Nothing to fix there."
+  ],
+  "perfect": [
+    "That was just right.",
+    "That's a clean rep.",
+    "That rep was spot-on."
+  ],
+  "rep_1": [
+    "One!",
+    "One!",
+    "One!"
+  ],
+  "rep_2": [
+    "Two!",
+    "Two!",
+    "Two!"
+  ],
+  "rep_3": [
+    "Three!",
+    "Three!",
+    "Three!"
+  ],
+  "rep_4": [
+    "Four!",
+    "Four!",
+    "Four!"
+  ],
+  "rep_5": [
+    "Five!",
+    "Five!",
+    "Five!"
+  ],
+  "rep_6": [
+    "Six!",
+    "Six!",
+    "Six!"
+  ],
+  "rep_7": [
+    "Seven!",
+    "Seven!",
+    "Seven!"
+  ],
+  "rep_8": [
+    "Eight!",
+    "Eight!",
+    "Eight!"
+  ],
+  "rep_9": [
+    "Nine!",
+    "Nine!",
+    "Nine!"
+  ],
+  "rep_10": [
+    "Ten!",
+    "Ten!",
+    "Ten!"
+  ],
+  "rep_11": [
+    "Eleven!",
+    "Eleven!",
+    "Eleven!"
+  ],
+  "rep_12": [
+    "Twelve!",
+    "Twelve!",
+    "Twelve!"
+  ],
+  "rep_13": [
+    "Thirteen!",
+    "Thirteen!",
+    "Thirteen!"
+  ],
+  "rep_14": [
+    "Fourteen!",
+    "Fourteen!",
+    "Fourteen!"
+  ],
+  "rep_15": [
+    "Fifteen!",
+    "Fifteen!",
+    "Fifteen!"
+  ],
+  "rep_16": [
+    "Sixteen!",
+    "Sixteen!",
+    "Sixteen!"
+  ],
+  "rep_17": [
+    "Seventeen!",
+    "Seventeen!",
+    "Seventeen!"
+  ],
+  "rep_18": [
+    "Eighteen!",
+    "Eighteen!",
+    "Eighteen!"
+  ],
+  "rep_19": [
+    "Nineteen!",
+    "Nineteen!",
+    "Nineteen!"
+  ],
+  "rep_20": [
+    "Twenty!",
+    "Twenty!",
+    "Twenty!"
+  ],
+  "knees_out_fixed": [
+    "Good, feet pressing outward.",
+    "Nice, spreading the floor.",
+    "Good, outward foot pressure."
+  ],
+  "chest_up_fixed": [
+    "Good, everything rose together.",
+    "Nice, moving up together.",
+    "Yes, up as one."
+  ],
+  "heels_down_fixed": [
+    "Good, whole foot planted.",
+    "Nice, feet stayed flat.",
+    "Solid, whole foot grounded."
+  ],
+  "whole_foot_fixed": [
+    "Good, whole foot planted.",
+    "Nice, heels stayed down.",
+    "Solid, whole foot grounded."
+  ],
+  "even_it_out_fixed": [
+    "Good, even floor pressure.",
+    "Nice, both feet even.",
+    "That's it, staying centered."
+  ],
+  "level_bar_fixed": [
+    "Good, bar stayed level.",
+    "Nice, even push there.",
+    "Yes, both sides balanced."
+  ],
+  "deeper_fixed": [
+    "Good, that's your depth.",
+    "Nice, you got lower.",
+    "That's low enough. Good."
+  ],
+  "square_feet_fixed": [
+    "Good, feet stayed even.",
+    "Nice, feet still match.",
+    "Feet stayed square. Solid."
+  ],
+  "lockout_fixed": [
+    "Good, you're standing tall.",
+    "Nice, fully up now.",
+    "That's it, finishing tall."
+  ],
+  "slow_down_fixed": [
+    "Good, controlled way down.",
+    "Nice, steady going down.",
+    "That's a controlled descent."
+  ],
+  "same_depth_fixed": [
+    "Good, same depth again.",
+    "Nice, depth stayed consistent.",
+    "That's the right depth."
+  ],
+  "drive_fixed": [
+    "Good, driving up hard.",
+    "Nice, strong push upward.",
+    "Solid drive straight up."
+  ],
+  "tracking_lost": [
+    "Step back into view.",
+    "Move back into frame.",
+    "Back up into view."
+  ]
+}

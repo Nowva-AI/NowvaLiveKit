@@ -77,7 +77,7 @@ class RomanianDeadliftProfile(ExerciseProfile):
             ascending_vel_threshold=8.0,
             min_depth_cm=30.0,
             standing_return_cm=5.0,
-            min_rep_duration_frames=20,
+            min_rep_duration_s=0.667,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:
@@ -86,9 +86,9 @@ class RomanianDeadliftProfile(ExerciseProfile):
     def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
         return {"hip": angles.hip_asymmetry}
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "range_of_motion": "Hinge deeper — feel the hamstring stretch",
-            "back_rounding": "Keep spine neutral — chest up",
-            "bilateral_asymmetry": "Even out your hinge — weight balanced",
+            "range_of_motion": "rdl_hips_back",
+            "back_rounding": "rdl_flat_back",
+            "bilateral_asymmetry": "rdl_even",
         }

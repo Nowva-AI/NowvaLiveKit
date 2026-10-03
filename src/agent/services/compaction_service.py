@@ -1,24 +1,31 @@
 """
 Compaction Service — Pipeline-Style Rolling Context Summarization
 
-Events flow through a 4-stage pipeline: HOT → WARM → COLD → memory.md.
+Events flow through a 4-stage pipeline: HOT → WARM → COLD → MEMORY.
 Each event is compressed exactly once, at the moment it transitions to the
 next tier. No event lives in two tiers simultaneously.
 
-HOT:  Raw event buffer (last 60s, no LLM)
-WARM: Compressed facts (LLM compresses aged-out HOT events on transition)
-COLD: Further compressed summaries (LLM compresses WARM on overflow)
-memory.md: Final session memory on disk (LLM compresses COLD on overflow)
+HOT:    Raw event buffer (last 60s, no LLM)
+WARM:   Compressed facts (LLM compresses aged-out HOT events on transition)
+COLD:   Further compressed summaries (LLM compresses WARM on overflow)
+MEMORY: Rolling session memory (LLM folds COLD into it on overflow); stays in the
+        summary the agents read, and is also logged to memory.md on disk.
+
+Lasting coaching preferences the user states (humor, talk amount, cue style) are
+written to the athlete facts store, which every agent's instructions carry.
 """
 
 import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from agent.services.athlete_facts import set_preference
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +36,18 @@ _OUTPUT_COST_PER_M = 4.50
 # Pipeline thresholds
 HOT_WINDOW_SECONDS = 60.0
 WARM_TOKEN_LIMIT = 700
+
+PREFERENCE_TOPICS = ("humor", "talk_amount", "cue_style")
+_PREFERENCE_LINE_RE = re.compile(
+    r"^\s*PREFERENCE:\s*(?P<topic>[a-z_ ]+?)\s*=\s*(?P<value>.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PREFERENCE_RULE = (
+    "- If the user states a lasting preference about how they want to be coached — humor, "
+    "how much you talk, or how cues are given — also write it on its own line as "
+    "PREFERENCE: <topic> = <short value>, topic one of humor, talk_amount, cue_style. "
+    "Only preferences the user stated themselves.\n"
+)
 
 _HOT_TO_WARM_PROMPT = """\
 You are a context compaction agent for a real-time fitness coaching AI.
@@ -41,7 +60,7 @@ Rules:
 - Use timestamp ranges like [HH:MM:SS-HH:MM:SS] to group related events
 - Output plain text only, no section markers or headers
 - Be concise: merge related events, drop filler/silence/ambient noise
-"""
+""" + _PREFERENCE_RULE
 
 _WARM_TO_COLD_PROMPT = """\
 You are a context compaction agent for a real-time fitness coaching AI.
@@ -63,7 +82,7 @@ Rules:
 - Preserve exact numbers: weights, reps, sets, RPE, depth angles
 - NEVER drop safety-relevant information
 - Output plain text only, no section markers or headers
-"""
+""" + _PREFERENCE_RULE
 
 
 def _estimate_tokens(text: str) -> int:
@@ -76,7 +95,8 @@ class CompactionService:
     Events accumulate in a raw buffer (HOT). Every cycle, events older
     than 60s are compressed by the LLM and appended to WARM. When WARM
     overflows its token limit, it is compressed into COLD. When COLD
-    overflows, it is compressed and flushed to memory.md on disk.
+    overflows, it is folded into the rolling session MEMORY (also logged
+    to memory.md on disk).
     """
 
     def __init__(
@@ -106,7 +126,7 @@ class CompactionService:
         self._event_buffer: list[dict[str, Any]] = []
         self._warm: str = ""
         self._cold: str = ""
-        self._flush_pointer: str = ""
+        self._memory: str = ""
 
         # Lifecycle
         self._running: bool = False
@@ -215,10 +235,16 @@ class CompactionService:
     # ------------------------------------------------------------------
 
     def _handle_conversation_item(self, ev) -> None:
-        """Buffer a conversation turn (user or assistant speech)."""
+        """Buffer a conversation turn (user or assistant speech).
+
+        Coaching prompts sent as generate_reply(user_input=...) land in the history as
+        user messages without an STT confidence; they are not the user speaking.
+        """
         try:
             item = ev.item
             role = getattr(item, "role", "unknown")
+            if role == "user" and getattr(item, "transcript_confidence", None) is None:
+                return
             text = getattr(item, "text_content", None)
             if callable(text):
                 text = text()
@@ -327,6 +353,7 @@ class CompactionService:
             async with self._lock:
                 self._event_buffer = aged_out + self._event_buffer
             return
+        self._store_preferences(compressed)
 
         async with self._lock:
             if self._warm:
@@ -433,39 +460,45 @@ class CompactionService:
     # ------------------------------------------------------------------
 
     async def _flush_cold_to_memory(self) -> None:
-        """Compress cold context and flush to memory.md."""
-        if not self._memory_path or not self._cold:
+        """Fold cold context into the rolling session memory, and log it to memory.md."""
+        if not self._cold:
             return
 
+        source = f"{self._memory}\n{self._cold}" if self._memory else self._cold
         compressed = await self._compress(
-            _COLD_TO_MEMORY_PROMPT, self._cold, "cold_to_memory",
+            _COLD_TO_MEMORY_PROMPT, source, "cold_to_memory",
         )
         if compressed is None:
             return
+        self._store_preferences(compressed)
 
+        async with self._lock:
+            self._memory = compressed
+            self._cold = ""
+        self._cold_flush_count += 1
+        logger.info(f"[COMPACTION:FLUSH] Cold folded into session memory (flush #{self._cold_flush_count})")
+
+        if not self._memory_path:
+            return
         flush_timestamp = datetime.now(timezone.utc).isoformat()
-
         try:
             with open(self._memory_path, "a") as f:
                 f.write(f"\n## Context flushed at {flush_timestamp}\n\n")
                 f.write(compressed)
                 f.write("\n\n---\n\n")
-
-            self._cold_flush_count += 1
-
-            async with self._lock:
-                self._cold = ""
-                self._flush_pointer = (
-                    f"[Older context flushed to memory.md at {flush_timestamp} — "
-                    f"{self._cold_flush_count} flush(es) total. File: {self._memory_path}]"
-                )
-
-            logger.info(
-                f"[COMPACTION:FLUSH] Cold compressed and flushed to memory.md "
-                f"(flush #{self._cold_flush_count})"
-            )
         except Exception as e:
-            logger.error(f"[COMPACTION:ERROR] Failed to flush cold to memory.md: {e}")
+            logger.error(f"[COMPACTION:ERROR] Failed to log memory to memory.md: {e}")
+
+    def _store_preferences(self, compressed: str) -> None:
+        for match in _PREFERENCE_LINE_RE.finditer(compressed):
+            topic = match["topic"].strip().lower().replace(" ", "_")
+            if topic not in PREFERENCE_TOPICS:
+                continue
+            try:
+                set_preference(self._state, topic, match["value"])
+                logger.info(f"[COMPACTION:PREFERENCE] Stored {topic} preference")
+            except Exception as e:
+                logger.error(f"[COMPACTION:ERROR] Failed to store {topic} preference: {e}")
 
     async def _flush_remaining_context(self) -> None:
         """Write any un-flushed HOT/WARM/COLD context to memory.md on stop.
@@ -498,6 +531,8 @@ class CompactionService:
                 logger.warning(
                     "[COMPACTION:FLUSH] Final compression timed out — writing raw context"
                 )
+        if compressed is not None:
+            self._store_preferences(compressed)
 
         flush_timestamp = datetime.now(timezone.utc).isoformat()
         try:
@@ -566,8 +601,8 @@ class CompactionService:
         Called by prune/truncate methods — must be non-blocking.
         """
         parts = []
-        if self._flush_pointer:
-            parts.append(self._flush_pointer)
+        if self._memory:
+            parts.append(f"[SESSION MEMORY]\n{self._memory}")
         if self._cold:
             parts.append(f"[SESSION CONTEXT]\n{self._cold}")
         if self._warm:

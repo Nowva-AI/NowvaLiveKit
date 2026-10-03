@@ -68,7 +68,10 @@ def _make_cause(cause_id: str, parameter_delta: dict | None) -> HypothesizedCaus
 
 def _make_diagnosis(cause_ids: list[str]) -> DiagnosisResult:
     delta_by_id: dict[str, dict] = {
-        "narrow_stance": {"__foot_target_delta": [0.0, 0.0, -0.04, 0.0, 0.0, 0.04]},
+        "narrow_stance": {
+            "__foot_target_delta": [0.0, 0.0, -0.04, 0.0, 0.0, 0.04],
+            "__width_increase_per_side_m": 0.04,
+        },
         "narrow_foot_angle": {"L_ankle.ry": 0.15, "R_ankle.ry": -0.15},
         "knee_track_cue": {"L_hip.ry": -0.08, "R_hip.ry": 0.08},
         "weight_shift_cue": {"pelvis.tx": 0.02},
@@ -233,16 +236,34 @@ class TestBuildPoseStack:
 
 class TestSummarizeCueMagnitude:
 
-    def test_narrow_stance_reports_shoulder_width_ratio(self) -> None:
+    def test_narrow_stance_reports_centimeters_per_foot(self) -> None:
+        """Athletes move their feet in centimeters, not shoulder-width ratios
+        (the keypoint-based ratio also read 10-20% wide)."""
         text = summarize_cue_magnitude(
             "narrow_stance",
             {
                 "__foot_target_delta": [0.0, 0.0, -0.04, 0.0, 0.0, 0.04],
                 "__target_stance_ratio": 1.44,
+                "__width_increase_per_side_m": 0.04,
             },
         )
 
-        assert "1.4 times shoulder width" in text
+        assert text == "each foot about 4 centimeters wider"
+        assert "shoulder width" not in text
+
+    def test_narrow_stance_without_per_side_width_is_generic(self) -> None:
+        text = summarize_cue_magnitude(
+            "narrow_stance", {"__target_stance_ratio": 1.44},
+        )
+
+        assert text == GENERIC_MAGNITUDE_TEXT
+
+    def test_narrow_stance_already_wide_enough_is_generic(self) -> None:
+        text = summarize_cue_magnitude(
+            "narrow_stance", {"__width_increase_per_side_m": 0.0},
+        )
+
+        assert text == GENERIC_MAGNITUDE_TEXT
 
     def test_foot_angle_reports_degrees(self) -> None:
         text = summarize_cue_magnitude(

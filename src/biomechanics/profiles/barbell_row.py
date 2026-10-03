@@ -78,7 +78,7 @@ class BarbellRowProfile(ExerciseProfile):
             ascending_vel_threshold=40.0,
             min_depth_cm=40.0,
             standing_return_cm=10.0,
-            min_rep_duration_frames=12,
+            min_rep_duration_s=0.4,
         )
 
     def get_depth_metric(self, angles: JointAngles) -> float:
@@ -93,10 +93,10 @@ class BarbellRowProfile(ExerciseProfile):
             return 60.0 <= angles.trunk_flexion <= 140.0
         return _bent_over_ready
 
-    def get_cue_dict(self) -> Optional[Dict[str, str]]:
+    def get_fault_to_cue_map(self) -> Dict[str, str]:
         return {
-            "range_of_motion": "Pull higher — squeeze shoulder blades",
-            "back_rounding": "Keep spine neutral — don't round",
-            "trunk_stability": "Keep torso angle fixed — no rocking",
-            "bilateral_asymmetry": "Pull evenly on both sides",
+            "range_of_motion": "row_higher",
+            "back_rounding": "row_flat_back",
+            "trunk_stability": "row_steady",
+            "bilateral_asymmetry": "row_even",
         }

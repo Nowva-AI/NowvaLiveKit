@@ -29,6 +29,7 @@ from biomechanics.diagnosis.types import (
     RepTrajectory,
     SetFeatures,
 )
+from biomechanics.faults.observability import capture_mode_from_env
 from biomechanics.utils.types import RepData
 
 
@@ -73,9 +74,15 @@ class SessionTracker:
         self._bottom_frame_buffer: list[tuple[int, list]] = []
         self._athlete_params: dict | None = None
         self._baseline: dict | None = None
+        # The diagnosis engine models squats only; off for any other exercise.
+        self.diagnosis_enabled: bool = True
 
         # Assessment mode: per-rep rolling-window diagnosis
         self._assessment_mode: bool = False
+
+        # Best composite rep score this set, for "best rep so far" highlights.
+        self._set_best_score: float = -1.0
+        self.capture_mode: str = capture_mode_from_env()
 
         # Last-rep snapshot for on-demand replay
         self._last_rep_bottom_kpts: list | None = None
@@ -91,6 +98,22 @@ class SessionTracker:
 
     def set_assessment_mode(self, enabled: bool) -> None:
         self._assessment_mode = enabled
+
+    @property
+    def _diagnosing(self) -> bool:
+        return self.diagnosis_enabled and self._athlete_params is not None
+
+    def on_exercise_changed(self, diagnosis_enabled: bool) -> None:
+        """A new exercise starts: nothing from the previous one may be replayed
+        or diagnosed, diagnosis runs only if the engine models the new one, and
+        set numbers restart at 1 as they do in the workout plan."""
+        if self.set_active:
+            # Skipped mid-set: the partial set belongs to the old exercise.
+            self._end_current_set()
+        self.diagnosis_enabled = diagnosis_enabled
+        self.reset_rep_buffers()
+        self._last_set_diagnosis = None
+        self.current_set_number = 0
 
     # ------------------------------------------------------------------
     # Rep handling
@@ -119,6 +142,7 @@ class SessionTracker:
             self.current_set_number += 1
             self.current_set_reps = []
             self.set_active = True
+            self._set_best_score = -1.0
 
         self.current_set_reps.append(rep)
 
@@ -126,7 +150,7 @@ class SessionTracker:
         # Guarded: a degenerate bottom frame must not block the rep_complete send.
         summary: RepKinematicSummary | None = None
         trajectory: RepTrajectory | None = None
-        if self._athlete_params is not None and bottom_kpts is not None and bottom_angles is not None:
+        if self._diagnosing and bottom_kpts is not None and bottom_angles is not None:
             try:
                 frame = build_frame_from_live_pipeline(
                     bottom_kpts, bottom_angles, standing_kpts=standing_kpts,
@@ -137,6 +161,7 @@ class SessionTracker:
                     rep.rep_number,
                     descent_time_s=rep.descent_time,
                     ascent_time_s=rep.ascent_time,
+                    features=rep.features,
                 )
                 trajectory = build_rep_trajectory(trajectory_samples)
                 self._rep_kinematic_buffer.append(summary)
@@ -154,6 +179,7 @@ class SessionTracker:
             standing_kpts=standing_kpts,
             rep_kinematic_summary=summary,
             set_number=self.current_set_number,
+            highlights=self._rep_highlights(rep, summary, trajectory),
         )
 
         # Store last-rep snapshot for on-demand replay
@@ -170,6 +196,28 @@ class SessionTracker:
         self.total_reps += 1
         self.all_reps.append(rep)
 
+    def _rep_highlights(
+        self,
+        rep: RepData,
+        summary: RepKinematicSummary | None,
+        trajectory: RepTrajectory | None,
+    ) -> list[str]:
+        """What went right this rep, for positive reinforcement."""
+        highlights: list[str] = []
+        if rep.depth_target_met:
+            highlights.append("depth_target_met")
+        if rep.is_clean:
+            highlights.append("clean")
+        if summary is not None and self._athlete_params is not None:
+            anthro = build_anthro_dict(self._athlete_params)
+            rom = build_rom_dict(self._athlete_params, self._baseline or {})
+            score = score_rep(summary, anthro, rom, trajectory).composite_score
+            if score > self._set_best_score:
+                if len(self.current_set_reps) > 1:
+                    highlights.append("best_rep_so_far")
+                self._set_best_score = score
+        return highlights
+
     def _run_assessment_diagnosis(self, rep_number: int) -> None:
         if not self._rep_kinematic_buffer or self._athlete_params is None:
             return
@@ -183,6 +231,7 @@ class SessionTracker:
             per_rep_kinematics=list(window),
             anthropometry=anthro,
             rom=rom,
+            capture_mode=self.capture_mode,
         )
         diagnosis_result = HypothesisEngine().diagnose(set_features)
         latest_kin = self._rep_kinematic_buffer[-1]
@@ -224,7 +273,7 @@ class SessionTracker:
             )
             self.total_sets += 1
 
-        if self._rep_kinematic_buffer and self._athlete_params is not None:
+        if self._rep_kinematic_buffer and self._diagnosing:
             anthro = build_anthro_dict(self._athlete_params)
             rom = build_rom_dict(self._athlete_params, self._baseline or {})
             set_features = SetFeatures(
@@ -234,6 +283,7 @@ class SessionTracker:
                 per_rep_kinematics=list(self._rep_kinematic_buffer),
                 anthropometry=anthro,
                 rom=rom,
+                capture_mode=self.capture_mode,
             )
             diagnosis_result = HypothesisEngine().diagnose(set_features)
             score_summary = score_set(
@@ -316,7 +366,7 @@ class SessionTracker:
         a corrected pose stack from the last rep's bottom keypoints.
         Returns None if insufficient data.
         """
-        if self._athlete_params is None or self._last_rep_bottom_kpts is None:
+        if not self._diagnosing or self._last_rep_bottom_kpts is None:
             return None
 
         anthro = build_anthro_dict(self._athlete_params)
@@ -330,6 +380,7 @@ class SessionTracker:
                 per_rep_kinematics=list(self._rep_kinematic_buffer),
                 anthropometry=anthro,
                 rom=rom,
+                capture_mode=self.capture_mode,
             )
             diagnosis = HypothesisEngine().diagnose(set_features)
         else:

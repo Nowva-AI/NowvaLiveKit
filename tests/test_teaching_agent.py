@@ -180,6 +180,34 @@ class TestAssessmentPass:
         asyncio.run(_run())
 
 
+class TestAssessmentProceedsAnyway:
+    def test_unresolved_final_round_hands_off_with_one_focus(self):
+        async def _run():
+            agent = _make_agent()
+            msg = _assessment_result(
+                passed=False, round_num=2,
+                immediate_causes=[{
+                    "cause_id": "knee_track_cue",
+                    "explanation": "Your knees drift inside your toes on the way up.",
+                }],
+            )
+            msg["final_round"] = True
+            msg["proceed_anyway"] = True
+
+            with patch.object(
+                type(agent), 'session',
+                new_callable=lambda: property(lambda self: self._mock_session),
+            ):
+                await agent._on_assessment_result(msg, demo_was_played=False)
+
+            assert agent._handed_off is True
+            prompt = agent._say.call_args[0][0]
+            assert "knees drift inside your toes" in prompt
+            assert "passed" not in prompt
+
+        asyncio.run(_run())
+
+
 # =============================================================================
 # 4. Demo acknowledgment
 # =============================================================================
@@ -267,7 +295,36 @@ class TestCorrectionPrompt:
         prompt = agent._build_correction_prompt(diagnosis, {"mean_score": 0.6}, 2)
 
         assert "Limited ankle dorsiflexion" in prompt
-        assert "heel_lift" in prompt
+        assert "heel_lift" not in prompt
+
+    def test_adjustment_is_spoken_in_body_units_not_raw_parameters(self):
+        agent = _make_agent()
+        diagnosis = {
+            "immediate_causes": [{
+                "cause_id": "narrow_stance",
+                "explanation": "Your stance is narrow",
+                "parameter_delta": {
+                    "__foot_target_delta": [0.0, 0.0, -0.03, 0.0, 0.0, 0.03],
+                    "__target_stance_ratio": 1.4,
+                    "__width_increase_per_side_m": 0.03,
+                },
+            }],
+        }
+        prompt = agent._build_correction_prompt(diagnosis, {"mean_score": 0.6}, 2)
+
+        assert "each foot about 3 centimeters wider" in prompt
+        assert "__" not in prompt
+
+    def test_correction_prompt_has_no_verbatim_example_lines(self):
+        agent = _make_agent()
+        prompt = agent._build_correction_prompt(
+            {"immediate_causes": [{"cause_id": "x", "explanation": "test", "parameter_delta": None}]},
+            {"mean_score": 0.5},
+            1,
+        )
+        assert "e.g." not in prompt
+        assert "widen your stance a bit" not in prompt
+        assert "Let me see that again" not in prompt
 
     def test_includes_secondary_issue(self):
         agent = _make_agent()

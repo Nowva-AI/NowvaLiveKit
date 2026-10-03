@@ -11,6 +11,7 @@ that person-based camera calibration and the drift monitor consume.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import deque
 from pathlib import Path
@@ -95,6 +96,8 @@ class MultiCameraPoseProvider:
         self._focal_length_factor = focal_length_factor
 
         self._capture: MultiCameraCapture | None = None
+        # Primary capture time of the last synced set get_pose() returned.
+        self.last_capture_timestamp: float = math.nan
         self._estimator: RTMPoseEstimator | None = None
         self._triangulator: DLTTriangulator | None = None
         self._calibration: CalibrationResult | None = None
@@ -323,6 +326,7 @@ class MultiCameraPoseProvider:
         synced = self._capture.get_synced_frames()
         if synced is None:
             return None, None, None
+        self.last_capture_timestamp = synced.timestamp
 
         primary_id = str(self._primary_camera)
 
@@ -406,6 +410,12 @@ class MultiCameraPoseProvider:
     def recent_views(self, n_frames: int) -> list[dict[str, Skeleton2D]]:
         """The newest n_frames of calibration_views()."""
         return self.calibration_views()[-n_frames:]
+
+    def lost_cameras(self) -> list[str]:
+        """Cameras that stopped delivering frames (see MultiCameraCapture.lost_cameras)."""
+        if self._capture is None:
+            return []
+        return self._capture.lost_cameras()
 
     def reset_temporal_state(self) -> None:
         """Clear per-keypoint history in the triangulator and the per-camera crop tracking.

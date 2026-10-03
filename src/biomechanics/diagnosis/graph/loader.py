@@ -64,6 +64,7 @@ def _build_symptom_graph() -> MappingProxyType:
                 "expected_value_fn": expected_fn,
                 "severity_scoring": definition["severity_scoring"],
                 "threshold": definition["threshold"],
+                "measurement": definition["measurement"],
                 "candidate_causes": tuple(candidate_causes),
             }
         )
