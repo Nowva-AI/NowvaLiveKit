@@ -122,6 +122,11 @@ class MultiCameraPoseProvider:
         return self._calibration
 
     @property
+    def camera_keys(self) -> dict[str, str]:
+        """camera id -> name of its ~/.nowva files (intrinsics_<key>.json, gravity_<key>.json)."""
+        return dict(self._camera_keys)
+
+    @property
     def has_bar_detector(self) -> bool:
         return self._bar_detector is not None
 
