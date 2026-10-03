@@ -628,7 +628,7 @@ class TestDeadliftCard:
 
 def _check_form(state: AgentState, rep_message: dict | None) -> str:
     coaching = MagicMock()
-    coaching._last_rep_message = rep_message
+    coaching.last_rep_message.return_value = rep_message
     agent = WorkoutAgent(state=state, userdata=_userdata(state, coaching))
     _, instructions = asyncio.run(agent.check_my_form())
     return instructions

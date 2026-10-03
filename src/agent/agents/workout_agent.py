@@ -1187,7 +1187,7 @@ class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
         if is_coached_deadlift(self.state.get("workout.exercise_name")):
             # Judged from the last rep's features; the squat's standing checks below read
             # stance and toe-angle targets the deadlift doesn't have.
-            return None, _deadlift_form_reply(getattr(coaching, "_last_rep_message", None))
+            return None, _deadlift_form_reply(coaching.last_rep_message())
 
         snapshot = coaching.get_current_form_snapshot()
         fresh = snapshot is not None and snapshot["data_age_ms"] <= FORM_SNAPSHOT_MAX_AGE_MS

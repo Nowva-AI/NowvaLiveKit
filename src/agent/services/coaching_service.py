@@ -394,6 +394,14 @@ class CoachingService:
 
         return snapshot
 
+    def last_rep_message(self) -> dict | None:
+        """The latest workout rep_complete message as the pipeline sent it (its
+        features and every fault with severity and details), or None before the
+        first rep. A copy: callers read, never edit, the service's state."""
+        if self._last_rep_message is None:
+            return None
+        return dict(self._last_rep_message)
+
     def last_rep_verdict(self) -> dict | None:
         """The latest workout rep and its faults (one per fault type), or None
         before the first rep: {"rep_number", "faults": [{"fault_type", "side",
