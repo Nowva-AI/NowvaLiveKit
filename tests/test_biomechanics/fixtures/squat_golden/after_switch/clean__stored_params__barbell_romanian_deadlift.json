@@ -1,0 +1,41 @@
+{
+ "carries": ["standing_reference"],
+ "edits": [
+  {
+   "path": ["ipc", 9, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["ipc", 9, "message", "rep_kinematic_summary", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["ipc", 19, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000198
+  },
+  {
+   "path": ["ipc", 19, "message", "rep_kinematic_summary", "lockout_deficit_ratio"],
+   "value": 0.000198
+  },
+  {
+   "path": ["ipc", 29, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000198
+  },
+  {
+   "path": ["ipc", 29, "message", "rep_kinematic_summary", "lockout_deficit_ratio"],
+   "value": 0.000198
+  },
+  {
+   "path": ["reps", 0, "features", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["reps", 1, "features", "lockout_deficit_ratio"],
+   "value": 0.000198
+  },
+  {
+   "path": ["reps", 2, "features", "lockout_deficit_ratio"],
+   "value": 0.000198
+  }
+ ]
+}

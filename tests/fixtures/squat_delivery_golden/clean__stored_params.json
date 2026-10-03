@@ -1,0 +1,109 @@
+{
+ "chat_context": ["You are Nova.", "[LAST SET] Set 1: 3 of 3 reps clean; load bodyweight. You told them: \"Solid set, keep it up.\""],
+ "cues_played": [
+  {
+   "cue": "rep_1",
+   "t_s": 2.866667
+  },
+  {
+   "cue": "rep_2",
+   "t_s": 5.566667
+  },
+  {
+   "cue": "rep_3",
+   "t_s": 8.266667
+  }
+ ],
+ "dropped_messages": [],
+ "last_set": {
+  "avg_depth": 120.6,
+  "avg_duration_ms": 1700,
+  "clean_reps": 3,
+  "cue_outcomes": [],
+  "depth_consistency": 0.0,
+  "diagnosis_set_number": 1,
+  "effort": "fresh",
+  "exercise_name": "Barbell Back Squat",
+  "fault_summary": {},
+  "focus_fault": null,
+  "is_squat": true,
+  "load": "bodyweight",
+  "per_rep": [
+   {
+    "clean": true,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": [],
+    "rep": 1
+   },
+   {
+    "clean": true,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": [],
+    "rep": 2
+   },
+   {
+    "clean": true,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": [],
+    "rep": 3
+   }
+  ],
+  "set_number": 1,
+  "shallow_depths": [],
+  "shallow_reps": 0,
+  "target_reps": 3,
+  "total_reps": 3,
+  "trigger": "rep_count"
+ },
+ "llm_prompts": [
+  {
+   "persona": true,
+   "t_s": 8.633333,
+   "user_input": "Your athlete just finished a set. Here's their biomechanics analysis and rep data. Give three beats in 2-3 short sentences, in whatever order feels natural: one takeaway about the set, the ONE adjustment for the next set (in body units when the ADJUSTMENT gives them), and one specific thing that went well \u2014 a CUE OUTCOME where the fix held is the best one. Plain qualitative words: whole numbers only where they help (a rep number, a cm adjustment, a score change), never decimals, degrees or seconds. Open differently than you did after the last set. A light touch of dry humor is welcome if it comes naturally \u2014 never forced. Here is the data: Set 1 of 2 just finished: 3 of 3 reps clean. Next up is set 2 of 2. Load: bodyweight. Depth was very consistent from rep to rep. Best rep: rep 1, their deepest clean rep. \nFORM SCORE: 89 out of 100 (depth: 99, trunk: 65, knee: 100, symmetry: 100, tempo: 87) TREND: stable over the set TOP ISSUE: You're looking up at the ceiling. Fix your eyes on a spot on the floor a couple of meters ahead to keep your neck neutral. Never say or imply anything about lower-back tucking (butt wink), upper-back rounding, bracing, or foot arch \u2014 the cameras can't see those.\n\nThe athlete can't answer right now \u2014 they'd have to say the wake word first \u2014 so don't ask them anything."
+  }
+ ],
+ "recorder_ops": [
+  {
+   "faults_in_rep": [],
+   "is_clean": true,
+   "op": "record_rep",
+   "rep_number": 1,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "faults_in_rep": [],
+   "is_clean": true,
+   "op": "record_rep",
+   "rep_number": 2,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "faults_in_rep": [],
+   "is_clean": true,
+   "op": "record_rep",
+   "rep_number": 3,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "op": "record_set",
+   "set_number": 1,
+   "type": "diagnosis_complete"
+  }
+ ],
+ "to_pipeline": [
+  {
+   "rest_seconds": 90,
+   "type": "rest_start"
+  }
+ ],
+ "workout_state_line": "WORKOUT: resting before set 2/2, about 75s left | last set 3/3 clean | load bodyweight"
+}

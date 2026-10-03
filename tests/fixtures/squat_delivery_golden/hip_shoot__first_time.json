@@ -1,0 +1,147 @@
+{
+ "chat_context": ["You are Nova.", "[LAST SET] Set 1: 0 of 3 reps clean; load bodyweight; focus hips rising before the chest; cue 'Chest up' at rep 1, still on 2 of 2 reps after; adjustment: a small adjustment. You told them: \"Solid set, keep it up.\""],
+ "cues_played": [
+  {
+   "cue": "rep_1",
+   "t_s": 2.866667
+  },
+  {
+   "cue": "chest_up",
+   "t_s": 2.866667
+  },
+  {
+   "cue": "rep_2",
+   "t_s": 5.566667
+  },
+  {
+   "cue": "rep_3",
+   "t_s": 8.266667
+  }
+ ],
+ "dropped_messages": [],
+ "last_set": {
+  "avg_depth": 120.6,
+  "avg_duration_ms": 1700,
+  "clean_reps": 0,
+  "cue_outcomes": [
+   {
+    "after_rep": 1,
+    "cue_key": "chest_up",
+    "fault_type": "hip_shoot",
+    "faulted_after": [2, 3],
+    "reps_after": [2, 3]
+   }
+  ],
+  "depth_consistency": 0.0,
+  "diagnosis_set_number": 1,
+  "effort": "fresh",
+  "exercise_name": "Barbell Back Squat",
+  "fault_summary": {
+   "hip_shoot": {
+    "count": 3,
+    "pct": 100
+   }
+  },
+  "focus_fault": "hip_shoot",
+  "is_squat": true,
+  "load": "bodyweight",
+  "per_rep": [
+   {
+    "clean": false,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": ["hip_shoot"],
+    "rep": 1
+   },
+   {
+    "clean": false,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": ["hip_shoot"],
+    "rep": 2
+   },
+   {
+    "clean": false,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": ["hip_shoot"],
+    "rep": 3
+   }
+  ],
+  "set_number": 1,
+  "shallow_depths": [],
+  "shallow_reps": 0,
+  "target_reps": 3,
+  "total_reps": 3,
+  "trigger": "rep_count"
+ },
+ "llm_prompts": [
+  {
+   "persona": true,
+   "t_s": 8.633333,
+   "user_input": "Your athlete just finished a set. Here's their biomechanics analysis and rep data. Give three beats in 2-3 short sentences, in whatever order feels natural: one takeaway about the set, the ONE adjustment for the next set (in body units when the ADJUSTMENT gives them), and one specific thing that went well \u2014 a CUE OUTCOME where the fix held is the best one. Plain qualitative words: whole numbers only where they help (a rep number, a cm adjustment, a score change), never decimals, degrees or seconds. Open differently than you did after the last set. No humor in this reply \u2014 keep it straight, supportive, and forward-looking. Here is the data: Set 1 of 2 just finished: 0 of 3 reps clean. Next up is set 2 of 2. Load: bodyweight. Depth was very consistent from rep to rep. Faults: hips rising before the chest on 3 of 3 reps. This set's focus was hips rising before the chest. CUE OUTCOME: after your cue on hips rising before the chest at rep 1, it still showed on 2 of the 2 reps after. Roughest rep: rep 1 \u2014 hips rising before the chest. \nFORM SCORE: 75 out of 100 (depth: 99, trunk: 10, knee: 100, symmetry: 100, tempo: 87) TREND: stable over the set TOP ISSUE: Your chest drops more than your build needs. Take a big breath into your belly and brace before every descent, and hold it until you're standing. ADJUSTMENT: a small adjustment LONG-TERM (mention once, briefly, as something to build over the coming weeks \u2014 not a fix for the next set): Your hips shoot up out of the bottom, which usually means your quads give out before your hips do. Build them with paused squats, front squats and slow-tempo squats. Never say or imply anything about lower-back tucking (butt wink), upper-back rounding, bracing, or foot arch \u2014 the cameras can't see those.\n\nThe athlete can't answer right now \u2014 they'd have to say the wake word first \u2014 so don't ask them anything."
+  }
+ ],
+ "recorder_ops": [
+  {
+   "cue": "chest_up",
+   "fault_type": "hip_shoot",
+   "op": "record_fault",
+   "rep_number": 1,
+   "severity": "moderate",
+   "type": "fault"
+  },
+  {
+   "faults_in_rep": ["hip_shoot"],
+   "is_clean": false,
+   "op": "record_rep",
+   "rep_number": 1,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "cue_key": "chest_up",
+   "fault_type": "hip_shoot",
+   "op": "record_cue_delivered"
+  },
+  {
+   "faults_in_rep": ["hip_shoot"],
+   "is_clean": false,
+   "op": "record_rep",
+   "rep_number": 2,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "cue": "chest_up",
+   "fault_type": "hip_shoot",
+   "op": "record_fault",
+   "rep_number": 3,
+   "severity": "moderate",
+   "type": "fault"
+  },
+  {
+   "faults_in_rep": ["hip_shoot"],
+   "is_clean": false,
+   "op": "record_rep",
+   "rep_number": 3,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "op": "record_set",
+   "set_number": 1,
+   "type": "diagnosis_complete"
+  }
+ ],
+ "to_pipeline": [
+  {
+   "rest_seconds": 90,
+   "type": "rest_start"
+  }
+ ],
+ "workout_state_line": "WORKOUT: resting before set 2/2, about 75s left | last set 0/3 clean | focus hips rising before the chest | last cue 'Chest up' after rep 1: still showing on 2 of 2 reps | load bodyweight"
+}
