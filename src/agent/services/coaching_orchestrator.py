@@ -112,6 +112,46 @@ SYMPTOM_FAULT_TYPES = {
     "velocity_loss": "velocity_loss",
 }
 
+# The deadlift's counterparts (PLAN.md §4.3 item 7). Its graph reuses symptom
+# names such as hip_shift and velocity_loss, so the sets are chosen per profile.
+# No deadlift fault overrides the focus as a safety cue: nothing the cameras see
+# on a deadlift is a safety call they can make.
+DEADLIFT_SIDE_VIEW_FAULTS = frozenset({
+    "deadlift_setup_hips", "deadlift_shoulders_behind", "deadlift_hips_shoot",
+    "deadlift_lockout", "deadlift_lean_back", "deadlift_bent_arms",
+})
+DEADLIFT_SIDE_VIEW_SYMPTOMS = frozenset(
+    {"setup_hips_off", "shoulders_behind_bar", "hips_shoot", "incomplete_lockout", "lean_back"}
+)
+DEADLIFT_SYMPTOM_FAULT_TYPES = {
+    "bar_off_midfoot": "deadlift_bar_position",
+    "setup_hips_off": "deadlift_setup_hips",
+    "shoulders_behind_bar": "deadlift_shoulders_behind",
+    "hips_shoot": "deadlift_hips_shoot",
+    "bar_drift": "deadlift_bar_drift",
+    "incomplete_lockout": "deadlift_lockout",
+    "lean_back": "deadlift_lean_back",
+    "hip_shift": "deadlift_hip_shift",
+    "bar_tilt": "deadlift_bar_tilt",
+    "velocity_loss": "deadlift_velocity_loss",
+}
+
+
+@dataclass(frozen=True)
+class ExerciseFaultSets:
+    safety_fault_type: Optional[str]
+    side_view_faults: frozenset
+    side_view_symptoms: frozenset
+    symptom_fault_types: Dict[str, str]
+
+
+SQUAT_FAULT_SETS = ExerciseFaultSets(SAFETY_FAULT_TYPE, SIDE_VIEW_FAULTS, SIDE_VIEW_SYMPTOMS, SYMPTOM_FAULT_TYPES)
+EXERCISE_FAULT_SETS = {
+    "deadlift": ExerciseFaultSets(
+        None, DEADLIFT_SIDE_VIEW_FAULTS, DEADLIFT_SIDE_VIEW_SYMPTOMS, DEADLIFT_SYMPTOM_FAULT_TYPES,
+    ),
+}
+
 # A set stopped short of its target (failed rep, bar racked early) ends this
 # long after its last rep.
 SET_IDLE_TIMEOUT_S = 15.0
@@ -768,8 +808,13 @@ class CoachingOrchestrator:
         )
         return SEVERITY_RANK.get(severity, 0) < min_rank
 
+    @property
+    def _fault_sets(self) -> ExerciseFaultSets:
+        """The squat's safety, side-view and symptom sets, or the active profile's own."""
+        return EXERCISE_FAULT_SETS.get(self._cue_config.profile, SQUAT_FAULT_SETS)
+
     def _is_unseen_side_view(self, fault_type: str) -> bool:
-        return not self._side_view_observable and fault_type in SIDE_VIEW_FAULTS
+        return not self._side_view_observable and fault_type in self._fault_sets.side_view_faults
 
     def _visible_causes(self, causes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Drop causes only side-view symptoms point to, when there's one camera."""
@@ -778,7 +823,7 @@ class CoachingOrchestrator:
         return [
             cause for cause in causes
             if not cause.get("implicated_by")
-            or not set(cause["implicated_by"]) <= SIDE_VIEW_SYMPTOMS
+            or not set(cause["implicated_by"]) <= self._fault_sets.side_view_symptoms
         ]
 
     def _focus_cause(self, diagnosis: Dict[str, Any]) -> Optional[tuple]:
@@ -787,7 +832,7 @@ class CoachingOrchestrator:
             if cause.get("observability") == "approximate":
                 continue
             for symptom_id in cause.get("implicated_by") or []:
-                fault_type = SYMPTOM_FAULT_TYPES.get(symptom_id)
+                fault_type = self._fault_sets.symptom_fault_types.get(symptom_id)
                 if fault_type and not self._is_unseen_side_view(fault_type):
                     return cause, fault_type
         return None
@@ -1426,7 +1471,7 @@ class CoachingOrchestrator:
                 continue
             if self._set_cue_count(fault_type) >= MAX_CUES_PER_FAULT_PER_SET:
                 continue
-            is_safety = fault_type == SAFETY_FAULT_TYPE and severity == SAFETY_SEVERITY
+            is_safety = fault_type == self._fault_sets.safety_fault_type and severity == SAFETY_SEVERITY
             if self._set_focus_fault not in (None, fault_type) and not is_safety:
                 continue
             cue_key = candidate["cue_key"]

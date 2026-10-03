@@ -147,6 +147,9 @@ def _orchestrator(**overrides) -> CoachingOrchestrator:
 
 def _deadlift_orchestrator(target_reps: int = 10, **overrides) -> CoachingOrchestrator:
     orch = _orchestrator(**overrides)
+    # The deadlift is coached on the triangulated rig: its side-view faults are
+    # never even emitted on one camera.
+    orch._side_view_observable = True
     orch.set_exercise("Barbell Deadlift", is_squat=False)
     orch.apply_cue_config(ExerciseCueConfig.from_cache_cues(DEADLIFT_CACHE_CUES, "deadlift"))
     orch.reset_set(target_reps=target_reps, total_sets=3)
@@ -1052,3 +1055,24 @@ class TestDemoAlphaLoop:
         assert before_floor == []
         assert _cue_keys(at_floor) == ["deadlift_bar_close"]
         assert recorder.reps[0]["features"]["dl_schema"] == 1
+
+
+class TestExerciseFaultSets:
+    def test_deadlift_symptoms_name_deadlift_faults(self):
+        from agent.services.coaching_orchestrator import DEADLIFT_SYMPTOM_FAULT_TYPES
+
+        orch = _deadlift_orchestrator()
+        assert orch._fault_sets.symptom_fault_types is DEADLIFT_SYMPTOM_FAULT_TYPES
+        assert orch._fault_sets.symptom_fault_types["hip_shift"] == "deadlift_hip_shift"
+        assert orch._fault_sets.safety_fault_type is None
+
+    def test_the_squat_keeps_its_sets(self):
+        from agent.services.coaching_orchestrator import SQUAT_FAULT_SETS
+
+        assert _orchestrator()._fault_sets is SQUAT_FAULT_SETS
+
+    def test_one_camera_mutes_side_view_deadlift_faults(self):
+        orch = _deadlift_orchestrator()
+        orch._side_view_observable = False
+        assert orch._is_unseen_side_view("deadlift_hips_shoot")
+        assert not orch._is_unseen_side_view("deadlift_bar_drift")
