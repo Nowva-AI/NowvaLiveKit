@@ -25,8 +25,8 @@ rep is counted: at the dead stop, or at the next liftoff for a touch-and-go rep.
 | # | fault_type | Meaning | value / unit | Cue base key | Variants | Static min tier | Prio |
 |---|---|---|---|---|---|---|---|
 | D1 | `deadlift_bar_position` | Bar not over midfoot at setup | `abs(bar_midfoot_setup_cm)` cm; `direction`: `"forward"` (bar too far) / `"back"` (bar too close) | `deadlift_bar_midfoot` | — | mild | 20 |
-| D4 | `deadlift_setup_hips` | Hips too low / too high at setup | cm outside the setup-model band; `direction`: `"up"` (raise hips) / `"down"` (lower hips) | `deadlift_hips` | `deadlift_hips_up`, `deadlift_hips_down` (by `direction`) | severe | 21 |
-| D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | cm behind | `deadlift_shoulders_over` | — | moderate | 22 |
+| D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | cm behind | `deadlift_shoulders_over` | — | moderate | 21 |
+| D4 | `deadlift_setup_hips` | Hips too low / too high at setup | cm outside the setup-model band; `direction`: `"up"` (raise hips) / `"down"` (lower hips) | `deadlift_hips` | `deadlift_hips_up`, `deadlift_hips_down` (by `direction`) | severe | 22 |
 | D2 | `deadlift_hips_shoot` | Hips rise before the chest off the floor | deg of trunk change beyond the model's prediction | `deadlift_chest_with_hips` | — | moderate | 23 |
 | D3 | `deadlift_bar_drift` | Bar drifts away from the legs | p90 forward drift, cm | `deadlift_bar_close` | — | moderate | 24 |
 | D6 | `deadlift_lockout` | Incomplete lockout | worst of hip/knee extension deficit, deg; `joint`: `"hip"`/`"knee"` | `deadlift_lockout` | — | moderate | 25 |
@@ -37,7 +37,8 @@ rep is counted: at the dead stop, or at the next liftoff for a touch-and-go rep.
 | D10 | `deadlift_velocity_loss` | Bar slower than the set's two fastest reps | pct | — (never cued) | — | `recap` | 30 |
 
 `deadlift_bar_position` and every closed-loop key are the Demo α pair together with
-`deadlift_bar_drift`.
+`deadlift_bar_drift`. D7 ranks ahead of D4: the D4 band assumes the shoulders in their band,
+so when both fire the shoulders are the correction (PLAN.md §2.7 "Coupling").
 
 ## 2. `FaultEvent.details`
 

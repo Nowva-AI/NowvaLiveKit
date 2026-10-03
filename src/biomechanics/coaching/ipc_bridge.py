@@ -213,8 +213,10 @@ class IPCBridge:
         # mentioned (hedged) after the set, but never cued mid-set.
         cue_key = None
         if observability != APPROXIMATE:
+            # direction picks a variant only where the exercise has one (the
+            # deadlift's hips up / down); no squat cue has direction variants.
             cue_key = self.cue_cache.get_cue_for_fault(
-                fault.fault_type, now, side=details.get("side"),
+                fault.fault_type, now, side=details.get("side"), variant=details.get("direction"),
             )
 
         self._send({
