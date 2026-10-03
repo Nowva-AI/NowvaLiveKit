@@ -51,6 +51,7 @@ class RuleEngine:
         history_maxlen: int = 90,
         rules: Optional[List[FaultRule]] = None,
         capture_mode: Optional[str] = None,
+        reference: Optional[SessionReference] = None,
     ):
         """
         Initialize the rule engine.
@@ -63,6 +64,8 @@ class RuleEngine:
                    apply to each exercise.
             capture_mode: "single_camera" or "triangulated"; decides which
                    faults are observable. Defaults to NOWVA_MULTI_CAMERA.
+            reference: The profile's session reference; None builds the
+                   squat's SessionReference.
         """
         self.config = config or get_config()
         self.history: deque = deque(maxlen=history_maxlen)
@@ -83,9 +86,11 @@ class RuleEngine:
         # Absolute thresholds never move from observed reps — a fault on the
         # first rep is still a fault.
         depth_rule = self._depth_rule()
-        self.reference = SessionReference(
-            depth_tolerance_ratio=depth_rule.tolerance_ratio if depth_rule else 0.08,
-        )
+        if reference is None:
+            reference = SessionReference(
+                depth_tolerance_ratio=depth_rule.tolerance_ratio if depth_rule else 0.08,
+            )
+        self.reference = reference
 
     def apply_body_proportion_scaling(self, proportions: BodyProportions) -> None:
         """Scale fault thresholds based on the user's body proportions.

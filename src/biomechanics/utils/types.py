@@ -574,6 +574,11 @@ class PipelineFrame(BaseModel):
     bar_detection: Optional[BarbellDetection] = None
     bar_track: Optional[BarTrackState] = None
 
+    # Exercises with their own analyser (the deadlift): the 3D bar matched to
+    # this analysis frame and the analyser's per-frame status. None for the squat.
+    bar_state_3d: Optional[Any] = None
+    exercise_status: Optional[Any] = None
+
     # BiLSTM rep counting (optional, populated when bilstm.enabled=True)
     bilstm_probability: Optional[float] = None
     bilstm_rep_data: Optional[RepData] = None

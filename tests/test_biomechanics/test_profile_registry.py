@@ -26,8 +26,10 @@ class TestNameResolution:
             ("squat", "squat"),
             ("Barbell Romanian Deadlift", "romanian_deadlift"),
             ("Single-Leg RDL", "romanian_deadlift"),
-            ("Barbell Conventional Deadlift", "deadlift"),
-            ("Barbell Sumo Deadlift", "deadlift"),
+            # Gated until the deadlift is validated (docs/deadlift/PLAN.md §3.1); back
+            # to "deadlift" at J8. Sumo is never the conventional deadlift's profile.
+            ("Barbell Conventional Deadlift", "untracked"),
+            ("Barbell Sumo Deadlift", "untracked"),
             ("Barbell Overhead Press", "overhead_press"),
             ("Split Squat", "lunge"),
             ("Bulgarian Split Squat", "bulgarian_split_squat"),

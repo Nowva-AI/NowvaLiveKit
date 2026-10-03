@@ -29,3 +29,13 @@ class UntrackedProfile(ExerciseProfile):
     ) -> float:
         # The rep counter ignores NaN, so no rep ever opens.
         return math.nan
+
+
+class UntrackedVariantProfile(UntrackedProfile):
+    """A deadlift variant the conventional deadlift's rules do not model (sumo,
+    trap bar, deficit, snatch grip, single leg, rack pulls). Untracked, with the
+    deadlift's safety flags: hinged frames with plates hiding the feet never feed
+    the squat's camera refines or body measurements."""
+
+    allows_camera_refine = False
+    feeds_body_calibration = False

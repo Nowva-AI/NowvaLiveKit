@@ -34,6 +34,19 @@ class FaultType(str, Enum):
     DEPTH_DRIFT = "depth_drift"
     VELOCITY_LOSS = "velocity_loss"
     FOOT_PLACEMENT = "foot_placement"
+    # Conventional deadlift (docs/deadlift/PLAN.md §2.6). Prefixed so none shares
+    # the squat's priority, observability or cue entries.
+    DEADLIFT_BAR_POSITION = "deadlift_bar_position"
+    DEADLIFT_SETUP_HIPS = "deadlift_setup_hips"
+    DEADLIFT_SHOULDERS_BEHIND = "deadlift_shoulders_behind"
+    DEADLIFT_HIPS_SHOOT = "deadlift_hips_shoot"
+    DEADLIFT_BAR_DRIFT = "deadlift_bar_drift"
+    DEADLIFT_LOCKOUT = "deadlift_lockout"
+    DEADLIFT_LEAN_BACK = "deadlift_lean_back"
+    DEADLIFT_HIP_SHIFT = "deadlift_hip_shift"
+    DEADLIFT_BAR_TILT = "deadlift_bar_tilt"
+    DEADLIFT_BENT_ARMS = "deadlift_bent_arms"
+    DEADLIFT_VELOCITY_LOSS = "deadlift_velocity_loss"
 
 
 # Default thresholds from config (degrees unless specified)
@@ -146,6 +159,62 @@ FAULT_MESSAGES: Dict[FaultType, Dict[str, str]] = {
         "mild": "Feet a little uneven — square them up",
         "moderate": "Feet uneven — line them up",
         "severe": "Feet set up crooked — reset your stance",
+    },
+    # Deadlift: behavioural words only, nothing medical, never a "flat back" claim.
+    FaultType.DEADLIFT_BAR_POSITION: {
+        "mild": "Bar a little off midfoot at the start",
+        "moderate": "Bar not over midfoot — set it over the middle of your foot",
+        "severe": "Bar far from midfoot — reset your feet to the bar",
+    },
+    FaultType.DEADLIFT_SETUP_HIPS: {
+        "mild": "Hips slightly off at the start",
+        "moderate": "Hip height off at the start — reset your hips",
+        "severe": "Hips well off at the start — reset before you pull",
+    },
+    FaultType.DEADLIFT_SHOULDERS_BEHIND: {
+        "mild": "Shoulders slightly behind the bar",
+        "moderate": "Shoulders behind the bar — bring them over it",
+        "severe": "Shoulders well behind the bar — hips up, shoulders over the bar",
+    },
+    FaultType.DEADLIFT_HIPS_SHOOT: {
+        "mild": "Hips rising a little first — chest and hips together",
+        "moderate": "Hips shooting up — lift your chest with your hips",
+        "severe": "Hips shot up first — push the floor, chest and hips together",
+    },
+    FaultType.DEADLIFT_BAR_DRIFT: {
+        "mild": "Bar drifting off your legs",
+        "moderate": "Bar drifting forward — keep it close",
+        "severe": "Bar swinging away — drag it up your legs",
+    },
+    FaultType.DEADLIFT_LOCKOUT: {
+        "mild": "Not quite standing tall at the top",
+        "moderate": "Finish the rep — stand all the way up",
+        "severe": "Rep left unfinished — stand tall at the top",
+    },
+    FaultType.DEADLIFT_LEAN_BACK: {
+        "mild": "Leaning back a little at the top",
+        "moderate": "Leaning back at the top — just stand tall",
+        "severe": "Leaning way back at the top — finish tall, no lean",
+    },
+    FaultType.DEADLIFT_HIP_SHIFT: {
+        "mild": "Hips drifting to one side",
+        "moderate": "Hips shifting — push evenly through both feet",
+        "severe": "Big hip shift — even out both sides",
+    },
+    FaultType.DEADLIFT_BAR_TILT: {
+        "mild": "Bar tipping slightly",
+        "moderate": "Bar tilting — keep it level",
+        "severe": "Bar tilting a lot — pull evenly with both hands",
+    },
+    FaultType.DEADLIFT_BENT_ARMS: {
+        "mild": "Arms bending a little",
+        "moderate": "Arms bending — keep them long",
+        "severe": "Pulling with the arms — long arms, push the floor",
+    },
+    FaultType.DEADLIFT_VELOCITY_LOSS: {
+        "mild": "That rep slowed down",
+        "moderate": "Bar slowing a lot",
+        "severe": "Big slowdown — that's close to your limit",
     },
 }
 

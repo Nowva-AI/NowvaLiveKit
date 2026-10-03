@@ -40,6 +40,46 @@ class ExerciseProfile:
     # How Nova names the exercise when listing what it coaches ("" = from name).
     display_name: str = ""
 
+    # Hooks for exercises that bring their own per-frame analysis (the deadlift).
+    # Every default is today's squat path, so profiles that leave them alone
+    # behave exactly as before.
+    # While not coaching_ready, get_profile() hands out the profile's gated
+    # stand-in (gated_profile) instead, so unvalidated rules never run.
+    gate_until_ready: bool = False
+    # The pipeline tracks the bar in 3D on every view for this exercise.
+    needs_bar_3d: bool = False
+    # Camera refines at set boundaries may use this exercise's frames, and its
+    # frames are buffered for them.
+    allows_camera_refine: bool = True
+    # This exercise's frames feed the session's body measurement.
+    feeds_body_calibration: bool = True
+    # The voice agent's set idle timeout for this exercise; None keeps its default.
+    set_idle_timeout_s: Optional[float] = None
+    # The agent waits for this exercise's set diagnosis before the recap; None
+    # leaves it to the agent (it waits on the squat).
+    waits_for_diagnosis: Optional[bool] = None
+    # The closed-loop setup guidance the agent runs for this exercise ("" = none).
+    closed_loop_cue: str = ""
+    # Keypoints whose loss mutes cues mid-set; None = the legs (hips, knees, ankles).
+    tracking_keypoints: Optional[tuple] = None
+
+    def create_rep_analyzer(self, config: BiomechanicsConfig):
+        """An object owning this exercise's per-frame state, or None for the
+        squat path (rep features from the pipeline's own trajectory)."""
+        return None
+
+    def create_session_reference(self):
+        """The rule engine's session reference; None builds the squat's."""
+        return None
+
+    def create_set_diagnosis(self, capture_mode: str):
+        """A set diagnosis for exercises outside the squat engine; None = none."""
+        return None
+
+    def min_cue_tiers(self, config: BiomechanicsConfig) -> Dict[str, str]:
+        """fault_type -> lowest severity the agent may speak; empty = every tier."""
+        return {}
+
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
         """Create the fault rules for this exercise.
 

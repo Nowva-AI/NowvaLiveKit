@@ -35,9 +35,12 @@ _MEASUREMENT_LEVELS: dict[str, dict[str, str]] = {
     "side_view": {SINGLE_CAMERA: NOT_OBSERVABLE, TRIANGULATED: OBSERVABLE},
     "foot_contact": {SINGLE_CAMERA: NOT_OBSERVABLE, TRIANGULATED: OBSERVABLE},
     "bar": {SINGLE_CAMERA: OBSERVABLE, TRIANGULATED: OBSERVABLE},
+    # The deadlift's bar in 3D: triangulated from three views on the rig; one
+    # camera only sees it (or the wrists) through monocular depth.
+    "bar_3d": {SINGLE_CAMERA: APPROXIMATE, TRIANGULATED: OBSERVABLE},
 }
 
-# What each squat fault is measured from.
+# What each fault is measured from.
 FAULT_MEASUREMENT: dict[str, str] = {
     "depth": "vertical",
     "depth_drift": "vertical",
@@ -51,6 +54,18 @@ FAULT_MEASUREMENT: dict[str, str] = {
     "foot_placement": "sagittal",
     "heel_rise": "foot_contact",
     "bilateral_asymmetry": "bar",
+    # Deadlift (docs/deadlift/PLAN.md §2.6).
+    "deadlift_bar_position": "bar_3d",
+    "deadlift_setup_hips": "side_view",
+    "deadlift_shoulders_behind": "side_view",
+    "deadlift_hips_shoot": "side_view",
+    "deadlift_bar_drift": "bar_3d",
+    "deadlift_lockout": "side_view",
+    "deadlift_lean_back": "side_view",
+    "deadlift_hip_shift": "lateral_travel",
+    "deadlift_bar_tilt": "bar_3d",
+    "deadlift_bent_arms": "side_view",
+    "deadlift_velocity_loss": "bar_3d",
 }
 
 

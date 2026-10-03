@@ -60,7 +60,8 @@ def get_profile(exercise_name: str) -> ExerciseProfile:
 
     An exercise no profile models gets UntrackedProfile: the camera still
     runs, but no reps are counted and no faults fire. It never borrows the
-    squat's rules.
+    squat's rules. A profile gated until it is coaching-ready resolves to its
+    gated stand-in, so a scheduled program cannot run unvalidated rules.
     """
     profile_class = find_profile_class(exercise_name)
     if profile_class is None:
@@ -69,6 +70,12 @@ def get_profile(exercise_name: str) -> ExerciseProfile:
             exercise_name,
         )
         return UntrackedProfile()
+    if profile_class.gate_until_ready and not profile_class.coaching_ready:
+        logger.warning(
+            "[PROFILES] '%s' -> %s is not coaching-ready yet — untracked",
+            exercise_name, profile_class.__name__,
+        )
+        return profile_class.gated_profile()
     logger.info("[PROFILES] '%s' -> %s", exercise_name, profile_class.__name__)
     return profile_class()
 

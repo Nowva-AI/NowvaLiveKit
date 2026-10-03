@@ -1,0 +1,484 @@
+"""Synthetic conventional deadlifts with ground truth (PLAN.md §10, J2).
+
+Generates the lagged world-frame skeleton (21 keypoints, Y-down metres, floor at
+y = 0, X = subject's left, forward = -Z) and the 3D bar state a perfect tracker
+would report, frame by frame, for scripted sets: dead stops, touch-and-go,
+quick re-pulls, failed and dropped reps, and every v1 fault injected on demand.
+The pull is built bar-first: the bar path and the trunk angle are scripted, the
+shoulders hang the arms from the bar, and the legs are solved to reach the hip,
+so each injected fault has a known size.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import NamedTuple
+
+import numpy as np
+from pydantic import BaseModel, Field
+
+from biomechanics.utils.types import CocoKeypoints as CK
+
+from .setup_model import AthleteSegments, solve_knee_pass, solve_setup
+from .types import BarState3D
+
+NUM_KEYPOINTS = 21
+DEFAULT_FPS = 30.0
+PLATE_RADIUS_M = 0.225
+# Plate-hub centres either side of the bar centre.
+HUB_HALF_SPAN_M = 0.85
+# Legs at the top are this fraction of fully straight (a real lockout is never
+# perfectly collinear, and the knee solve needs a non-degenerate triangle).
+LOCKOUT_REACH_FRACTION = 0.998
+STANDING_REACH_FRACTION = 0.995
+
+
+class SimAthlete(BaseModel):
+    tibia_m: float = 0.43
+    femur_m: float = 0.45
+    torso_m: float = 0.52
+    upper_arm_m: float = 0.30
+    forearm_m: float = 0.29
+    grip_offset_m: float = 0.075
+    ankle_height_m: float = 0.08
+    foot_m: float = 0.18
+    heel_m: float = 0.06
+    stance_half_width_m: float = 0.13
+    hip_half_width_m: float = 0.12
+    shoulder_half_width_m: float = 0.19
+    grip_half_width_m: float = 0.26
+
+    @property
+    def arm_m(self) -> float:
+        return self.upper_arm_m + self.forearm_m
+
+    @property
+    def midfoot_forward_m(self) -> float:
+        return 0.35 * self.foot_m
+
+    def segments(self) -> AthleteSegments:
+        return AthleteSegments(
+            tibia_m=self.tibia_m, femur_m=self.femur_m, torso_m=self.torso_m,
+            arm_m=self.arm_m, grip_offset_m=self.grip_offset_m,
+        )
+
+
+class RepScript(BaseModel):
+    """One rep. Fault sizes are the injected truth (cm / deg / m)."""
+    shoulder_ahead_m: float = 0.03
+    hips_shoot_deg: float = 0.0
+    bar_drift_m: float = 0.0
+    lockout_deficit_deg: float = 0.0
+    lean_back_deg: float = 0.0
+    hip_shift_m: float = 0.0
+    bar_tilt_m: float = 0.0
+    elbow_bend_deg: float = 0.0
+    pull_s: float = 1.2
+    top_hold_s: float = 0.6
+    lower_s: float = 1.0
+    # Hands stay on the resting bar this long after the dead stop; 0 = touch-and-go
+    # into the next rep.
+    floor_hold_s: float = 1.2
+    drop_bar: bool = False
+    # A failed rep: the bar rises this far and comes back down without a top.
+    fail_rise_m: float | None = None
+
+
+class Scenario(BaseModel):
+    athlete: SimAthlete = Field(default_factory=SimAthlete)
+    reps: list[RepScript] = Field(default_factory=lambda: [RepScript(), RepScript(), RepScript()])
+    # Bar centre ahead of the midfoot when set up (D1 truth, m).
+    bar_midfoot_offset_m: float = 0.0
+    fps: float = DEFAULT_FPS
+    approach_m: float = 0.8
+    approach_s: float = 1.5
+    stance_s: float = 1.5
+    hinge_s: float = 1.0
+    setup_hold_s: float = 1.0
+    leave_s: float = 1.5
+    keypoint_noise_m: float = 0.0
+    bar_noise_m: float = 0.0
+    # The world's Y axis tilted from true gravity by this much (about the lateral axis).
+    world_tilt_deg: float = 0.0
+    track_bar: bool = True
+    seed: int = 7
+    start_time: float = 100.0
+
+
+class SimFrame(NamedTuple):
+    timestamp: float
+    frame_index: int
+    points: np.ndarray
+    confidences: np.ndarray
+    bar: BarState3D | None
+
+
+class RepTruth(NamedTuple):
+    liftoff_time: float
+    knee_pass_time: float
+    top_time: float
+    floor_time: float
+    counted: bool
+    touch_and_go: bool
+
+
+class SimulatedSet(NamedTuple):
+    frames: list[SimFrame]
+    reps: list[RepTruth]
+    gravity_up_world: np.ndarray
+
+
+class _Pose(NamedTuple):
+    """Sagittal (forward, up) positions relative to the ankle, plus lateral offsets."""
+    bar: tuple[float, float]
+    shoulder: tuple[float, float]
+    elbow: tuple[float, float]
+    wrist: tuple[float, float]
+    hip: tuple[float, float]
+    knee: tuple[float, float]
+    hip_shift_m: float
+    bar_tilt_m: float
+    hands_on_bar: bool
+
+
+def _smooth(fraction: float) -> float:
+    fraction = min(1.0, max(0.0, fraction))
+    return 0.5 - 0.5 * math.cos(math.pi * fraction)
+
+
+def _knee_for(hip: tuple[float, float], athlete: SimAthlete) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Two-link leg from the ankle to the hip, knee in front. Returns (knee, hip),
+    pulling an out-of-reach hip back along the ankle-hip line."""
+    reach = math.hypot(*hip)
+    max_reach = (athlete.tibia_m + athlete.femur_m) * LOCKOUT_REACH_FRACTION
+    if reach > max_reach:
+        hip = (hip[0] * max_reach / reach, hip[1] * max_reach / reach)
+        reach = max_reach
+    tibia, femur = athlete.tibia_m, athlete.femur_m
+    along = (tibia ** 2 - femur ** 2 + reach ** 2) / (2.0 * reach)
+    across = math.sqrt(max(0.0, tibia ** 2 - along ** 2))
+    unit = (hip[0] / reach, hip[1] / reach)
+    # Perpendicular pointing forward-ish (the knee bends forward).
+    normal = (unit[1], -unit[0])
+    knee = (unit[0] * along + normal[0] * across, unit[1] * along + normal[1] * across)
+    return knee, hip
+
+
+def _arm(shoulder: tuple[float, float], wrist_down_m: float, bend_deg: float, athlete: SimAthlete) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Elbow and wrist hanging from the shoulder; a bent elbow points back."""
+    half = math.radians(bend_deg) / 2.0
+    upper, fore = athlete.upper_arm_m, athlete.forearm_m
+    elbow = (shoulder[0] - upper * math.sin(half), shoulder[1] - upper * math.cos(half))
+    wrist = (elbow[0] + fore * math.sin(half), elbow[1] - fore * math.cos(half))
+    del wrist_down_m
+    return elbow, wrist
+
+
+def _pose_from_bar(
+    bar: tuple[float, float],
+    trunk_deg: float,
+    shoulder_ahead_m: float,
+    elbow_bend_deg: float,
+    hip_shift_m: float,
+    bar_tilt_m: float,
+    athlete: SimAthlete,
+) -> _Pose:
+    half = math.radians(elbow_bend_deg) / 2.0
+    arm_drop = (athlete.upper_arm_m + athlete.forearm_m) * math.cos(half)
+    shoulder = (bar[0] + shoulder_ahead_m, bar[1] + athlete.grip_offset_m + arm_drop)
+    trunk = math.radians(trunk_deg)
+    hip = (shoulder[0] - athlete.torso_m * math.sin(trunk), shoulder[1] - athlete.torso_m * math.cos(trunk))
+    knee, solved_hip = _knee_for(hip, athlete)
+    if solved_hip != hip:
+        # The legs cannot reach: the body (and bar) rides down with the hip.
+        shift = (solved_hip[0] - hip[0], solved_hip[1] - hip[1])
+        hip = solved_hip
+        shoulder = (shoulder[0] + shift[0], shoulder[1] + shift[1])
+        bar = (bar[0] + shift[0], bar[1] + shift[1])
+    elbow, wrist = _arm(shoulder, 0.0, elbow_bend_deg, athlete)
+    return _Pose(
+        bar=bar, shoulder=shoulder, elbow=elbow, wrist=wrist, hip=hip, knee=knee,
+        hip_shift_m=hip_shift_m, bar_tilt_m=bar_tilt_m, hands_on_bar=True,
+    )
+
+
+def _standing_pose(athlete: SimAthlete, bar_rest: tuple[float, float], back_m: float) -> _Pose:
+    leg = (athlete.tibia_m + athlete.femur_m) * STANDING_REACH_FRACTION
+    hip = (0.0, leg)
+    knee, hip = _knee_for(hip, athlete)
+    shoulder = (hip[0], hip[1] + athlete.torso_m)
+    elbow = (shoulder[0], shoulder[1] - athlete.upper_arm_m)
+    wrist = (shoulder[0], elbow[1] - athlete.forearm_m)
+    # Walking in: the body is behind its final stance, the bar stays put.
+    bar = (bar_rest[0] + back_m, bar_rest[1])
+    return _Pose(
+        bar=bar, shoulder=shoulder, elbow=elbow, wrist=wrist, hip=hip, knee=knee,
+        hip_shift_m=0.0, bar_tilt_m=0.0, hands_on_bar=False,
+    )
+
+
+def _lerp_pose(first: _Pose, second: _Pose, fraction: float) -> _Pose:
+    def mix(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+        return (a[0] + (b[0] - a[0]) * fraction, a[1] + (b[1] - a[1]) * fraction)
+
+    return _Pose(
+        bar=second.bar if second.hands_on_bar else first.bar,
+        shoulder=mix(first.shoulder, second.shoulder),
+        elbow=mix(first.elbow, second.elbow),
+        wrist=mix(first.wrist, second.wrist),
+        hip=mix(first.hip, second.hip),
+        knee=mix(first.knee, second.knee),
+        hip_shift_m=first.hip_shift_m + (second.hip_shift_m - first.hip_shift_m) * fraction,
+        bar_tilt_m=first.bar_tilt_m + (second.bar_tilt_m - first.bar_tilt_m) * fraction,
+        hands_on_bar=second.hands_on_bar and fraction >= 1.0,
+    )
+
+
+class _Builder:
+    def __init__(self, scenario: Scenario) -> None:
+        self.scenario = scenario
+        self.athlete = scenario.athlete
+        self.dt = 1.0 / scenario.fps
+        self.t = scenario.start_time
+        self.frames: list[SimFrame] = []
+        self.reps: list[RepTruth] = []
+        self.rng = np.random.default_rng(scenario.seed)
+        tilt = math.radians(scenario.world_tilt_deg)
+        # Rotation about the lateral (X) axis: true up seen in the tilted world.
+        self.rotation = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, math.cos(tilt), -math.sin(tilt)],
+            [0.0, math.sin(tilt), math.cos(tilt)],
+        ])
+        athlete = self.athlete
+        self.bar_rest = (
+            athlete.midfoot_forward_m + scenario.bar_midfoot_offset_m,
+            PLATE_RADIUS_M - athlete.ankle_height_m,
+        )
+
+    # -- world mapping -------------------------------------------------
+
+    def _world(self, forward: float, up: float, lateral_left: float) -> np.ndarray:
+        local = np.array([lateral_left, -(up + self.athlete.ankle_height_m), -forward])
+        return self.rotation @ local
+
+    def _emit(self, pose: _Pose, back_m: float = 0.0, bar_up_override: float | None = None) -> None:
+        athlete = self.athlete
+        points = np.zeros((NUM_KEYPOINTS, 3))
+        shift = pose.hip_shift_m
+        offset = -back_m
+        for sign, hip_i, knee_i, ankle_i, shoulder_i, elbow_i, wrist_i, toe_i, heel_i in (
+            (1.0, CK.LEFT_HIP, CK.LEFT_KNEE, CK.LEFT_ANKLE, CK.LEFT_SHOULDER, CK.LEFT_ELBOW,
+             CK.LEFT_WRIST, CK.LEFT_FOOT_INDEX, CK.LEFT_HEEL),
+            (-1.0, CK.RIGHT_HIP, CK.RIGHT_KNEE, CK.RIGHT_ANKLE, CK.RIGHT_SHOULDER, CK.RIGHT_ELBOW,
+             CK.RIGHT_WRIST, CK.RIGHT_FOOT_INDEX, CK.RIGHT_HEEL),
+        ):
+            # Hip shift > 0 moves the hips toward the subject's right (-X).
+            points[ankle_i] = self._world(offset, 0.0, sign * athlete.stance_half_width_m)
+            points[toe_i] = self._world(offset + athlete.foot_m, -0.06, sign * (athlete.stance_half_width_m + 0.03))
+            points[heel_i] = self._world(offset - athlete.heel_m, -0.06, sign * athlete.stance_half_width_m)
+            points[knee_i] = self._world(offset + pose.knee[0], pose.knee[1], sign * athlete.stance_half_width_m - shift * 0.5)
+            points[hip_i] = self._world(offset + pose.hip[0], pose.hip[1], sign * athlete.hip_half_width_m - shift)
+            points[shoulder_i] = self._world(
+                offset + pose.shoulder[0], pose.shoulder[1], sign * athlete.shoulder_half_width_m - shift,
+            )
+            arm_x = athlete.grip_half_width_m if pose.hands_on_bar else athlete.shoulder_half_width_m + 0.03
+            points[elbow_i] = self._world(offset + pose.elbow[0], pose.elbow[1], sign * arm_x)
+            points[wrist_i] = self._world(offset + pose.wrist[0], pose.wrist[1], sign * arm_x)
+        head = (
+            offset + pose.shoulder[0] + 0.03, pose.shoulder[1] + 0.22,
+        )
+        points[CK.NOSE] = self._world(head[0] + 0.08, head[1], 0.0)
+        points[CK.LEFT_EYE] = self._world(head[0] + 0.07, head[1] + 0.03, 0.03)
+        points[CK.RIGHT_EYE] = self._world(head[0] + 0.07, head[1] + 0.03, -0.03)
+        points[CK.LEFT_EAR] = self._world(head[0], head[1] + 0.01, 0.07)
+        points[CK.RIGHT_EAR] = self._world(head[0], head[1] + 0.01, -0.07)
+
+        scenario = self.scenario
+        if scenario.keypoint_noise_m > 0.0:
+            points = points + self.rng.normal(0.0, scenario.keypoint_noise_m, points.shape)
+        confidences = np.full(NUM_KEYPOINTS, 0.9)
+
+        bar_state = None
+        if scenario.track_bar:
+            bar_forward, bar_up = pose.bar
+            if bar_up_override is not None:
+                bar_up = bar_up_override
+            tilt = pose.bar_tilt_m
+            left = self._world(bar_forward, bar_up - tilt / 2.0, HUB_HALF_SPAN_M)
+            right = self._world(bar_forward, bar_up + tilt / 2.0, -HUB_HALF_SPAN_M)
+            if scenario.bar_noise_m > 0.0:
+                left = left + self.rng.normal(0.0, scenario.bar_noise_m, 3)
+                right = right + self.rng.normal(0.0, scenario.bar_noise_m, 3)
+            bar_state = BarState3D(
+                timestamp=self.t,
+                left_end_m=tuple(float(v) for v in left),
+                right_end_m=tuple(float(v) for v in right),
+                views=3,
+            )
+        self.frames.append(SimFrame(
+            timestamp=self.t, frame_index=len(self.frames) + 1,
+            points=points, confidences=confidences, bar=bar_state,
+        ))
+        self.t += self.dt
+
+    def _hold(self, pose: _Pose, seconds: float, back_m: float = 0.0) -> None:
+        for _ in range(int(round(seconds * self.scenario.fps))):
+            self._emit(pose, back_m)
+
+    def _blend(self, first: _Pose, second: _Pose, seconds: float, back_from: float = 0.0, back_to: float = 0.0) -> None:
+        steps = max(1, int(round(seconds * self.scenario.fps)))
+        for step in range(1, steps + 1):
+            fraction = _smooth(step / steps)
+            self._emit(_lerp_pose(first, second, fraction), back_from + (back_to - back_from) * fraction)
+
+    # -- rep geometry --------------------------------------------------
+
+    def _setup_pose(self, script: RepScript) -> _Pose:
+        athlete = self.athlete
+        solution = solve_setup(
+            athlete.segments(), self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, 0.05,
+        )
+        trunk = solution.trunk_deg if solution is not None else 60.0
+        return _pose_from_bar(self.bar_rest, trunk, script.shoulder_ahead_m, 0.0, 0.0, 0.0, athlete)
+
+    def _top_geometry(self, script: RepScript) -> tuple[float, float]:
+        """Bar height at the top and the trunk angle there."""
+        athlete = self.athlete
+        trunk_top = script.lockout_deficit_deg - script.lean_back_deg
+        reach = (athlete.tibia_m + athlete.femur_m) * LOCKOUT_REACH_FRACTION
+        shoulder_forward = self.bar_rest[0]
+        hip_forward = shoulder_forward - athlete.torso_m * math.sin(math.radians(trunk_top))
+        hip_up = math.sqrt(max(0.0, reach ** 2 - hip_forward ** 2))
+        shoulder_up = hip_up + athlete.torso_m * math.cos(math.radians(trunk_top))
+        bar_up = shoulder_up - athlete.grip_offset_m - athlete.arm_m
+        return bar_up, trunk_top
+
+    def _pull_pose(self, script: RepScript, fraction: float, top_up: float, trunk_top: float,
+                   trunk_setup: float, trunk_knee: float, knee_up: float) -> _Pose:
+        rest_forward, rest_up = self.bar_rest
+        bar_up = rest_up + (top_up - rest_up) * fraction
+        drift = script.bar_drift_m * math.sin(math.pi * min(1.0, fraction / 0.8)) if fraction < 0.8 else 0.0
+        if bar_up <= knee_up:
+            share = (bar_up - rest_up) / max(1e-6, knee_up - rest_up)
+            trunk = trunk_setup + (trunk_knee + script.hips_shoot_deg - trunk_setup) * share
+        else:
+            share = (bar_up - knee_up) / max(1e-6, top_up - knee_up)
+            trunk = (trunk_knee + script.hips_shoot_deg) + (trunk_top - trunk_knee - script.hips_shoot_deg) * _smooth(share)
+        shoulder_ahead = script.shoulder_ahead_m * (1.0 - fraction)
+        bend = script.elbow_bend_deg * math.sin(math.pi * fraction)
+        shift = script.hip_shift_m * min(1.0, fraction / 0.5)
+        tilt = script.bar_tilt_m * math.sin(math.pi * min(1.0, fraction / 0.5) / 2.0)
+        return _pose_from_bar(
+            (rest_forward + drift, bar_up), trunk, shoulder_ahead, bend, shift, tilt, self.athlete,
+        )
+
+    def _rep(self, script: RepScript, touch_and_go_in: bool, next_is_touch_and_go: bool) -> None:
+        athlete = self.athlete
+        segments = athlete.segments()
+        setup = solve_setup(segments, self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, 0.05)
+        knee_pass = solve_knee_pass(segments, self.bar_rest[0], script.shoulder_ahead_m, 0.05)
+        trunk_setup = setup.trunk_deg if setup is not None else 60.0
+        trunk_knee = knee_pass.trunk_deg if knee_pass is not None else 45.0
+        knee_up = knee_pass.knee_height_m if knee_pass is not None else athlete.tibia_m
+        top_up, trunk_top = self._top_geometry(script)
+
+        liftoff_time = self.t - self.dt if touch_and_go_in else self.t
+        if script.fail_rise_m is not None:
+            fail_up = self.bar_rest[1] + script.fail_rise_m
+            top_fraction = (fail_up - self.bar_rest[1]) / (top_up - self.bar_rest[1])
+            steps = int(round(script.pull_s * self.scenario.fps))
+            for step in range(1, steps + 1):
+                self._emit(self._pull_pose(script, top_fraction * _smooth(step / steps), top_up, trunk_top,
+                                           trunk_setup, trunk_knee, knee_up))
+            for step in range(1, steps + 1):
+                self._emit(self._pull_pose(script, top_fraction * (1.0 - _smooth(step / steps)), top_up,
+                                           trunk_top, trunk_setup, trunk_knee, knee_up))
+            self._hold(self._setup_pose(script), script.floor_hold_s)
+            self.reps.append(RepTruth(liftoff_time, math.nan, math.nan, math.nan, False, touch_and_go_in))
+            return
+
+        knee_pass_time = math.nan
+        steps = int(round(script.pull_s * self.scenario.fps))
+        knee_fraction = (knee_up - self.bar_rest[1]) / (top_up - self.bar_rest[1])
+        for step in range(1, steps + 1):
+            fraction = _smooth(step / steps)
+            if math.isnan(knee_pass_time) and fraction >= knee_fraction:
+                previous = _smooth((step - 1) / steps)
+                part = (knee_fraction - previous) / max(1e-9, fraction - previous)
+                knee_pass_time = self.t - self.dt + part * self.dt
+            self._emit(self._pull_pose(script, fraction, top_up, trunk_top, trunk_setup, trunk_knee, knee_up))
+        top_time = self.t - self.dt
+        top_pose = self._pull_pose(script, 1.0, top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
+        self._hold(top_pose, script.top_hold_s)
+
+        if script.drop_bar:
+            floor_time = self._drop(top_pose, top_up)
+        else:
+            lower_steps = int(round(script.lower_s * self.scenario.fps))
+            clean = script.model_copy(update={
+                "hips_shoot_deg": 0.0, "bar_drift_m": 0.0, "elbow_bend_deg": 0.0,
+            })
+            for step in range(1, lower_steps + 1):
+                fraction = 1.0 - _smooth(step / lower_steps)
+                self._emit(self._pull_pose(clean, fraction, top_up, trunk_top, trunk_setup, trunk_knee, knee_up))
+            floor_time = self.t - self.dt
+        self.reps.append(RepTruth(liftoff_time, knee_pass_time, top_time, floor_time, True, touch_and_go_in))
+        if not next_is_touch_and_go:
+            self._hold(self._setup_pose(script), script.floor_hold_s)
+
+    def _drop(self, top_pose: _Pose, top_up: float) -> float:
+        """Hands open at the top: the bar falls, bounces on bumpers, settles. The
+        lifter stays standing."""
+        athlete = self.athlete
+        rest_up = self.bar_rest[1]
+        standing = _standing_pose(athlete, self.bar_rest, 0.0)
+        bar_up = top_up
+        velocity = 0.0
+        floor_time = math.nan
+        bounce_velocity = 0.0
+        for _ in range(int(round(1.5 * self.scenario.fps))):
+            velocity -= 9.81 * self.dt
+            bar_up += velocity * self.dt
+            if bar_up <= rest_up:
+                bar_up = rest_up
+                if math.isnan(floor_time):
+                    floor_time = self.t
+                    # A bumper returns a small bounce (~2 cm).
+                    bounce_velocity = math.sqrt(2.0 * 9.81 * 0.02)
+                    velocity = bounce_velocity
+                else:
+                    velocity = 0.0
+            pose = standing._replace(bar=(self.bar_rest[0], bar_up))
+            self._emit(pose)
+        return floor_time
+
+    def build(self) -> SimulatedSet:
+        scenario = self.scenario
+        athlete = self.athlete
+        reps = scenario.reps
+        standing = _standing_pose(athlete, self.bar_rest, 0.0)
+        self._blend(standing, standing, scenario.approach_s, back_from=scenario.approach_m, back_to=0.0)
+        self._hold(standing, scenario.stance_s)
+        setup = self._setup_pose(reps[0])
+        self._blend(standing, setup, scenario.hinge_s)
+        self._hold(setup, scenario.setup_hold_s)
+        touch_and_go_in = False
+        for index, script in enumerate(reps):
+            next_tng = script.floor_hold_s <= 0.0 and index + 1 < len(reps) and not script.drop_bar
+            self._rep(script, touch_and_go_in, next_tng)
+            if script.drop_bar and index + 1 < len(reps):
+                # Back down to the bar for the next rep.
+                self._blend(standing, self._setup_pose(reps[index + 1]), scenario.hinge_s)
+                self._hold(self._setup_pose(reps[index + 1]), scenario.setup_hold_s)
+            touch_and_go_in = next_tng
+        last_setup = self._setup_pose(reps[-1])
+        if not reps[-1].drop_bar:
+            self._blend(last_setup, standing, scenario.hinge_s)
+        self._blend(standing, standing, scenario.leave_s, back_from=0.0, back_to=scenario.approach_m)
+        gravity_up = self.rotation @ np.array([0.0, -1.0, 0.0])
+        return SimulatedSet(frames=self.frames, reps=self.reps, gravity_up_world=gravity_up)
+
+
+def simulate(scenario: Scenario | None = None) -> SimulatedSet:
+    return _Builder(scenario or Scenario()).build()

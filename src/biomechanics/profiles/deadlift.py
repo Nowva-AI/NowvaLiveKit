@@ -1,98 +1,206 @@
 """
-Deadlift Exercise Profile
+Conventional Deadlift Exercise Profile
 
-Conventional and sumo deadlift. Signal is inverted hip Y-position
-so the FSM sees a normal "descend then ascend" pattern even though
-the user starts at the bottom.
+The bar drives the rep: a state machine over the bar's height (deadlift.analyzer)
+counts dead-stop and touch-and-go reps, and ten whole-rep rules judge setup,
+coordination, bar path, lockout and symmetry (docs/deadlift/PLAN.md §2.6). The
+profile is stateless; all per-frame state lives in the analyser.
+
+Until the deadlift is validated on real lifts it is unreachable: get_profile()
+hands out GatedDeadliftProfile, which counts nothing and fires nothing, unless
+NOWVA_DEV_COACHING_READY lists "deadlift". Sumo and other variants are never
+this profile (registry: UntrackedVariantProfile).
 """
 
-import logging
+from __future__ import annotations
+
+import math
+import os
 from typing import Dict, List, Optional
 
-from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
+from biomechanics.config import BiomechanicsConfig
 from biomechanics.faults.fault_types import FaultRule
-from biomechanics.faults.rules.range_of_motion import RangeOfMotionRule
-from biomechanics.faults.rules.symmetry import SymmetryRule
-from biomechanics.faults.rules.back_rounding import BackRoundingRule
-from biomechanics.faults.rules.bar_path import BarPathRule
+from biomechanics.faults.rules.deadlift_bar_drift import DeadliftBarDriftRule
+from biomechanics.faults.rules.deadlift_bar_position import DeadliftBarPositionRule
+from biomechanics.faults.rules.deadlift_bar_tilt import DeadliftBarTiltRule
+from biomechanics.faults.rules.deadlift_bent_arms import DeadliftBentArmsRule
+from biomechanics.faults.rules.deadlift_hip_shift import DeadliftHipShiftRule
+from biomechanics.faults.rules.deadlift_hips_shoot import DeadliftHipsShootRule
+from biomechanics.faults.rules.deadlift_lean_back import DeadliftLeanBackRule
+from biomechanics.faults.rules.deadlift_lockout import DeadliftLockoutRule
+from biomechanics.faults.rules.deadlift_setup_hips import DeadliftSetupHipsRule
+from biomechanics.faults.rules.deadlift_shoulders_behind import DeadliftShouldersBehindRule
+from biomechanics.faults.rules.deadlift_velocity_loss import DeadliftVelocityLossRule
 from biomechanics.profiles.base import ExerciseProfile
 from biomechanics.profiles.registry import register_profile
-from biomechanics.utils.types import CocoKeypoints, JointAngles, Skeleton3D
+from biomechanics.profiles.untracked import UntrackedProfile, UntrackedVariantProfile
+from biomechanics.utils.types import CocoKeypoints as CK
+from biomechanics.utils.types import JointAngles, Skeleton3D
 
-logger = logging.getLogger(__name__)
+DEV_COACHING_READY_ENV = "NOWVA_DEV_COACHING_READY"
+DEADLIFT_SET_IDLE_TIMEOUT_S = 30.0
+DEADLIFT_CLOSED_LOOP_CUE = "deadlift_bar_midfoot"
+# Cues stay on while these are seen: plates may hide the shins and ankles during
+# the pull, but the midfoot is locked at setup by then.
+DEADLIFT_TRACKING_KEYPOINTS = (
+    CK.LEFT_HIP, CK.RIGHT_HIP,
+    CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER,
+    CK.LEFT_WRIST, CK.RIGHT_WRIST,
+)
+
+# fault_type -> cue base key (side / direction variants live in the cue dict).
+DEADLIFT_FAULT_TO_CUE: Dict[str, str] = {
+    "deadlift_bar_position": "deadlift_bar_midfoot",
+    "deadlift_shoulders_behind": "deadlift_shoulders_over",
+    "deadlift_setup_hips": "deadlift_hips",
+    "deadlift_hips_shoot": "deadlift_chest_with_hips",
+    "deadlift_bar_drift": "deadlift_bar_close",
+    "deadlift_lockout": "deadlift_lockout",
+    "deadlift_lean_back": "deadlift_finish_neutral",
+    "deadlift_hip_shift": "deadlift_even_feet",
+    "deadlift_bar_tilt": "deadlift_level_bar",
+    "deadlift_bent_arms": "deadlift_long_arms",
+}
+DEADLIFT_CUE_VARIANTS = (
+    "deadlift_hips_up", "deadlift_hips_down",
+    "deadlift_even_feet_left", "deadlift_even_feet_right",
+)
+# The closed-loop foot guidance before the first pull (CONTRACT.md §4).
+DEADLIFT_GUIDANCE_CUES = ("deadlift_step_closer", "deadlift_closer", "deadlift_back", "adjust_good")
 
 
-@register_profile("deadlift", "conventional_deadlift", "sumo_deadlift")
+def _dev_coaching_ready(exercise: str) -> bool:
+    listed = os.environ.get(DEV_COACHING_READY_ENV, "")
+    return exercise in {name.strip().lower() for name in listed.split(",")}
+
+
+class GatedDeadliftProfile(UntrackedProfile):
+    """What a deadlift resolves to until it is coaching-ready: nothing counted,
+    nothing judged, but the deadlift's safety flags, so its frames never touch the
+    squat's camera refines or body measurements."""
+
+    allows_camera_refine = False
+    feeds_body_calibration = False
+
+
+@register_profile(
+    "deadlift",
+    "deadlifts",
+    "conventional_deadlift",
+    "barbell_deadlift",
+    "barbell_conventional_deadlift",
+)
 class DeadliftProfile(ExerciseProfile):
-    """Profile for conventional and sumo deadlift."""
+    """Profile for the conventional barbell deadlift."""
 
     name = "deadlift"
     movement_pattern = "deadlift"
+    # The squat's assessment, calibration and causal engine model squats only.
+    uses_diagnosis_engine = False
+    uses_bilstm_counter = False
+    coaching_ready = _dev_coaching_ready("deadlift")
+    display_name = "conventional deadlift"
+
+    gate_until_ready = True
+    needs_bar_3d = True
+    allows_camera_refine = False
+    feeds_body_calibration = False
+    set_idle_timeout_s = DEADLIFT_SET_IDLE_TIMEOUT_S
+    waits_for_diagnosis = True
+    closed_loop_cue = DEADLIFT_CLOSED_LOOP_CUE
+    tracking_keypoints = DEADLIFT_TRACKING_KEYPOINTS
+
+    @classmethod
+    def gated_profile(cls) -> ExerciseProfile:
+        return GatedDeadliftProfile()
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
+        """D1-D10, in cue priority order. No DepthRule: one would turn on
+        depth-gated counting."""
+        fc = config.faults
+        scale = fc.deadlift_wrist_proxy_threshold_scale
         return [
-            RangeOfMotionRule(
-                metric_getter=lambda a: a.avg_knee_flexion,
-                target_threshold=40.0,
-                min_threshold=20.0,
-                direction="max",
-                metric_name="hip extension",
-            ),
-            SymmetryRule(
-                left_getter=lambda a: a.knee_flexion_l,
-                right_getter=lambda a: a.knee_flexion_r,
-                joint_name="knee",
-                mild_threshold=8.0,
-                moderate_threshold=13.0,
-                severe_threshold=18.0,
-            ),
-            BackRoundingRule(
-                mild_threshold=10.0,
-                moderate_threshold=20.0,
-                severe_threshold=30.0,
-            ),
-            BarPathRule(
-                mild_threshold=8.0,
-                moderate_threshold=15.0,
-                severe_threshold=22.0,
-            ),
+            DeadliftBarPositionRule(fc.deadlift_bar_position, scale),
+            DeadliftShouldersBehindRule(fc.deadlift_shoulders_behind, scale),
+            DeadliftSetupHipsRule(fc.deadlift_setup_hips, scale),
+            DeadliftHipsShootRule(fc.deadlift_hips_shoot, scale),
+            DeadliftBarDriftRule(fc.deadlift_bar_drift, scale),
+            DeadliftLockoutRule(fc.deadlift_lockout, scale),
+            DeadliftLeanBackRule(fc.deadlift_lean_back, scale),
+            DeadliftHipShiftRule(fc.deadlift_hip_shift, scale),
+            DeadliftBarTiltRule(fc.deadlift_bar_tilt, scale),
+            DeadliftBentArmsRule(fc.deadlift_bent_arms, scale),
+            DeadliftVelocityLossRule(fc.deadlift_velocity_loss, scale),
         ]
+
+    def create_rep_analyzer(self, config: BiomechanicsConfig):
+        from biomechanics.deadlift.analyzer import DeadliftRepAnalyzer
+
+        return DeadliftRepAnalyzer(config.deadlift)
+
+    def create_rep_counter(self, config: BiomechanicsConfig):
+        """The counter is a view of an analyser; the pipeline builds both through
+        create_rep_analyzer, this standalone pair is for tools and tests."""
+        from biomechanics.deadlift.rep_counter import DeadliftRepCounter
+
+        return DeadliftRepCounter(self.create_rep_analyzer(config))
+
+    def create_session_reference(self):
+        from biomechanics.deadlift.session_reference import DeadliftSessionReference
+
+        return DeadliftSessionReference()
+
+    def create_set_diagnosis(self, capture_mode: str):
+        from biomechanics.deadlift.diagnosis import DeadliftSetDiagnosis
+
+        return DeadliftSetDiagnosis(capture_mode=capture_mode)
 
     def get_rep_signal(
         self, skeleton_3d: Skeleton3D, angles: Optional[JointAngles] = None
     ) -> float:
-        """Inverted hip Y so bottom-start exercises work with the FSM."""
-        kpts = skeleton_3d.to_numpy()
-        hip_mid_y = (
-            kpts[CocoKeypoints.LEFT_HIP][1] + kpts[CocoKeypoints.RIGHT_HIP][1]
-        ) / 2
-        ankle_mid_y = (
-            kpts[CocoKeypoints.LEFT_ANKLE][1] + kpts[CocoKeypoints.RIGHT_ANKLE][1]
-        ) / 2
-        return -(hip_mid_y - ankle_mid_y) * 100.0
-
-    def create_rep_counter_config(
-        self, config: BiomechanicsConfig
-    ) -> HipPositionCounterConfig:
-        return HipPositionCounterConfig(
-            entry_vel_threshold=3.0,
-            bottom_vel_threshold=5.0,
-            ascending_vel_threshold=3.0,
-            min_depth_cm=20.0,
-            standing_return_cm=5.0,
-            min_rep_duration_s=0.667,
-        )
-
-    def get_depth_metric(self, angles: JointAngles) -> float:
-        return angles.avg_knee_flexion
-
-    def get_asymmetry_metrics(self, angles: JointAngles) -> Dict[str, float]:
-        return {"knee": angles.knee_asymmetry, "hip": angles.hip_asymmetry}
+        # Never called: the analyser supplies the signal (bar height above its rest).
+        return math.nan
 
     def get_fault_to_cue_map(self) -> Dict[str, str]:
+        return dict(DEADLIFT_FAULT_TO_CUE)
+
+    def get_cue_dict(self) -> Dict[str, str]:
+        from biomechanics.coaching.cue_cache import GENERIC_POSITIVE_CUE_KEYS, build_cue_dict
+
+        return build_cue_dict(
+            *DEADLIFT_FAULT_TO_CUE.values(),
+            *DEADLIFT_CUE_VARIANTS,
+            *DEADLIFT_GUIDANCE_CUES,
+            *GENERIC_POSITIVE_CUE_KEYS,
+        )
+
+    def min_cue_tiers(self, config: BiomechanicsConfig) -> Dict[str, str]:
+        fc = config.faults
         return {
-            "range_of_motion": "deadlift_lockout",
-            "back_rounding": "deadlift_flat_back",
-            "bar_path": "deadlift_bar_close",
-            "bilateral_asymmetry": "deadlift_even",
+            fault_type: getattr(fc, fault_type).min_tier
+            for fault_type in (
+                "deadlift_bar_position",
+                "deadlift_shoulders_behind",
+                "deadlift_setup_hips",
+                "deadlift_hips_shoot",
+                "deadlift_bar_drift",
+                "deadlift_lockout",
+                "deadlift_lean_back",
+                "deadlift_hip_shift",
+                "deadlift_bar_tilt",
+                "deadlift_bent_arms",
+                "deadlift_velocity_loss",
+            )
         }
+
+
+# Variants the conventional rules do not model: untracked, never DeadliftProfile.
+register_profile(
+    "sumo_deadlift",
+    "trap_bar_deadlift",
+    "hex_bar_deadlift",
+    "deficit_deadlift",
+    "snatch_grip_deadlift",
+    "single_leg_deadlift",
+    "rack_pull",
+)(UntrackedVariantProfile)

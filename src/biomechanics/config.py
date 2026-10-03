@@ -182,6 +182,22 @@ class FootPlacementConfig(BaseModel):
     flare_severe_deg: float = 22.0
 
 
+class DeadliftFaultConfig(BaseModel):
+    """One deadlift fault's mild / moderate / severe thresholds and the lowest tier
+    that may be cued (PLAN.md §2.9: a tier is cued only once its measurement error
+    is proven below a third of its threshold). min_tier "recap" is never cued."""
+    mild: float
+    moderate: float
+    severe: float
+    min_tier: str = "moderate"
+
+
+def _deadlift_fault(mild: float, moderate: float, severe: float, min_tier: str):
+    return Field(default_factory=lambda: DeadliftFaultConfig(
+        mild=mild, moderate=moderate, severe=severe, min_tier=min_tier,
+    ))
+
+
 class FaultsConfig(BaseModel):
     """Fault detection configuration."""
     depth: DepthFaultConfig = Field(default_factory=DepthFaultConfig)
@@ -197,6 +213,26 @@ class FaultsConfig(BaseModel):
     descent_control: DescentControlConfig = Field(default_factory=DescentControlConfig)
     velocity_loss: VelocityLossConfig = Field(default_factory=VelocityLossConfig)
     foot_placement: FootPlacementConfig = Field(default_factory=FootPlacementConfig)
+    # Conventional deadlift (PLAN.md §2.6). Initial values; J6 re-sets thresholds
+    # and min tiers from real data. Units: cm (D1, D4, D7, D3, D8b), deg (D2, D6,
+    # D5, D9), ratio of ankle separation (D8), percent (D10).
+    deadlift_bar_position: DeadliftFaultConfig = _deadlift_fault(3.0, 5.0, 8.0, "mild")
+    # Outside the setup model's hip band. Severe-only until the model's P95 error
+    # (model + hip-keypoint bias) is measured (§2.7).
+    deadlift_setup_hips: DeadliftFaultConfig = _deadlift_fault(4.0, 7.0, 10.0, "severe")
+    deadlift_shoulders_behind: DeadliftFaultConfig = _deadlift_fault(2.0, 4.0, 6.0, "moderate")
+    deadlift_hips_shoot: DeadliftFaultConfig = _deadlift_fault(10.0, 15.0, 20.0, "moderate")
+    deadlift_bar_drift: DeadliftFaultConfig = _deadlift_fault(3.0, 5.0, 8.0, "moderate")
+    deadlift_lockout: DeadliftFaultConfig = _deadlift_fault(8.0, 12.0, 20.0, "moderate")
+    deadlift_lean_back: DeadliftFaultConfig = _deadlift_fault(8.0, 12.0, 18.0, "moderate")
+    deadlift_hip_shift: DeadliftFaultConfig = _deadlift_fault(0.10, 0.15, 0.22, "moderate")
+    deadlift_bar_tilt: DeadliftFaultConfig = _deadlift_fault(3.0, 5.0, 7.0, "moderate")
+    deadlift_bent_arms: DeadliftFaultConfig = _deadlift_fault(15.0, 25.0, 35.0, "mild")
+    # Sánchez-Medina 2011. Fatigue is load advice, never a mid-set technique cue.
+    deadlift_velocity_loss: DeadliftFaultConfig = _deadlift_fault(20.0, 30.0, 40.0, "recap")
+    # Bar measured from the wrists (no bar tracking): D1, D3 and D8b thresholds
+    # widen by this factor (§6).
+    deadlift_wrist_proxy_threshold_scale: float = 1.5
 
 
 class BiLSTMConfig(BaseModel):
@@ -269,6 +305,78 @@ class HipPositionCounterConfig(BaseModel):
 
     # Rep validation
     min_rep_duration_s: float = 0.5         # 15 frames at 30 fps
+
+
+class DeadliftConfig(BaseModel):
+    """Deadlift rep state machine and analyser (PLAN.md §2.3–2.4, §2.7).
+
+    Initial values, re-set from real lifts at J6. Distances in metres, speeds in
+    m/s, durations in seconds; heights are along measured gravity.
+    """
+    # APPROACH -> STANCE: standing still, facing the bar, close enough to guide.
+    stance_still_s: float = 0.5
+    stance_max_bar_ahead_m: float = 0.40
+    stance_max_bar_lateral_m: float = 0.30
+    facing_max_deg: float = 60.0
+    # The bar behind the midfoot by more than this is behind the lifter.
+    max_bar_behind_m: float = 0.10
+    # STANCE -> SETUP: hands within this band around the bar, still.
+    hands_max_above_bar_m: float = 0.10
+    hands_max_below_bar_m: float = 0.04
+    hands_max_forward_m: float = 0.12
+    setup_still_s: float = 0.3
+    # Without bar tracking, a setup is a hinge with the wrists below the knees.
+    wrist_proxy_min_hinge_deg: float = 30.0
+    # SETUP / FLOOR -> PULL and the back-dated liftoff.
+    liftoff_rise_m: float = 0.03
+    liftoff_velocity_mps: float = 0.10
+    liftoff_rest_band_m: float = 0.005
+    liftoff_rest_speed_mps: float = 0.02
+    liftoff_lookback_s: float = 0.5
+    # PULL -> TOP.
+    top_margin_m: float = 0.08
+    top_still_speed_mps: float = 0.05
+    top_still_frames: int = 3
+    top_max_trunk_deg: float = 35.0
+    # A pull that rose this far but never reached the top is a failed rep.
+    failed_rep_min_rise_m: float = 0.10
+    # TOP -> LOWER.
+    lower_velocity_mps: float = 0.10
+    # LOWER -> FLOOR (dead stop).
+    floor_band_m: float = 0.02
+    dead_stop_speed_mps: float = 0.02
+    dead_stop_frames: int = 3
+    dead_stop_hold_s: float = 0.3
+    # LOWER -> PULL (touch-and-go). A bumper bounce rises no more than touch_go_rise_m.
+    touch_go_band_m: float = 0.05
+    touch_go_rise_m: float = 0.03
+    touch_go_sustain_s: float = 0.1
+    # FLOOR -> SETUP, and the setup windows judged before liftoff.
+    resetup_hold_s: float = 0.3
+    setup_window_s: float = 0.3
+    quick_pull_window_s: float = 0.2
+    min_setup_frames: int = 3
+    # STANCE -> APPROACH.
+    walk_away_s: float = 0.5
+    # Standing references (lockout, lean-back, bent arms) and stillness.
+    standing_still_s: float = 1.0
+    standing_max_knee_deg: float = 20.0
+    standing_max_trunk_deg: float = 20.0
+    still_speed_mps: float = 0.05
+    # Bar velocity is the slope of its height over this window.
+    velocity_window_s: float = 0.1
+    # The midfoot is locked from the last still frames of STANCE.
+    midfoot_lock_frames: int = 15
+    # Wrist joint above the bar centre; learned per athlete when the bar is tracked.
+    wrist_to_bar_offset_m: float = 0.075
+    min_wrist_to_bar_offset_m: float = 0.04
+    max_wrist_to_bar_offset_m: float = 0.12
+    # Setup model (§2.7): bar axis to the shin line at contact, and the shoulder band.
+    shin_bar_distance_m: float = 0.05
+    shoulder_band_low_m: float = 0.0
+    shoulder_band_high_m: float = 0.06
+    # A bar state older than this (or a prediction) is not trusted for the setup.
+    max_bar_gap_s: float = 0.2
 
 
 class CoachingConfig(BaseModel):
@@ -362,6 +470,7 @@ class BiomechanicsConfig(BaseModel):
     standing_gate: StandingGateConfig = Field(default_factory=StandingGateConfig)
     readiness_gate: ReadinessGateConfig = Field(default_factory=ReadinessGateConfig)
     hip_counter: HipPositionCounterConfig = Field(default_factory=HipPositionCounterConfig)
+    deadlift: DeadliftConfig = Field(default_factory=DeadliftConfig)
 
     # Convenience properties
     @property
@@ -479,6 +588,9 @@ def load_pipeline_config(path: Optional[str] = None) -> BiomechanicsConfig:
 
     if "hip_counter" in raw_config:
         config_dict["hip_counter"] = HipPositionCounterConfig(**raw_config["hip_counter"])
+
+    if "deadlift" in raw_config:
+        config_dict["deadlift"] = DeadliftConfig(**raw_config["deadlift"])
 
     return BiomechanicsConfig(**config_dict)
 

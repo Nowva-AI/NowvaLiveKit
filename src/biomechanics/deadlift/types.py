@@ -94,6 +94,8 @@ class DeadliftRepFeatures(BaseModel):
     lean_back_deg: float = NAN
     hip_shift_ratio: float = NAN
     bar_tilt_cm: float = NAN
+    # "left" / "right": the end that sat lower; "" when not measured.
+    bar_low_side: str = ""
     elbow_flexion_deg: float = NAN
     concentric_velocity_mps: float = NAN
     velocity_loss_pct: float = NAN
