@@ -13,6 +13,8 @@ import math
 
 from biomechanics.faults.session_reference import SessionReference
 
+from .types import DeadliftRepFeatures
+
 _LOWER_IS_BETTER = (
     "bar_drift_cm",
     "trunk_change_liftoff_knee_deg",
@@ -22,7 +24,7 @@ _LOWER_IS_BETTER = (
 
 class DeadliftSessionReference(SessionReference):
 
-    def update(self, features) -> None:
+    def update(self, features: DeadliftRepFeatures) -> None:
         """Fold a completed deadlift rep into the bests and the set's velocities."""
         observed = {
             "bar_drift_cm": features.bar_drift_cm,

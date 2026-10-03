@@ -32,6 +32,8 @@ DEADLIFT_NAMES = ["deadlift", "deadlifts", "Barbell Deadlift", "conventional dea
 VARIANT_NAMES = [
     "Barbell Sumo Deadlift", "Trap Bar Deadlift", "Hex Bar Deadlift", "Deficit Deadlift",
     "Snatch Grip Deadlift", "Single Leg Deadlift", "Rack Pull", "Dumbbell Deadlift", "Kettlebell Deadlift",
+    "Jefferson Deadlift", "Landmine Deadlift", "Smith Machine Deadlift", "Banded Deadlift", "Tempo Deadlift",
+    "Paused Deadlift",
 ]
 SQUAT_NAMES = ["squat", "back squat", "front squat", "goblet squat", "bodyweight squat",
                "Barbell Back Squat", "Barbell Front Squat"]

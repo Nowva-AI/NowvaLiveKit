@@ -15,6 +15,7 @@ from typing import Any
 
 from biomechanics.config import DeadliftFaultConfig
 from biomechanics.faults.fault_types import RepFaultRule
+from biomechanics.faults.session_reference import SessionReference
 from biomechanics.utils.types import FaultEvent, JointAngles
 
 from .types import BAR_SOURCE_WRIST_PROXY, GRAVITY_SOURCE_BODY, DeadliftRepFeatures
@@ -51,7 +52,7 @@ class DeadliftRepRule(RepFaultRule):
         """The lowest tier this rep's own evidence lets the rule be cued at."""
         return "mild"
 
-    def judge_rep(self, features, reference, angles: JointAngles) -> FaultEvent | None:
+    def judge_rep(self, features: object, reference: SessionReference, angles: JointAngles) -> FaultEvent | None:
         if not isinstance(features, DeadliftRepFeatures):
             return None
         measured = self.measure(features)

@@ -210,5 +210,15 @@ register_profile(
     "single_leg_deadlift",
     "dumbbell_deadlift",
     "kettlebell_deadlift",
+    "jefferson_deadlift",
+    "landmine_deadlift",
+    "smith_machine_deadlift",
+    "banded_deadlift",
+    "band_resisted_deadlift",
+    "chain_deadlift",
+    # The conventional lift, but paced so D10 and the event model misread it.
+    "tempo_deadlift",
+    "paused_deadlift",
+    "pause_deadlift",
     "rack_pull",
 )(UntrackedVariantProfile)

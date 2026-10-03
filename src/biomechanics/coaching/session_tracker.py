@@ -445,8 +445,9 @@ class SessionTracker:
     ) -> Dict[str, Any]:
         """Compute summary stats for a completed set."""
         depths = [r.max_depth_angle for r in reps]
-        if depths and not any(depth == depth for depth in depths):
-            # No depth at all (a deadlift set).
+        if len(depths) > 1 and not any(depth == depth for depth in depths):
+            # No depth at all (a deadlift set), where statistics.stdev would fail;
+            # one rep takes the unchanged path below.
             avg_depth = depth_consistency = float("nan")
         else:
             avg_depth = statistics.mean(depths) if depths else 0.0

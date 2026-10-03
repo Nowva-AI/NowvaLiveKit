@@ -399,9 +399,9 @@ class IPCBridge:
             return
 
         depths = [r.max_depth_angle for r in reps]
-        if not any(depth == depth for depth in depths):
+        if len(depths) > 1 and not any(depth == depth for depth in depths):
             # No depth at all (a deadlift set): null, not NaN arithmetic that
-            # statistics.stdev cannot do.
+            # statistics.stdev cannot do. One rep takes the unchanged path below.
             avg_depth = depth_consistency = math.nan
         else:
             avg_depth = statistics.mean(depths)
