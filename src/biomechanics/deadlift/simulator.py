@@ -164,14 +164,38 @@ def _knee_for(hip: tuple[float, float], athlete: SimAthlete) -> tuple[tuple[floa
     return knee, hip
 
 
-def _arm(shoulder: tuple[float, float], wrist_down_m: float, bend_deg: float, athlete: SimAthlete) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Elbow and wrist hanging from the shoulder; a bent elbow points back."""
-    half = math.radians(bend_deg) / 2.0
-    upper, fore = athlete.upper_arm_m, athlete.forearm_m
-    elbow = (shoulder[0] - upper * math.sin(half), shoulder[1] - upper * math.cos(half))
-    wrist = (elbow[0] + fore * math.sin(half), elbow[1] - fore * math.cos(half))
-    del wrist_down_m
-    return elbow, wrist
+def _elbow_between(
+    shoulder: tuple[float, float], wrist: tuple[float, float], bend_deg: float, athlete: SimAthlete,
+) -> tuple[float, float]:
+    """The elbow on the shoulder-wrist line, pushed back by the bend."""
+    fraction = athlete.upper_arm_m / (athlete.upper_arm_m + athlete.forearm_m)
+    along = (shoulder[0] + (wrist[0] - shoulder[0]) * fraction, shoulder[1] + (wrist[1] - shoulder[1]) * fraction)
+    back = athlete.upper_arm_m * math.sin(math.radians(bend_deg) / 2.0)
+    return (along[0] - back, along[1])
+
+
+def _reachable_trunk_deg(shoulder: tuple[float, float], trunk_deg: float, athlete: SimAthlete) -> float:
+    """The trunk angle closest to trunk_deg (never more forward) whose hip the legs reach."""
+    reach = (athlete.tibia_m + athlete.femur_m) * LOCKOUT_REACH_FRACTION
+
+    def hip_reach(angle_deg: float) -> float:
+        angle = math.radians(angle_deg)
+        return math.hypot(shoulder[0] - athlete.torso_m * math.sin(angle), shoulder[1] - athlete.torso_m * math.cos(angle))
+
+    if hip_reach(trunk_deg) <= reach:
+        return trunk_deg
+    # With the shoulders hung from the bar, a more upright trunk brings the hip
+    # closer to the ankle: the most forward angle the legs still reach.
+    reachable, unreachable = -30.0, trunk_deg
+    if hip_reach(reachable) > reach:
+        return trunk_deg
+    for _ in range(40):
+        middle = (reachable + unreachable) / 2.0
+        if hip_reach(middle) > reach:
+            unreachable = middle
+        else:
+            reachable = middle
+    return reachable
 
 
 def _pose_from_bar(
@@ -183,19 +207,24 @@ def _pose_from_bar(
     bar_tilt_m: float,
     athlete: SimAthlete,
 ) -> _Pose:
+    """Hands on the bar, straight-ish arms angled from the shoulder to the grip."""
     half = math.radians(elbow_bend_deg) / 2.0
-    arm_drop = (athlete.upper_arm_m + athlete.forearm_m) * math.cos(half)
-    shoulder = (bar[0] + shoulder_ahead_m, bar[1] + athlete.grip_offset_m + arm_drop)
-    trunk = math.radians(trunk_deg)
+    arm_span = (athlete.upper_arm_m + athlete.forearm_m) * math.cos(half)
+    wrist = (bar[0], bar[1] + athlete.grip_offset_m)
+    rise = math.sqrt(max(0.0, arm_span ** 2 - shoulder_ahead_m ** 2))
+    shoulder = (bar[0] + shoulder_ahead_m, wrist[1] + rise)
+    trunk = math.radians(_reachable_trunk_deg(shoulder, trunk_deg, athlete))
     hip = (shoulder[0] - athlete.torso_m * math.sin(trunk), shoulder[1] - athlete.torso_m * math.cos(trunk))
     knee, solved_hip = _knee_for(hip, athlete)
     if solved_hip != hip:
-        # The legs cannot reach: the body (and bar) rides down with the hip.
+        # Still out of reach (the bar is above the lockout height): the body and
+        # the bar ride down with the hip.
         shift = (solved_hip[0] - hip[0], solved_hip[1] - hip[1])
         hip = solved_hip
         shoulder = (shoulder[0] + shift[0], shoulder[1] + shift[1])
+        wrist = (wrist[0] + shift[0], wrist[1] + shift[1])
         bar = (bar[0] + shift[0], bar[1] + shift[1])
-    elbow, wrist = _arm(shoulder, 0.0, elbow_bend_deg, athlete)
+    elbow = _elbow_between(shoulder, wrist, elbow_bend_deg, athlete)
     return _Pose(
         bar=bar, shoulder=shoulder, elbow=elbow, wrist=wrist, hip=hip, knee=knee,
         hip_shift_m=hip_shift_m, bar_tilt_m=bar_tilt_m, hands_on_bar=True,

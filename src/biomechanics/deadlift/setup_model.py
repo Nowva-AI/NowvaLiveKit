@@ -109,6 +109,14 @@ def _hip_for(
     return behind[0] if behind else None
 
 
+def _shoulder_over_grip(
+    segments: AthleteSegments, bar_forward_m: float, bar_height_m: float, shoulder_ahead_m: float,
+) -> tuple[float, float]:
+    grip_height = bar_height_m + segments.grip_offset_m
+    rise = math.sqrt(max(0.0, segments.arm_m ** 2 - shoulder_ahead_m ** 2))
+    return (bar_forward_m + shoulder_ahead_m, grip_height + rise)
+
+
 def _trunk_deg(hip: tuple[float, float], shoulder: tuple[float, float]) -> float:
     return math.degrees(math.atan2(shoulder[0] - hip[0], shoulder[1] - hip[1]))
 
@@ -120,9 +128,10 @@ def solve_setup(
     shoulder_ahead_m: float,
     shin_bar_m: float,
 ) -> SetupSolution | None:
-    """Solve 1: the hip with shins on the bar, arms vertical and the shoulder joint
-    shoulder_ahead_m in front of the bar. None when no real setup fits this body."""
-    shoulder = (bar_forward_m + shoulder_ahead_m, bar_height_m + segments.grip_offset_m + segments.arm_m)
+    """Solve 1: the hip with shins on the bar, straight arms from the grip and the
+    shoulder joint shoulder_ahead_m in front of the bar. None when no real setup
+    fits this body."""
+    shoulder = _shoulder_over_grip(segments, bar_forward_m, bar_height_m, shoulder_ahead_m)
     best: SetupSolution | None = None
     for shin_rad in _shin_angles_for_contact(bar_forward_m, bar_height_m, shin_bar_m):
         shin_deg = math.degrees(shin_rad)
@@ -160,8 +169,7 @@ def solve_knee_pass(
     knee_forward = min(bar_forward_m - shin_bar_m, segments.tibia_m)
     shin_rad = math.asin(max(-1.0, min(1.0, knee_forward / segments.tibia_m)))
     knee = (segments.tibia_m * math.sin(shin_rad), segments.tibia_m * math.cos(shin_rad))
-    bar_height = knee[1]
-    shoulder = (bar_forward_m + shoulder_ahead_m, bar_height + segments.grip_offset_m + segments.arm_m)
+    shoulder = _shoulder_over_grip(segments, bar_forward_m, knee[1], shoulder_ahead_m)
     hip = _hip_for(knee, shoulder, segments)
     if hip is None:
         return None

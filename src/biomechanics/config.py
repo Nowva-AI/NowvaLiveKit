@@ -221,7 +221,10 @@ class FaultsConfig(BaseModel):
     # (model + hip-keypoint bias) is measured (§2.7).
     deadlift_setup_hips: DeadliftFaultConfig = _deadlift_fault(4.0, 7.0, 10.0, "severe")
     deadlift_shoulders_behind: DeadliftFaultConfig = _deadlift_fault(2.0, 4.0, 6.0, "moderate")
-    deadlift_hips_shoot: DeadliftFaultConfig = _deadlift_fault(10.0, 15.0, 20.0, "moderate")
+    # Lower than the plan's first 10/15/20: with the bar at the knees, straight legs
+    # cap the excess at ~8-12 deg for typical bodies (simulator, J2), so 10/15/20
+    # could almost never reach moderate. Mild stays uncued (error budget §2.9).
+    deadlift_hips_shoot: DeadliftFaultConfig = _deadlift_fault(5.0, 8.0, 11.0, "moderate")
     deadlift_bar_drift: DeadliftFaultConfig = _deadlift_fault(3.0, 5.0, 8.0, "moderate")
     deadlift_lockout: DeadliftFaultConfig = _deadlift_fault(8.0, 12.0, 20.0, "moderate")
     deadlift_lean_back: DeadliftFaultConfig = _deadlift_fault(8.0, 12.0, 18.0, "moderate")

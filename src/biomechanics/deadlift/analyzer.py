@@ -50,8 +50,11 @@ logger = logging.getLogger(__name__)
 MIN_KEYPOINT_CONFIDENCE = 0.1
 # Frames of history kept: longer than the liftoff look-back and any setup window.
 HISTORY_S = 3.0
-# Body speed is read over this window.
-SPEED_WINDOW_S = 0.2
+# Body speed is the least-squares slope over this window: a finite difference
+# over a short window turns keypoint jitter into apparent motion.
+SPEED_WINDOW_S = 0.3
+# The bar counts as still when its height's slope over this longer window is small.
+STILL_BAR_WINDOW_S = 0.25
 # Percentiles of the robust per-rep statistics (rep_features.py convention).
 WORST_PERCENTILE = 90.0
 SHIFT_SUSTAINED_PERCENTILE = 80.0
@@ -60,6 +63,8 @@ SHIFT_START_FRAMES = 5
 MIN_ANKLE_SEPARATION_M = 0.05
 # Hip/shoulder rise ratio needs this much shoulder rise to be a ratio at all.
 MIN_SHOULDER_RISE_M = 0.01
+# The top event is the bar's arrival this close to its peak height.
+TOP_ARRIVAL_BAND_M = 0.005
 # Frames either side of the peak that stand in for a top that never held still.
 TOP_PEAK_WINDOW_S = 0.1
 # Rest height is the median of this many recent still frames of the bar.
@@ -278,6 +283,7 @@ class DeadliftRepAnalyzer:
         self._stance_bar_midfoot_cm = NAN
         self._top_still_frames = 0
         self._dead_stop_frames = 0
+        self._bar_still_velocity = 0.0
         self._last_measure: _Measure | None = None
         self.rep_started = False
         self._status = DeadliftFrameStatus(phase=self.phase, gravity_source=self.gravity_source)
@@ -340,15 +346,16 @@ class DeadliftRepAnalyzer:
         self._history.append(measure)
         while self._history and measure.t - self._history[0].t > HISTORY_S:
             self._history.popleft()
-        velocity = self._bar_velocity()
+        velocity = self._bar_velocity(self.config.velocity_window_s)
         self._velocities.append(velocity)
         while len(self._velocities) > len(self._history):
             self._velocities.popleft()
+        self._bar_still_velocity = self._bar_velocity(STILL_BAR_WINDOW_S)
         if math.isnan(self._phase_since):
             self._phase_since = measure.t
         self._last_measure = measure
 
-        self._update_rest(measure, velocity)
+        self._update_rest(measure)
         self._update_standing_reference(measure)
         self._step_state_machine(measure, velocity)
         self._status = self._frame_status(measure)
@@ -518,12 +525,12 @@ class DeadliftRepAnalyzer:
             return self._learned_grip_offset_m
         return self.config.wrist_to_bar_offset_m
 
-    def _bar_velocity(self) -> float:
+    def _bar_velocity(self, window_s: float) -> float:
         latest = self._history[-1]
         times: list[float] = []
         heights: list[float] = []
         for measure in reversed(self._history):
-            if latest.t - measure.t > self.config.velocity_window_s + 1e-6:
+            if latest.t - measure.t > window_s + 1e-6:
                 break
             if math.isfinite(measure.bar_up):
                 times.append(measure.t)
@@ -536,28 +543,30 @@ class DeadliftRepAnalyzer:
 
     def _body_speed_mps(self) -> float:
         latest = self._history[-1]
-        oldest = latest
-        for measure in reversed(self._history):
-            if latest.t - measure.t > SPEED_WINDOW_S:
-                break
-            oldest = measure
-        elapsed = latest.t - oldest.t
-        if elapsed <= 0.0:
+        window = [m for m in self._history if latest.t - m.t <= SPEED_WINDOW_S + 1e-6]
+        if len(window) < 3:
             return 0.0
-        hip_speed = float(np.linalg.norm(latest.hip_mid - oldest.hip_mid)) / elapsed
-        shoulder_speed = float(np.linalg.norm(latest.shoulder_mid - oldest.shoulder_mid)) / elapsed
-        return max(hip_speed, shoulder_speed)
+        times = np.array([m.t for m in window]) - latest.t
+        centred = times - times.mean()
+        variance = float(np.dot(centred, centred))
+        if variance <= 0.0:
+            return 0.0
+        speeds = []
+        for points in (np.array([m.hip_mid for m in window]), np.array([m.shoulder_mid for m in window])):
+            slope = centred @ (points - points.mean(axis=0)) / variance
+            speeds.append(float(np.linalg.norm(slope)))
+        return max(speeds)
 
     # ------------------------------------------------------------------
     # References
     # ------------------------------------------------------------------
 
-    def _update_rest(self, measure: _Measure, velocity: float) -> None:
+    def _update_rest(self, measure: _Measure) -> None:
         """The bar's resting height: still and not in a rep. Without bar tracking it
         is the wrists' height while set up on the bar."""
         if self.in_rep or not math.isfinite(measure.bar_up):
             return
-        if abs(velocity) > self.config.liftoff_rest_speed_mps:
+        if abs(self._bar_still_velocity) > self.config.liftoff_rest_speed_mps:
             return
         if measure.bar_source == BAR_SOURCE_WRIST_PROXY:
             if self.phase not in (DeadliftPhase.SETUP, DeadliftPhase.FLOOR) or not measure.hands_on_bar:
@@ -750,7 +759,7 @@ class DeadliftRepAnalyzer:
             # Quick re-pull: the setup is the last moment before liftoff.
             self._start_rep(measure, touch_and_go=False, window_s=cfg.quick_pull_window_s)
             return
-        bar_still = abs(velocity) <= cfg.liftoff_rest_speed_mps
+        bar_still = abs(self._bar_still_velocity) <= cfg.liftoff_rest_speed_mps
         if self._held("resetup", measure.hands_on_bar and bar_still, measure.t, cfg.resetup_hold_s):
             setup_frames = list(self._setup_frames)
             self._enter(DeadliftPhase.SETUP, measure.t)
@@ -765,20 +774,20 @@ class DeadliftRepAnalyzer:
         cfg = self.config
         latest_t = self._history[-1].t
         history = list(self._history)
-        velocities = list(self._velocities)
-        fallback = len(history) - 1
+        lowest = len(history) - 1
         for index in range(len(history) - 1, -1, -1):
             measure = history[index]
             if latest_t - measure.t > cfg.liftoff_lookback_s:
                 break
             if not math.isfinite(measure.bar_up):
                 continue
-            on_rest = abs(measure.bar_up - self._rest_up) <= cfg.liftoff_rest_band_m
-            if on_rest and abs(velocities[index]) < cfg.liftoff_rest_speed_mps:
+            # Heights, not the windowed velocity: on a noisy bar the velocity test
+            # reaches back too far, while the bar's height leaves its rest at onset.
+            if measure.bar_up - self._rest_up <= cfg.liftoff_rest_band_m:
                 return index
-            if measure.bar_up - self._rest_up <= 2.0 * cfg.liftoff_rest_band_m:
-                fallback = min(fallback, index)
-        return fallback
+            if measure.bar_up < history[lowest].bar_up:
+                lowest = index
+        return lowest
 
     def _start_rep(self, measure: _Measure, touch_and_go: bool, window_s: float, liftoff_index: int | None = None) -> None:
         history = list(self._history)
@@ -820,17 +829,15 @@ class DeadliftRepAnalyzer:
         else:
             self._top_still_frames = 0
         if self._top_still_frames >= cfg.top_still_frames and self._top_reached(rep, measure):
-            # The top began when the bar stopped rising.
-            first_still = rep.frames[max(0, len(rep.frames) - self._top_still_frames)]
-            rep.top_time = first_still.t
+            rep.top_time = self._top_arrival(rep)
             rep.top_up = rep.peak_up
-            rep.top_frames = rep.frames[len(rep.frames) - self._top_still_frames:]
+            rep.top_frames = [frame for frame in rep.frames if frame.t >= rep.top_time]
             self._enter(DeadliftPhase.TOP, measure.t)
             return
         if velocity < -cfg.lower_velocity_mps and self._top_reached(rep, rep.frames[rep.peak_index]):
             # A top that never held still (a quick touch-and-go set): the peak was the top.
             peak = rep.frames[rep.peak_index]
-            rep.top_time = peak.t
+            rep.top_time = self._top_arrival(rep)
             rep.top_up = rep.peak_up
             rep.top_frames = [frame for frame in rep.frames if abs(frame.t - peak.t) <= TOP_PEAK_WINDOW_S]
             rep.lower_start = measure.t
@@ -848,6 +855,14 @@ class DeadliftRepAnalyzer:
             self._rep = None
             self._enter(DeadliftPhase.FLOOR, measure.t)
 
+    @staticmethod
+    def _top_arrival(rep: _Rep) -> float:
+        """The top event: the bar's first arrival within TOP_ARRIVAL_BAND_M of its peak."""
+        for frame in rep.frames:
+            if frame.bar_up >= rep.peak_up - TOP_ARRIVAL_BAND_M:
+                return frame.t
+        return rep.frames[rep.peak_index].t
+
     def _step_top(self, measure: _Measure, velocity: float) -> None:
         rep = self._rep
         rep.append(measure, velocity)
@@ -863,7 +878,7 @@ class DeadliftRepAnalyzer:
         if math.isnan(self._rest_up) or not math.isfinite(measure.bar_up):
             return False
         on_rest = measure.bar_up - self._rest_up <= cfg.floor_band_m
-        if on_rest and abs(velocity) < cfg.dead_stop_speed_mps:
+        if on_rest and abs(self._bar_still_velocity) < cfg.dead_stop_speed_mps:
             self._dead_stop_frames += 1
         else:
             self._dead_stop_frames = 0

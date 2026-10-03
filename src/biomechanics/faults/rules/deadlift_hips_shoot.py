@@ -3,7 +3,8 @@
 Read from the liftoff to the bar passing the knees: how much further forward the
 trunk ended up than the setup model predicts for this body (normally the chest
 rises, so the trunk angle falls). The hip-to-shoulder rise ratio over the same
-window is reported as the cross-check (> 1.4 = hips clearly leading).
+window is reported as the cross-check: at 1.0 or more the hips rose at least as
+fast as the shoulders, so the chest did not rise at all (a normal pull reads ~0.5-0.75).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from biomechanics.deadlift.rule_base import DeadliftRepRule
 from biomechanics.deadlift.types import DeadliftRepFeatures
 from biomechanics.faults.fault_types import FaultType
 
-HIPS_LEAD_RISE_RATIO = 1.4
+HIPS_LEAD_RISE_RATIO = 1.0
 
 
 class DeadliftHipsShootRule(DeadliftRepRule):

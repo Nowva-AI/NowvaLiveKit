@@ -35,7 +35,7 @@ from biomechanics.analysis.rep_features import (
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.deadlift.analyzer import DeadliftFrameInput
 from biomechanics.deadlift.bar_buffer import BarStateBuffer
-from biomechanics.deadlift.types import GRAVITY_SOURCE_BODY, BarState3D
+from biomechanics.deadlift.types import GRAVITY_SOURCE_BODY, BarState3D, DeadliftPhase
 from biomechanics.faults.rules.depth import DepthCategory, DepthRule, depth_category
 from biomechanics.ml.bilstm_counter import ASSESSMENT_MIN_DEPTH_CLASS
 from biomechanics.pose.mediapipe_fallback import MediaPipePoseEstimator
@@ -81,6 +81,12 @@ POSE_FAILURE_LOG_INTERVAL_S = 5.0
 # Captures kept to pair the lagged analysis frame with what was measured when
 # it was captured; more than the Kalman lag so a re-initialised lag still matches.
 RECENT_CAPTURES = 8
+# The deadlift's bar tracker matches the bar to the hands only while they hold
+# it; standing at the bar the wrists hang half a metre above it.
+_HANDS_ON_BAR_PHASES = (DeadliftPhase.SETUP, DeadliftPhase.PULL, DeadliftPhase.TOP,
+                        DeadliftPhase.LOWER, DeadliftPhase.FLOOR)
+# A bar unseen this long after it was tracked counts as lost for the cue gate.
+BAR_LOST_AFTER_S = 0.5
 # Single camera: the world frame is the camera's, so a tilted camera tilts every
 # sagittal angle and the depth reading with it. Standing upright beyond this
 # angle from the camera's vertical means the camera needs levelling.
@@ -316,6 +322,7 @@ class BiomechanicsPipeline:
         # captured, and the vertical the analyser measures against.
         self._bar_buffer = BarStateBuffer()
         self._bar_tracker_3d = None
+        self._last_bar_time = -math.inf
         self._gravity_up: np.ndarray | None = None
         self._gravity_source = GRAVITY_SOURCE_BODY
         self._session_meta: dict = {}
@@ -393,6 +400,15 @@ class BiomechanicsPipeline:
         else:
             self._rep_counter = self._profile.create_rep_counter(self.config)
         self._bar_buffer.clear()
+        self._bar_tracker_3d = None
+        if self._profile.needs_bar_3d and self._multi_camera_provider is not None:
+            from biomechanics.deadlift.bar_tracker_3d import BarTracker3D
+
+            # Follows the provider's calibration, so a rig calibrated later is picked
+            # up; without weights or calibration it reports no bar (wrist proxy).
+            self._bar_tracker_3d = BarTracker3D.from_provider(
+                self._multi_camera_provider, self.config.barbell_tracking,
+            )
 
         # Layer 6 (optional): BiLSTM rep counting. Its model was trained on
         # squats: on any other lift it would never see a rep, and it would
@@ -805,9 +821,27 @@ class BiomechanicsPipeline:
             _KEYPOINT_NAMES[idx] for idx in tracking
             if skeleton_3d is None or skeleton_3d.keypoints[idx].confidence < MIN_KEYPOINT_CONFIDENCE
         ]
-        if self._bar_tracker_3d is not None and self._bar_buffer.at(capture_time) is None:
+        bar_recently_tracked = capture_time - self._last_bar_time <= BAR_LOST_AFTER_S
+        if self._bar_tracker_3d is not None and not bar_recently_tracked and self._last_bar_time > -math.inf:
             missing.append("bar")
         return missing
+
+    def _track_bar_3d(self, raw_3d: Skeleton3D | None, capture_time: float) -> None:
+        """The bar on every view of this capture, into the capture-time buffer.
+        Hands and feet come from the capture-time skeleton, not the lagged one."""
+        from biomechanics.deadlift.bar_tracker_3d import wrists_and_ankles_world
+
+        wrists, ankles = wrists_and_ankles_world(raw_3d)
+        analyzer = self._rep_analyzer
+        if analyzer is None or analyzer.phase not in _HANDS_ON_BAR_PHASES:
+            wrists = None
+        provider = self._multi_camera_provider
+        state = self._bar_tracker_3d.update(
+            provider.last_synced_frames, capture_time, wrists_world=wrists, ankles_world=ankles,
+        )
+        if state is not None:
+            self._bar_buffer.push(state)
+            self._last_bar_time = capture_time
 
     def set_gravity(self, up_world: np.ndarray | None, source: str) -> None:
         """Measured gravity in the current world frame (None = the body vertical).
@@ -965,6 +999,11 @@ class BiomechanicsPipeline:
             if self._bar_tracker is not None:
                 bar_track = self._bar_tracker.update(bar_detection, timestamp=now)
             latency_ms["barbell"] = (time.perf_counter() - t0) * 1000.0
+
+        if self._bar_tracker_3d is not None:
+            t0 = time.perf_counter()
+            self._track_bar_3d(raw_3d, now)
+            latency_ms["bar_3d"] = (time.perf_counter() - t0) * 1000.0
 
         # --- BiLSTM rep counting + gates: measured skeletons only, never
         # predicted ones ---
