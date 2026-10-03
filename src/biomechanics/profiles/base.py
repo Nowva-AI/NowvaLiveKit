@@ -11,11 +11,16 @@ behavior. This is a concrete base class, not an ABC — every method has a
 sensible default so new exercises can be added incrementally.
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
 from biomechanics.faults.fault_types import FaultRule
 from biomechanics.utils.types import JointAngles, Skeleton3D, depth_category
+
+if TYPE_CHECKING:
+    from biomechanics.deadlift.analyzer import DeadliftRepAnalyzer
+    from biomechanics.deadlift.diagnosis import DeadliftSetDiagnosis
+    from biomechanics.faults.session_reference import SessionReference
 
 
 class ExerciseProfile:
@@ -63,16 +68,16 @@ class ExerciseProfile:
     # Keypoints whose loss mutes cues mid-set; None = the legs (hips, knees, ankles).
     tracking_keypoints: Optional[tuple] = None
 
-    def create_rep_analyzer(self, config: BiomechanicsConfig):
+    def create_rep_analyzer(self, config: BiomechanicsConfig) -> Optional["DeadliftRepAnalyzer"]:
         """An object owning this exercise's per-frame state, or None for the
         squat path (rep features from the pipeline's own trajectory)."""
         return None
 
-    def create_session_reference(self):
+    def create_session_reference(self) -> Optional["SessionReference"]:
         """The rule engine's session reference; None builds the squat's."""
         return None
 
-    def create_set_diagnosis(self, capture_mode: str):
+    def create_set_diagnosis(self, capture_mode: str) -> Optional["DeadliftSetDiagnosis"]:
         """A set diagnosis for exercises outside the squat engine; None = none."""
         return None
 

@@ -40,9 +40,11 @@ IN_REP_PHASES = frozenset({DeadliftPhase.PULL, DeadliftPhase.TOP, DeadliftPhase.
 class BarState3D(BaseModel):
     """The barbell in the world frame at one capture time.
 
-    left_end_m / right_end_m are the plate-hub centres on the subject's left
-    (+X) and right sides. predicted marks a Kalman prediction on a frame with no
-    detection; views is how many cameras supported the measurement.
+    left_end_m / right_end_m are the plate-hub centres at larger and smaller
+    world X: the subject's left and right on a world-anchored calibration. The
+    analyser re-labels them from the lifter's own frame, so a calibration that was
+    never anchored cannot swap D8b's side. predicted marks a Kalman prediction on a
+    frame with no detection; views is how many cameras supported the measurement.
     """
     timestamp: float
     left_end_m: tuple[float, float, float]

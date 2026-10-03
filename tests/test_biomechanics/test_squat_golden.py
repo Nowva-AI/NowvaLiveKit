@@ -162,6 +162,9 @@ class _FakeProvider:
     def reset_temporal_state(self) -> None:
         pass
 
+    def set_view_recording(self, enabled: bool) -> None:
+        pass
+
     def lost_cameras(self) -> list[str]:
         return []
 

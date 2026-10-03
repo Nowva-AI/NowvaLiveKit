@@ -13,10 +13,10 @@ import math
 import statistics
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP, CueCache
-from biomechanics.config import BiomechanicsConfig, CoachingConfig, IPCConfig, get_config
+from biomechanics.config import BiomechanicsConfig, CoachingConfig, IPCConfig
 from biomechanics.diagnosis.bridge import (
     build_anthro_dict,
     build_rom_dict,
@@ -43,6 +43,9 @@ from biomechanics.utils.types import (
     RepData,
     depth_category,
 )
+
+if TYPE_CHECKING:
+    from biomechanics.profiles.base import ExerciseProfile
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +115,8 @@ class IPCBridge:
 
         Fields beyond the cue list are sent only when the profile differs from
         the squat's defaults (.claude/deadlift/CONTRACT.md §3), so the squat's
-        message never changes."""
+        message never changes. config carries the profile's minimum cue tiers;
+        None (tools, tests) means the default thresholds."""
         cues = self.cue_cache.prepare_for_exercise(exercise_name)
         message: Dict[str, Any] = {
             "type": "cache_cues",
@@ -121,16 +125,12 @@ class IPCBridge:
             "profile": self.cue_cache.profile_name,
             "cues": cues,
         }
-        message.update(self._profile_delivery_fields(exercise_name, config or get_config()))
+        message.update(self._profile_delivery_fields(self.cue_cache.profile, config or BiomechanicsConfig()))
         self._send(message)
         return cues
 
-    def _profile_delivery_fields(self, exercise_name: str, config: BiomechanicsConfig) -> Dict[str, Any]:
-        profile = getattr(self.cue_cache, "profile", None)
-        if profile is None:
-            from biomechanics.profiles import get_profile
-
-            profile = get_profile(exercise_name)
+    @staticmethod
+    def _profile_delivery_fields(profile: ExerciseProfile, config: BiomechanicsConfig) -> Dict[str, Any]:
         fields: Dict[str, Any] = {}
         fault_to_cue = profile.get_fault_to_cue_map()
         if fault_to_cue != FAULT_TO_CUE_MAP:

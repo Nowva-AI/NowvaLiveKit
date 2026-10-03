@@ -54,8 +54,9 @@ class _Pipeline:
     def set_session_meta(self, meta: dict) -> None:
         self.meta = meta
 
-    def set_gravity(self, up_world, source: str) -> None:
-        self.gravity = (up_world, source)
+    def resolve_gravity(self) -> None:
+        if self.profile.needs_bar_3d and self._multi_camera_provider is not None:
+            self.gravity = (np.array([0.0, -1.0, 0.0]), "measured")
 
 
 class _CalibrationSession:
@@ -95,7 +96,6 @@ class TestActivation:
         from biomechanics import pipeline_process
         from biomechanics.profiles import get_profile
 
-        monkeypatch.setattr(pipeline_process, "_measured_gravity", lambda provider: (np.array([0.0, -1.0, 0.0]), "measured"))
         for switching in (False, True):
             client = _RecordingClient()
             bridge = IPCBridge(client)

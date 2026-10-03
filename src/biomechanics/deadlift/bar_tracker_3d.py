@@ -186,7 +186,7 @@ def _solve_symmetric_3x3(matrices: np.ndarray, rhs: np.ndarray) -> tuple[np.ndar
 
 
 def _hub_on_ray(
-    anchor: np.ndarray, ray_origin: np.ndarray, ray_direction: np.ndarray, hub_distance_m: float
+    anchor: np.ndarray, ray_origin: np.ndarray, ray_direction: np.ndarray, hub_distance_m: float, up: np.ndarray,
 ) -> np.ndarray | None:
     # Point on the ray at hub_distance_m from the anchor hub. Of the two roots, the bar
     # through the other one is steeply tilted, so the most horizontal bar wins.
@@ -203,7 +203,7 @@ def _hub_on_ray(
     points = [ray_origin + depth * ray_direction for depth in roots if depth > MIN_DEPTH_M]
     if not points:
         return None
-    return min(points, key=lambda point: abs(float((point - anchor) @ WORLD_UP)))
+    return min(points, key=lambda point: abs(float((point - anchor) @ up)))
 
 
 def _keypoint_pair(skeleton: Skeleton3D, left_index: int, right_index: int) -> np.ndarray:
@@ -224,9 +224,10 @@ def _plausible(
     wrist_mid: np.ndarray | None,
     ankle_mid: np.ndarray | None,
     config: BarTracker3DConfig,
+    up: np.ndarray,
 ) -> bool:
     span = ends[0] - ends[1]
-    tilt_deg = math.degrees(math.asin(min(abs(float(span @ WORLD_UP)) / float(np.linalg.norm(span)), 1.0)))
+    tilt_deg = math.degrees(math.asin(min(abs(float(span @ up)) / float(np.linalg.norm(span)), 1.0)))
     if tilt_deg > MAX_BAR_TILT_DEG:
         return False
     centre = ends.mean(axis=0)
@@ -234,8 +235,8 @@ def _plausible(
         return False
     if ankle_mid is not None:
         offset = centre - ankle_mid
-        height_m = float(offset @ WORLD_UP)
-        horizontal_m = float(np.linalg.norm(offset - height_m * WORLD_UP))
+        height_m = float(offset @ up)
+        horizontal_m = float(np.linalg.norm(offset - height_m * up))
         if horizontal_m > config.max_centre_to_ankles_horizontal_m or height_m > config.max_centre_above_ankles_m:
             return False
     return True
@@ -260,6 +261,7 @@ def associate_and_triangulate(
     ankles_world: np.ndarray | None = None,
     config: BarTracker3DConfig = DEFAULT_CONFIG,
     hub_distance_m: float | None = None,
+    up: np.ndarray | None = None,
 ) -> BarAssociation | None:
     """The best cross-view bar on one frame, or None when no association is consistent.
 
@@ -274,9 +276,13 @@ def associate_and_triangulate(
     only while the hands hold the bar and ankles while the feet are planted: the bar
     centre must then be within max_centre_to_wrists_m of the mid-wrist, and within
     max_centre_to_ankles_horizontal_m horizontally and max_centre_above_ankles_m above
-    the mid-ankle. Non-finite input skips that gate. The left end is the one at larger X.
+    the mid-ankle. Non-finite input skips that gate. up is the world's up (measured
+    gravity when known, WORLD_UP otherwise). The left end is the one at larger X: a
+    consistent label for the track, which is the subject's left only on a world-
+    anchored calibration (the analyser re-labels the ends from the lifter's frame).
     """
     hub_distance_m = config.hub_distance_m if hub_distance_m is None else hub_distance_m
+    up = np.asarray(WORLD_UP, dtype=np.float64) if up is None else up
     camera_ids = sorted(cid for cid, candidates in candidates_per_view.items() if candidates and cid in cameras)
     projections = [_projection_matrix(cameras[cid]) for cid in camera_ids]
     view_options = [
@@ -332,11 +338,11 @@ def associate_and_triangulate(
             single = int(np.argmin(solved[h]))
             view = int(np.argmax(valid[h, :, single]))
             ray_origin, ray_direction = _camera_ray(cameras[camera_ids[view]], pixels[h, view, single])
-            hub = _hub_on_ray(ends[1 - single], ray_origin, ray_direction, hub_distance_m)
+            hub = _hub_on_ray(ends[1 - single], ray_origin, ray_direction, hub_distance_m, up)
             if hub is None:
                 continue
             ends[single] = hub
-        if not _plausible(ends, wrist_mid, ankle_mid, config):
+        if not _plausible(ends, wrist_mid, ankle_mid, config, up):
             continue
         left, right = (0, 1) if ends[0, 0] >= ends[1, 0] else (1, 0)
         return BarAssociation(
@@ -381,6 +387,7 @@ class BarTracker3D:
         self._filter_time = NAN
         self._last_measurement_time = NAN
         self._hub_distances: deque[float] = deque(maxlen=HUB_DISTANCE_WINDOW)
+        self._up = np.asarray(WORLD_UP, dtype=np.float64)
 
     @classmethod
     def from_provider(
@@ -407,6 +414,11 @@ class BarTracker3D:
         if len(self._hub_distances) < MIN_HUB_DISTANCE_SAMPLES:
             return self._config.hub_distance_m
         return float(np.median(self._hub_distances))
+
+    def set_up(self, up_world: np.ndarray) -> None:
+        """The world's up for the plausibility gates: measured gravity when known."""
+        up = np.asarray(up_world, dtype=np.float64)
+        self._up = up / float(np.linalg.norm(up))
 
     def reset(self) -> None:
         self._state[:] = 0.0
@@ -443,7 +455,8 @@ class BarTracker3D:
         if not self._cameras:
             return None
         association = associate_and_triangulate(
-            candidates_per_view, self._cameras, wrists_world, ankles_world, self._config, self.hub_distance_m
+            candidates_per_view, self._cameras, wrists_world, ankles_world, self._config, self.hub_distance_m,
+            self._up,
         )
         if association is None or not self._accept(association, timestamp):
             return self._predicted_state(timestamp)

@@ -31,7 +31,7 @@ from biomechanics.profiles.untracked import UntrackedVariantProfile
 DEADLIFT_NAMES = ["deadlift", "deadlifts", "Barbell Deadlift", "conventional deadlift", "Barbell Conventional Deadlift"]
 VARIANT_NAMES = [
     "Barbell Sumo Deadlift", "Trap Bar Deadlift", "Hex Bar Deadlift", "Deficit Deadlift",
-    "Snatch Grip Deadlift", "Single Leg Deadlift", "Rack Pull",
+    "Snatch Grip Deadlift", "Single Leg Deadlift", "Rack Pull", "Dumbbell Deadlift", "Kettlebell Deadlift",
 ]
 SQUAT_NAMES = ["squat", "back squat", "front squat", "goblet squat", "bodyweight squat",
                "Barbell Back Squat", "Barbell Front Squat"]
@@ -97,7 +97,9 @@ class TestRegistry:
     def test_every_squat_alias_is_still_the_squat(self, exercise_name: str, deadlift_ready):
         assert isinstance(get_profile(exercise_name), SquatProfile)
 
-    @pytest.mark.parametrize("exercise_name", ["Barbell Romanian Deadlift", "RDL", "Stiff Leg Deadlift"])
+    @pytest.mark.parametrize(
+        "exercise_name", ["Barbell Romanian Deadlift", "RDL", "Stiff Leg Deadlift", "Stiff-Legged Deadlift"],
+    )
     def test_romanian_deadlifts_stay_on_their_profile(self, exercise_name: str, deadlift_ready):
         assert get_profile(exercise_name).name == "romanian_deadlift"
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING
 
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.faults.fault_types import FaultRule
@@ -37,6 +37,12 @@ from biomechanics.profiles.untracked import UntrackedProfile, UntrackedVariantPr
 from biomechanics.utils.types import CocoKeypoints as CK
 from biomechanics.utils.types import JointAngles, Skeleton3D
 
+if TYPE_CHECKING:
+    from biomechanics.deadlift.analyzer import DeadliftRepAnalyzer
+    from biomechanics.deadlift.diagnosis import DeadliftSetDiagnosis
+    from biomechanics.deadlift.rep_counter import DeadliftRepCounter
+    from biomechanics.deadlift.session_reference import DeadliftSessionReference
+
 DEV_COACHING_READY_ENV = "NOWVA_DEV_COACHING_READY"
 DEADLIFT_SET_IDLE_TIMEOUT_S = 30.0
 DEADLIFT_CLOSED_LOOP_CUE = "deadlift_bar_midfoot"
@@ -49,7 +55,7 @@ DEADLIFT_TRACKING_KEYPOINTS = (
 )
 
 # fault_type -> cue base key (side / direction variants live in the cue dict).
-DEADLIFT_FAULT_TO_CUE: Dict[str, str] = {
+DEADLIFT_FAULT_TO_CUE: dict[str, str] = {
     "deadlift_bar_position": "deadlift_bar_midfoot",
     "deadlift_shoulders_behind": "deadlift_shoulders_over",
     "deadlift_setup_hips": "deadlift_hips",
@@ -114,7 +120,7 @@ class DeadliftProfile(ExerciseProfile):
     def gated_profile(cls) -> ExerciseProfile:
         return GatedDeadliftProfile()
 
-    def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
+    def create_fault_rules(self, config: BiomechanicsConfig) -> list[FaultRule]:
         """D1-D10, in cue priority order. No DepthRule: one would turn on
         depth-gated counting."""
         fc = config.faults
@@ -133,38 +139,38 @@ class DeadliftProfile(ExerciseProfile):
             DeadliftVelocityLossRule(fc.deadlift_velocity_loss, scale),
         ]
 
-    def create_rep_analyzer(self, config: BiomechanicsConfig):
+    def create_rep_analyzer(self, config: BiomechanicsConfig) -> DeadliftRepAnalyzer:
         from biomechanics.deadlift.analyzer import DeadliftRepAnalyzer
 
         return DeadliftRepAnalyzer(config.deadlift)
 
-    def create_rep_counter(self, config: BiomechanicsConfig):
+    def create_rep_counter(self, config: BiomechanicsConfig) -> DeadliftRepCounter:
         """The counter is a view of an analyser; the pipeline builds both through
         create_rep_analyzer, this standalone pair is for tools and tests."""
         from biomechanics.deadlift.rep_counter import DeadliftRepCounter
 
         return DeadliftRepCounter(self.create_rep_analyzer(config))
 
-    def create_session_reference(self):
+    def create_session_reference(self) -> DeadliftSessionReference:
         from biomechanics.deadlift.session_reference import DeadliftSessionReference
 
         return DeadliftSessionReference()
 
-    def create_set_diagnosis(self, capture_mode: str):
+    def create_set_diagnosis(self, capture_mode: str) -> DeadliftSetDiagnosis:
         from biomechanics.deadlift.diagnosis import DeadliftSetDiagnosis
 
         return DeadliftSetDiagnosis(capture_mode=capture_mode)
 
     def get_rep_signal(
-        self, skeleton_3d: Skeleton3D, angles: Optional[JointAngles] = None
+        self, skeleton_3d: Skeleton3D, angles: JointAngles | None = None
     ) -> float:
         # Never called: the analyser supplies the signal (bar height above its rest).
         return math.nan
 
-    def get_fault_to_cue_map(self) -> Dict[str, str]:
+    def get_fault_to_cue_map(self) -> dict[str, str]:
         return dict(DEADLIFT_FAULT_TO_CUE)
 
-    def get_cue_dict(self) -> Dict[str, str]:
+    def get_cue_dict(self) -> dict[str, str]:
         from biomechanics.coaching.cue_cache import GENERIC_POSITIVE_CUE_KEYS, build_cue_dict
 
         return build_cue_dict(
@@ -174,7 +180,7 @@ class DeadliftProfile(ExerciseProfile):
             *GENERIC_POSITIVE_CUE_KEYS,
         )
 
-    def min_cue_tiers(self, config: BiomechanicsConfig) -> Dict[str, str]:
+    def min_cue_tiers(self, config: BiomechanicsConfig) -> dict[str, str]:
         fc = config.faults
         return {
             fault_type: getattr(fc, fault_type).min_tier
@@ -202,5 +208,7 @@ register_profile(
     "deficit_deadlift",
     "snatch_grip_deadlift",
     "single_leg_deadlift",
+    "dumbbell_deadlift",
+    "kettlebell_deadlift",
     "rack_pull",
 )(UntrackedVariantProfile)

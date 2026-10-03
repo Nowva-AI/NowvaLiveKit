@@ -309,20 +309,9 @@ def _activate_profile(
     pipeline.set_session_meta(meta or {})
     provider = pipeline._multi_camera_provider
     if provider is not None:
-        set_view_recording = getattr(provider, "set_view_recording", None)
-        if set_view_recording is not None:
-            set_view_recording(profile.allows_camera_refine)
-        if profile.needs_bar_3d:
-            pipeline.set_gravity(*_measured_gravity(provider))
+        provider.set_view_recording(profile.allows_camera_refine)
+    pipeline.resolve_gravity()
     bridge.prepare_exercise(exercise_name, pipeline.config)
-
-
-def _measured_gravity(provider) -> tuple:
-    """Gravity measured with the board laid flat, mapped into the current world
-    frame; (None, "body") when no camera has a usable measurement."""
-    from biomechanics.deadlift.gravity import load_world_up_for_provider
-
-    return load_world_up_for_provider(provider)
 
 
 def _refine_at_rest(camera_calibration: "CameraCalibrationSession | None", profile) -> None:

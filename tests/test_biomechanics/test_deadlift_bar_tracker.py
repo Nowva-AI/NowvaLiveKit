@@ -224,6 +224,15 @@ class TestAssociateAndTriangulate:
         assert association is not None
         assert _end_errors_m(association.left_end_m, association.right_end_m, floor_ends_m).max() <= STATIC_END_TOL_M
 
+    def test_the_height_gate_reads_heights_along_the_given_up(self, rig_calibration, rng):
+        # Upside down, the racked bar sits below the feet: only the given up can say so.
+        racked = _bar_candidates(rig_calibration, _bar_ends(RACKED_BAR_CENTRE_M), rng, noise_px=0.0, score=0.95)
+        floor = _bar_candidates(rig_calibration, _bar_ends(BAR_CENTRE_M), rng)
+        association = associate_and_triangulate(
+            _per_view(racked, floor), rig_calibration.cameras, ankles_world=ANKLES_M, up=np.array([0.0, 1.0, 0.0]),
+        )
+        assert set(association.candidate_indices.values()) == {0}
+
     def test_floor_bar_far_from_the_feet_rejected(self, rig_calibration, rng):
         floor_ends_m = _bar_ends(BAR_CENTRE_M)
         spare = _bar_candidates(rig_calibration, _bar_ends(SPARE_BAR_CENTRE_M), rng, noise_px=0.0, score=0.95)

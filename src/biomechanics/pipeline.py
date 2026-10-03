@@ -56,6 +56,7 @@ from biomechanics.utils.types import (
     BarTrackState,
 )
 from biomechanics.utils.filters import RunningMedian
+from biomechanics.utils.geometry import WORLD_UP
 from biomechanics.utils.position_filter import Skeleton2DSmoother
 from biomechanics.utils.preik_chain import PreIKResult, build_preik_chain
 from biomechanics.utils.segment_lengths import SegmentLengthEstimator, MIN_ENDPOINT_CONFIDENCE
@@ -411,6 +412,8 @@ class BiomechanicsPipeline:
             self._bar_tracker_3d = BarTracker3D.from_provider(
                 self._multi_camera_provider, self.config.barbell_tracking,
             )
+            if self._gravity_up is not None:
+                self._bar_tracker_3d.set_up(self._gravity_up)
 
         # Layer 6 (optional): BiLSTM rep counting. Its model was trained on
         # squats: on any other lift it would never see a rep, and it would
@@ -596,6 +599,19 @@ class BiomechanicsPipeline:
             "[PIPELINE] Camera calibration installed (%s): temporal and foot contact state reset",
             "world frame moved" if world_frame_changed else "world frame kept",
         )
+        # Gravity is stored per camera and mapped into the world frame through the
+        # calibration: a deadlift session calibrated after it started picks it up here.
+        self.resolve_gravity()
+
+    def resolve_gravity(self) -> None:
+        """Measured gravity mapped into the current world frame, for a profile that
+        measures against it (the deadlift); the body vertical when no camera has a
+        usable measurement."""
+        if not self._profile.needs_bar_3d or self._multi_camera_provider is None:
+            return
+        from biomechanics.deadlift.gravity import load_world_up_for_provider
+
+        self.set_gravity(*load_world_up_for_provider(self._multi_camera_provider))
 
     def apply_athlete_params(self, params: dict) -> None:
         """Adopt a returning user's stored body measurements and scale thresholds once."""
@@ -850,8 +866,11 @@ class BiomechanicsPipeline:
         Kept across switches; only analysers that measure against it read it."""
         self._gravity_up = None if up_world is None else np.asarray(up_world, dtype=np.float64)
         self._gravity_source = source if up_world is not None else GRAVITY_SOURCE_BODY
-        if self._rep_analyzer is not None and self._gravity_up is not None:
-            self._rep_analyzer.set_gravity(self._gravity_up, self._gravity_source)
+        up = self._gravity_up if self._gravity_up is not None else np.asarray(WORLD_UP, dtype=np.float64)
+        if self._rep_analyzer is not None:
+            self._rep_analyzer.set_gravity(up, self._gravity_source)
+        if self._bar_tracker_3d is not None:
+            self._bar_tracker_3d.set_up(up)
 
     def _seed_analyzer_segments(self) -> None:
         if self._rep_analyzer is not None and self.body_calibration.is_complete:

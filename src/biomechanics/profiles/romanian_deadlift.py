@@ -21,7 +21,7 @@ from biomechanics.utils.types import JointAngles, Skeleton3D
 logger = logging.getLogger(__name__)
 
 
-@register_profile("romanian_deadlift", "rdl", "stiff_leg_deadlift")
+@register_profile("romanian_deadlift", "rdl", "stiff_leg_deadlift", "stiff_legged_deadlift")
 class RomanianDeadliftProfile(ExerciseProfile):
     """Profile for Romanian deadlift / stiff-leg deadlift."""
 
