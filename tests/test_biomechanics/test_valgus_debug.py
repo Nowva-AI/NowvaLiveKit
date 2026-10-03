@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from biomechanics.faults.rules.depth import DepthRule
+from biomechanics.faults.rules.knee_tracking import KneeTrackingRule
 from biomechanics.faults.rules.knee_valgus import KneeValgusRule
 from biomechanics.utils.types import (
     FaultEvent,
@@ -20,6 +22,7 @@ from biomechanics.utils.types import (
 from biomechanics.viz.valgus_debug import (
     MAX_RETIME_FPS,
     MIN_RETIME_FPS,
+    TEMPLATE_PATH,
     ValgusDebugRecorder,
     _is_knee_related,
     _read_valgus_thresholds,
@@ -28,6 +31,10 @@ from biomechanics.viz.valgus_debug import (
 
 FRAME_HEIGHT = 120
 FRAME_WIDTH = 160
+# The squat's knee rule judges each rep once, when the rep ends.
+REP_END_FRAME = 16
+# Data keys the recorder no longer writes; the report page crashed reading "fallback".
+REMOVED_REPORT_KEYS = ('"fallback"', "fault_cooldown_frames", "max_valgus", "affected_side", "metric_source")
 
 
 class _FakeRepCounter:
@@ -38,7 +45,7 @@ class _FakeRepCounter:
 
 class _FakeRuleEngine:
     def __init__(self) -> None:
-        self.rules = [KneeValgusRule()]
+        self.rules = [DepthRule(), KneeTrackingRule()]
 
 
 class _FakePipeline:
@@ -88,6 +95,7 @@ def _frame(index: int, angles: JointAngles | None = None, faults: list | None = 
 
 
 def _valgus_fault(frame_index: int = 3) -> FaultEvent:
+    """A squat knee-tracking verdict as the rule engine emits it at rep end."""
     return FaultEvent(
         fault_type="knee_valgus",
         severity=FaultSeverity.MODERATE,
@@ -96,11 +104,14 @@ def _valgus_fault(frame_index: int = 3) -> FaultEvent:
         frame_index=frame_index,
         rep_number=1,
         details={
-            "knee_valgus_l": 18.0,
+            "side": "left",
+            "phase": "ascent",
+            "is_drift": False,
+            "value": 14.0,
+            "unit": "deg",
+            "knee_valgus_l": 14.0,
             "knee_valgus_r": 4.0,
-            "max_valgus": 18.0,
-            "affected_side": "left",
-            "metric_source": "toe",
+            "observability": "observable",
         },
     )
 
@@ -157,7 +168,7 @@ class TestIsKneeRelated:
     def test_detects_nested_angle_keys(self) -> None:
         assert _is_knee_related({"type": "frame_data", "joint_angles": {"knee_valgus_l": 3.0}})
 
-    def test_detects_hip_adduction_fallback(self) -> None:
+    def test_detects_hip_adduction_payload(self) -> None:
         assert _is_knee_related({"type": "x", "hip_adduction_l": 2.0})
 
     def test_rejects_unrelated(self) -> None:
@@ -165,26 +176,22 @@ class TestIsKneeRelated:
 
 
 class TestReadValgusThresholds:
-    def test_reads_primary_and_fallback(self) -> None:
+    def test_reads_squat_knee_tracking_thresholds(self) -> None:
         thresholds = _read_valgus_thresholds(_FakeRuleEngine())
-        assert thresholds is not None
-        assert thresholds["primary"] == {"mild": 12.0, "moderate": 17.0, "severe": 24.0}
-        assert thresholds["fallback"] == {"mild": 12.0, "moderate": 17.0, "severe": 24.0}
+        assert thresholds == {"primary": {"mild": 8.0, "moderate": 13.0, "severe": 18.0}}
 
-    def test_reads_distinct_fallback_thresholds(self) -> None:
+    def test_has_no_fallback_thresholds(self) -> None:
+        assert "fallback" not in _read_valgus_thresholds(_FakeRuleEngine())
+
+    def test_reads_lunge_per_frame_valgus_rule(self) -> None:
         engine = _FakeRuleEngine()
-        engine.rules = [KneeValgusRule(
-            mild_threshold=6.0, moderate_threshold=10.0, severe_threshold=16.0,
-            fallback_mild_threshold=12.0, fallback_moderate_threshold=17.0,
-            fallback_severe_threshold=24.0,
-        )]
+        engine.rules = [KneeValgusRule(mild_threshold=6.0, moderate_threshold=10.0, severe_threshold=16.0)]
         thresholds = _read_valgus_thresholds(engine)
-        assert thresholds["primary"]["mild"] == 6.0
-        assert thresholds["fallback"]["mild"] == 12.0
+        assert thresholds == {"primary": {"mild": 6.0, "moderate": 10.0, "severe": 16.0}}
 
     def test_returns_none_without_valgus_rule(self) -> None:
         engine = _FakeRuleEngine()
-        engine.rules = []
+        engine.rules = [DepthRule()]
         assert _read_valgus_thresholds(engine) is None
 
 
@@ -224,8 +231,16 @@ class TestRecordFrame:
         fault = recorder._faults[0]
         assert fault["knee"] is True
         assert fault["severity"] == "moderate"
-        assert fault["details"]["max_valgus"] == 18.0
+        assert fault["details"]["value"] == 14.0
+        assert fault["details"]["side"] == "left"
+        assert fault["details"]["phase"] == "ascent"
         assert fault["i"] == 0
+
+    def test_boolean_fault_details_stay_boolean(self, recorder: ValgusDebugRecorder) -> None:
+        frame = _frame(3, _angles(), faults=[_valgus_fault()])
+        recorder.record_frame(frame, _display(), _FakePipeline(), resting=False)
+
+        assert recorder._faults[0]["details"]["is_drift"] is False
 
     def test_records_rep_events(self, recorder: ValgusDebugRecorder) -> None:
         frame = _frame(4, _angles())
@@ -248,12 +263,12 @@ class TestRecordFrame:
         recorder.record_frame(_frame(0, _angles()), _display(), _FakePipeline(), resting=False)
 
         assert len(recorder._threshold_history) == 1
-        assert recorder._threshold_history[0]["primary"]["severe"] == 24.0
+        assert recorder._threshold_history[0]["primary"]["severe"] == 18.0
 
     def test_threshold_rescale_appends_new_step(self, recorder: ValgusDebugRecorder) -> None:
         pipeline = _FakePipeline()
         recorder.record_frame(_frame(0, _angles()), _display(), pipeline, resting=False)
-        pipeline._rule_engine.rules[0].mild_threshold = 6.0
+        pipeline._rule_engine.rules[-1].mild_threshold = 6.0
 
         for i in range(1, 32):
             recorder.record_frame(_frame(i, _angles()), _display(), pipeline, resting=False)
@@ -310,8 +325,12 @@ class TestFinalize:
         tapped = recorder.tap(_FakeIPCClient())
         for i in range(20):
             pipeline.rep_counter.phase = "bottom" if 8 <= i <= 12 else "descending"
-            faults = [_valgus_fault(i)] if i == 10 else []
-            recorder.record_frame(_frame(i, _angles(), faults), _display(), pipeline, resting=False)
+            faults = [_valgus_fault(i)] if i == REP_END_FRAME else []
+            frame = _frame(i, _angles(), faults)
+            if i == REP_END_FRAME:
+                frame.rep_data = RepData(rep_number=1, start_time=0.0, end_time=float(i),
+                                         start_frame=0, end_frame=i)
+            recorder.record_frame(frame, _display(), pipeline, resting=False)
             tapped.send_message({"type": "frame_data", "joint_angles": {"knee_valgus_l": 5.0}})
 
         report = recorder.finalize("Barbell Back Squat")
@@ -324,9 +343,12 @@ class TestFinalize:
 
         data = json.loads((recorder.path / "data.json").read_text())
         assert data["n_frames"] == 20
-        assert data["mode"] == "2D FPPA (single camera)"
+        assert data["mode"] == "2D knees-over-toes (single camera)"
         assert len(data["faults"]) == 1
         assert data["faults"][0]["knee"] is True
+        assert data["faults"][0]["i"] == REP_END_FRAME
+        assert data["reps"] == [{"i": REP_END_FRAME, "rep": 1}]
+        assert all("fallback" not in step for step in data["thresholds"])
         assert len(data["ipc"]) == 20
         assert data["series"]["phase"][10] == "bottom"
         assert data["foot_confidence_threshold"] == 0.3
@@ -337,8 +359,13 @@ class TestFinalize:
         rec.finalize("Barbell Back Squat")
 
         data = json.loads((rec.path / "data.json").read_text())
-        assert data["mode"] == "3D abduction (triangulated)"
+        assert data["mode"] == "3D knees-over-toes (triangulated)"
         assert data["multi_camera"] is True
+
+    def test_template_reads_no_removed_keys(self) -> None:
+        template = TEMPLATE_PATH.read_text()
+        for key in REMOVED_REPORT_KEYS:
+            assert key not in template
 
     def test_report_is_self_contained(self, recorder: ValgusDebugRecorder) -> None:
         for i in range(5):

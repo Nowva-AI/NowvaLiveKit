@@ -215,13 +215,20 @@ a `PipelineFrame` with all outputs and per-layer timing.
 
 **`pipeline_process.py`** -- `run_biomechanics_pipeline()`. Subprocess entry point
 launched by `main.py` when a workout starts. Runs the assessment phase (2 bodyweight
-reps with diagnosis), calibration phase (5 reps to personalize thresholds), then
-the main workout loop. Communicates with the voice agent via `IPCBridge`.
+reps with diagnosis), calibration phase (5 reps to measure the athlete's range and
+set their depth target), then the main workout loop. Communicates with the voice
+agent via `IPCBridge`.
 
-**`calibration.py`** -- `CalibrationTracker` collects peak angle values during
-calibration reps. `build_calibration_profile()` converts peaks into personalized
-fault thresholds. `apply_calibration_to_rule_engine()` writes those thresholds
-directly into the rule engine's rules.
+**`calibration.py`** -- `CalibrationTracker` collects the athlete's capacities
+(ankle dorsiflexion, hip flexion, depth reached; median rep) from the rep features.
+`build_calibration_profile()` turns them into the depth target, and
+`apply_calibration_to_rule_engine()` installs it. Fault thresholds are absolute and
+never calibrated from observed reps; the athlete's own best rep only flags drift
+(`faults/session_reference.py`).
+
+**`analysis/rep_features.py`** -- one measured sample per frame and the per-rep
+features (depth, knee tracking over bottom + ascent, hip shoot, hip shift, balance,
+velocity, lockout, setup) that both the per-rep fault rules and the diagnosis read.
 
 **`config.py`** -- `BiomechanicsConfig` (Pydantic BaseModel) aggregating all
 sub-configurations. `load_pipeline_config()` reads from YAML and returns a typed

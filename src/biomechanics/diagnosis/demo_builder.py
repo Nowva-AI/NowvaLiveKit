@@ -51,6 +51,7 @@ class DemoData:
 _MAGNITUDE_FN_BY_CAUSE = {
     "narrow_stance": magnitude_widen_stance,
     "narrow_foot_angle": magnitude_widen_foot_angle,
+    "stance_toe_mismatch": magnitude_widen_foot_angle,
     "knee_track_cue": magnitude_knees_out,
     "weight_shift_cue": magnitude_center_weight,
 }

@@ -12,7 +12,7 @@ from livekit.agents import RunContext
 from livekit.agents.llm import function_tool
 
 from agent.agents.prompts import get_program_creation_prompt
-from agent.agents.shared.base_agent import BaseNovaAgent
+from agent.agents.shared.base_agent import BaseNovaAgent, is_summary_item
 from agent.agents.shared.unit_conversion import normalize_height_to_cm, normalize_weight_to_kg, categorize_goal
 from agent.agents.shared.helpers import (
     build_program_generation_payload,
@@ -300,7 +300,10 @@ class ProgramCreationAgent(BaseNovaAgent):
                 logger.info(f"[SUMMARY] Not enough items to summarize ({len(items)} items)")
                 return
 
-            system_items = [item for item in items if hasattr(item, 'role') and item.role == "system"]
+            system_items = [
+                item for item in items
+                if hasattr(item, 'role') and item.role == "system" and not is_summary_item(item)
+            ]
             non_system_items = [item for item in items if not hasattr(item, 'role') or item.role != "system"]
 
             if len(non_system_items) <= KEEP_LAST_TURNS:
@@ -347,7 +350,7 @@ class ProgramCreationAgent(BaseNovaAgent):
 
             if len(items) > MESSAGE_COUNT_THRESHOLD and not self.userdata.is_summarizing:
                 logger.info(f"[SUMMARY] Message count ({len(items)}) exceeds threshold ({MESSAGE_COUNT_THRESHOLD})")
-                asyncio.create_task(self._summarize_and_prune_context())
+                self._summary_task = asyncio.create_task(self._summarize_and_prune_context())
 
         except Exception as e:
             logger.info(f"[SUMMARY] Error checking for summarization: {e}")
@@ -954,9 +957,8 @@ class ProgramCreationAgent(BaseNovaAgent):
 
         # Handoff to MainMenuAgent
         await self._suppress_turn_detection()
-        await self._truncate_context_for_handoff()
         from agent.agents.main_menu_agent import MainMenuAgent
-        return MainMenuAgent(state=self.state, userdata=self.userdata)
+        return await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
 
     # ===== PROGRAM UPDATE TOOLS =====
 
@@ -1027,9 +1029,8 @@ class ProgramCreationAgent(BaseNovaAgent):
                     self.state.switch_mode("main_menu")
                     self.state.save_state()
                     await self._suppress_turn_detection()
-                    await self._truncate_context_for_handoff()
                     from agent.agents.main_menu_agent import MainMenuAgent
-                    return MainMenuAgent(state=self.state, userdata=self.userdata)
+                    return await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
                 else:
                     return None, f"Say something like: 'I had trouble updating that. {message}' Keep it apologetic."
 
@@ -1135,9 +1136,8 @@ class ProgramCreationAgent(BaseNovaAgent):
                 self.state.switch_mode("main_menu")
                 self.state.save_state()
                 await self._suppress_turn_detection()
-                await self._truncate_context_for_handoff()
                 from agent.agents.main_menu_agent import MainMenuAgent
-                return MainMenuAgent(state=self.state, userdata=self.userdata)
+                return await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
 
             elif wants_alternative and alternative:
                 logger.info(f"[PROGRAM UPDATE] User chose alternative: {alternative}")
@@ -1220,9 +1220,8 @@ class ProgramCreationAgent(BaseNovaAgent):
                 self.state.switch_mode("main_menu")
                 self.state.save_state()
                 await self._suppress_turn_detection()
-                await self._truncate_context_for_handoff()
                 from agent.agents.main_menu_agent import MainMenuAgent
-                return MainMenuAgent(state=self.state, userdata=self.userdata)
+                return await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
 
             elif final_status == "failed":
                 return None, (

@@ -19,12 +19,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 load_dotenv()
 
 from livekit import agents
-from livekit.agents import AgentSession, TurnHandlingOptions, AgentStateChangedEvent, MetricsCollectedEvent, inference, metrics
-from openai.types import Reasoning
+from livekit.agents import AgentSession, AgentStateChangedEvent, MetricsCollectedEvent, metrics
 from livekit.agents.voice.room_io import RoomInputOptions
-from livekit.plugins import deepgram, openai, silero, noise_cancellation
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.plugins import noise_cancellation
 
+from agent.core import pipeline_factory
 from agent.core.agent_state import AgentState, set_state_notify_fd, PROJECT_ROOT
 from agent.agents.onboarding_agent import OnboardingAgent
 from agent.agents.main_menu_agent import MainMenuAgent
@@ -35,6 +34,7 @@ from agent.agents.shared.userdata import UserData
 from agent.core.latency_tracker import LatencyTracker
 from agent.services.compaction_service import CompactionService
 from agent.services.context_viewer import ContextViewer
+from agent.services.vad_lag_watchdog import VadLagWatchdog
 from profiler.collector import SessionProfiler
 
 logger = logging.getLogger(__name__)
@@ -127,49 +127,29 @@ async def entrypoint(ctx: agents.JobContext):
 
     ctx.add_shutdown_callback(close_visual_bridge)
 
-    # Initialize cascade pipeline components (STT + LLM + TTS)
+    # Cascade pipeline (STT + LLM + TTS). Built by pipeline_factory so the TTFA
+    # benchmark measures exactly what ships; every provider is env-selectable.
     logger.info("[NOVA] Initializing cascade pipeline...")
-    stt = deepgram.STT(
-        model="nova-3",
-        language="en",
-        keyterm=[
-            "Barbell Back Squat", "Romanian Deadlift", "Barbell Bench Press",
-            "Barbell Overhead Press", "Barbell Front Squat", "Goblet Squat",
-            "Sumo Deadlift", "Barbell Deadlift",
-            "reps", "sets", "RPE", "deload", "hypertrophy",
-        ],
+    stt = pipeline_factory.build_stt()
+    llm = pipeline_factory.build_llm()
+    tts = pipeline_factory.build_tts()
+    logger.info(
+        "[NOVA] Cascade pipeline initialized — stt=%s/%s llm=%s/%s tts=%s/%s",
+        os.getenv("STT_BACKEND", pipeline_factory.DEFAULT_STT_BACKEND),
+        os.getenv("STT_MODEL", pipeline_factory.DEFAULT_STT_MODEL),
+        os.getenv("LLM_PROVIDER", pipeline_factory.DEFAULT_LLM_PROVIDER),
+        os.getenv("LLM_MODEL", pipeline_factory.DEFAULT_LLM_MODEL),
+        os.getenv("TTS_BACKEND", pipeline_factory.DEFAULT_TTS_BACKEND),
+        os.getenv("TTS_MODEL", pipeline_factory.DEFAULT_TTS_MODEL),
     )
-
-    llm_model = os.getenv("LLM_MODEL", "gpt-5.4-mini")
-    if llm_model.startswith(("gpt-5.5", "gpt-5.6")):
-        # gpt-5.5+ rejects reasoning_effort + function tools on /v1/chat/completions;
-        # OpenAI requires the Responses API for this combination.
-        llm = openai.responses.LLM(
-            model=llm_model,
-            reasoning=Reasoning(effort="low"),
-        )
-    else:
-        llm = openai.LLM(
-            model=llm_model,
-            reasoning_effort="low",
-        )
-
-    # Cartesia via LiveKit Inference — billed to LiveKit Cloud credits,
-    # authenticated with LIVEKIT_API_KEY/SECRET (no Cartesia key needed).
-    tts = inference.TTS(
-        model="cartesia/sonic-3",
-        voice=os.getenv("CARTESIA_VOICE_ID", "3e39e9a5-585c-4f5f-bac6-5e4905c51095"),
-        language="en",
-    )
-    logger.info("[NOVA] Cascade pipeline initialized")
 
     # Retrieve prewarmed VAD or load fresh as fallback
     vad = ctx.proc.userdata.get("vad")
     if vad is None:
         logger.warning("[NOVA] No prewarmed VAD found, loading fresh (~100-500ms)...")
-        vad = silero.VAD.load()
+        vad = pipeline_factory.build_vad()
     else:
-        logger.info("[NOVA] Using prewarmed Silero VAD")
+        logger.info("[NOVA] Using prewarmed VAD")
 
     # Speech affect / effort perception: wrap the VAD so every user utterance
     # reaches the AffectService without touching STT, turn detection or agents.
@@ -201,16 +181,13 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Create agent session with cascade pipeline
     logger.info("[NOVA] Creating agent session...")
+    turn_handling = pipeline_factory.build_turn_handling()
     session = AgentSession(
         stt=stt,
         llm=llm,
         tts=tts,
         vad=vad,
-        turn_handling=TurnHandlingOptions(
-            turn_detection=MultilingualModel(),
-            endpointing={"min_delay": 0.3},
-            preemptive_generation={"enabled": True, "preemptive_tts": True},
-        ),
+        turn_handling=turn_handling,
         userdata=userdata,
     )
     logger.info("[NOVA] Agent session created")
@@ -277,12 +254,13 @@ async def entrypoint(ctx: agents.JobContext):
     def _on_user_state(ev):
         logger.info(f"[SESSION] User state: {ev.old_state} → {ev.new_state}")
         profiler.record("turn", "user_state", old=str(ev.old_state), new=str(ev.new_state))
+        # LiveKit's user states are listening / speaking / away — there is no "idle".
         old = str(ev.old_state).lower()
         new = str(ev.new_state).lower()
-        if "idle" in old and "speaking" in new:
+        if new == "speaking" and old != "speaking":
             profiler.begin_turn()
             profiler.record_user_speech_start()
-        elif "speaking" in old and "idle" in new:
+        elif old == "speaking":
             profiler.record_user_speech_end()
 
     @session.on("user_input_transcribed")
@@ -290,7 +268,8 @@ async def entrypoint(ctx: agents.JobContext):
         if not ev.is_final and not ev.transcript.strip():
             return  # skip empty partials (VAD speech-start with no text yet)
         final_tag = "FINAL" if ev.is_final else "partial"
-        logger.info(f"[SESSION] User speech [{final_tag}]: {ev.transcript}")
+        # Transcripts are the user's own words: DEBUG only, the console log goes to disk.
+        logger.debug(f"[SESSION] User speech [{final_tag}]: {ev.transcript}")
         if ev.is_final:
             profiler.record_transcript(ev.transcript)
             profiler.record("turn", "transcript", text=ev.transcript, is_final=True)
@@ -303,9 +282,9 @@ async def entrypoint(ctx: agents.JobContext):
         if callable(text):
             text = text()
         if text:
-            logger.info(f"[SESSION] Conversation item ({role}): {text[:200]}")
+            logger.debug(f"[SESSION] Conversation item ({role}): {text[:200]}")
         else:
-            logger.info(f"[SESSION] Conversation item ({role}): [non-text content]")
+            logger.debug(f"[SESSION] Conversation item ({role}): [non-text content]")
 
     @session.on("speech_created")
     def _on_speech_created(ev):
@@ -327,30 +306,55 @@ async def entrypoint(ctx: agents.JobContext):
         metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
 
+        # Dispatch on m.type — STTMetrics and TTSMetrics both carry
+        # audio_duration, so probing attributes routes STT into the TTS branch.
         m = ev.metrics
-        if hasattr(m, "ttft"):
+        if m.type == "llm_metrics":
             logger.info(
                 f"[METRICS] {m.type} — ttft={m.ttft:.3f}s, duration={m.duration:.3f}s, "
-                f"cancelled={m.cancelled}, input_tokens={getattr(m, 'input_tokens', 'N/A')}, "
-                f"output_tokens={getattr(m, 'output_tokens', 'N/A')}, "
-                f"tps={getattr(m, 'tokens_per_second', 'N/A')}"
+                f"cancelled={m.cancelled}, prompt_tokens={m.prompt_tokens}, "
+                f"cached_tokens={m.prompt_cached_tokens}, "
+                f"completion_tokens={m.completion_tokens}, tps={m.tokens_per_second:.1f}"
             )
             latency_tracker.record_ttft(m.ttft)
             profiler.record_llm_metrics(
                 ttft=m.ttft,
                 duration=m.duration,
-                input_tokens=getattr(m, "input_tokens", None),
-                output_tokens=getattr(m, "output_tokens", None),
-                tokens_per_second=getattr(m, "tokens_per_second", None),
+                input_tokens=m.prompt_tokens,
+                output_tokens=m.completion_tokens,
+                tokens_per_second=m.tokens_per_second,
                 cancelled=m.cancelled,
             )
-        elif hasattr(m, "audio_duration"):
+        elif m.type == "tts_metrics":
+            logger.info(
+                f"[METRICS] {m.type} — ttfb={m.ttfb:.3f}s, duration={m.duration:.3f}s, "
+                f"audio_duration={m.audio_duration:.3f}s, cancelled={m.cancelled}, "
+                f"connection_reused={m.connection_reused}"
+            )
+            profiler.record_tts_metrics(
+                duration=m.duration,
+                audio_duration=m.audio_duration,
+                ttfb=m.ttfb,
+            )
+            profiler.finalize_turn()
+        elif m.type == "eou_metrics":
+            # The turn-taking half of the latency budget: how long after the
+            # user stopped before the pipeline committed the turn.
+            logger.info(
+                f"[METRICS] {m.type} — end_of_utterance_delay={m.end_of_utterance_delay:.3f}s, "
+                f"transcription_delay={m.transcription_delay:.3f}s, "
+                f"on_user_turn_completed_delay={m.on_user_turn_completed_delay:.3f}s"
+            )
+            profiler.record_eou_metrics(
+                end_of_utterance_delay=m.end_of_utterance_delay,
+                transcription_delay=m.transcription_delay,
+                on_user_turn_completed_delay=m.on_user_turn_completed_delay,
+            )
+        elif m.type == "stt_metrics":
             logger.info(
                 f"[METRICS] {m.type} — duration={m.duration:.3f}s, "
                 f"audio_duration={m.audio_duration:.3f}s"
             )
-            profiler.record_tts_metrics(duration=m.duration, audio_duration=m.audio_duration)
-            profiler.finalize_turn()
         else:
             logger.info(f"[METRICS] {m.type}")
 
@@ -394,7 +398,9 @@ async def entrypoint(ctx: agents.JobContext):
     def _on_tools_executed(ev):
         for call, output in ev.zipped():
             result_str = str(output.output)[:150] if output else "None"
-            logger.info(f"[SESSION] Tool executed: {call.name}({call.arguments}) → {result_str}")
+            # Arguments carry what the user said (names, emails, requests): DEBUG only.
+            logger.info(f"[SESSION] Tool executed: {call.name}")
+            logger.debug(f"[SESSION] Tool executed: {call.name}({call.arguments}) → {result_str}")
             profiler.record("tool", "executed", name=call.name, args=str(call.arguments)[:200])
 
     @session.on("error")
@@ -449,6 +455,15 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
+    # Hold turns longer while Silero falls behind real time (overloaded machine)
+    vad_watchdog = VadLagWatchdog(session, turn_handling["endpointing"]["min_delay"])
+    vad_watchdog_task = asyncio.create_task(vad_watchdog.run(), name="vad_lag_watchdog")
+
+    async def stop_vad_watchdog(reason: str):
+        vad_watchdog_task.cancel()
+
+    ctx.add_shutdown_callback(stop_vad_watchdog)
+
     # Start compaction service after session is live
     if userdata.compaction_service:
         await userdata.compaction_service.start()
@@ -480,7 +495,7 @@ def prewarm(proc: agents.JobProcess):
     start = time.monotonic()
 
     def _load_vad():
-        return silero.VAD.load()
+        return pipeline_factory.build_vad()
 
     def _load_affect():
         from affect.config import load_affect_config

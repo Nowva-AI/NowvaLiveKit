@@ -34,10 +34,22 @@ load_dotenv()
 
 from profiler.collector import SessionProfiler
 
+# Pipeline → voice agent message types relayed over the coaching IPC. A type
+# the coaching service handles but this set omits is dropped silently — which
+# is how depth-rejected reps ("shallow_rep") once never reached the athlete.
+COACHING_FORWARD_TYPES = frozenset({
+    'cache_cues', 'fault', 'rep_complete', 'shallow_rep', 'rest_complete', 'frame_data',
+    'calibration_rep', 'calibration_complete', 'diagnosis_complete', 'rep_diagnosis',
+    'assessment_ready', 'assessment_result', 'assessment_rep', 'demo_abort', 'demo_started',
+    'last_rep_snapshot', 'demo_data_ready', 'tracking_quality',
+})
+
 # Suppress SQLAlchemy INFO logs
 logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
 DEFAULT_EXERCISE_NAME = "Barbell Back Squat"
+# The display HUD's workout weight is in pounds.
+LB_PER_KG = 2.20462
 COACHING_SOCKET_PATH = "/tmp/nowva_coaching.sock"
 
 # Played via afplay when the display window opens (browser autoplay policies
@@ -54,6 +66,10 @@ TEST_ASSESS_SETS = 3
 TEST_ASSESS_REPS = 5
 TEST_ASSESS_WEIGHT_LBS = 45.0
 TEST_ASSESS_REST_SECONDS = 120
+
+
+def _weight_in_lbs(weight: float, weight_unit: str | None) -> float:
+    return weight * LB_PER_KG if weight_unit == "kg" else weight
 
 
 class _TeeStream:
@@ -557,7 +573,7 @@ class NowvaApp:
             total_sets = len(sets)
             if sets:
                 target_reps = sets[0].get("target_reps") or 0
-                weight = sets[0].get("target_weight") or 0.0
+                weight = _weight_in_lbs(sets[0].get("target_weight") or 0.0, sets[0].get("weight_unit"))
         self._publish_display({
             "type": "workout",
             "action": "start",
@@ -600,7 +616,7 @@ class NowvaApp:
             msg_type = message.get("type")
             if msg_type not in ("rest_start", "workout_complete", "demo_start",
                                 "demo_cue", "demo_end", "assessment_mode",
-                                "request_last_rep", "request_demo"):
+                                "request_last_rep", "request_demo", "set_exercise"):
                 return
             if msg_type == "rest_start":
                 rest_sec = message.get("rest_seconds", 30)
@@ -611,6 +627,16 @@ class NowvaApp:
             elif msg_type == "workout_complete":
                 print("[COACHING IPC] Received workout_complete from voice agent")
                 self._publish_display({"type": "workout", "action": "complete"})
+            elif msg_type == "set_exercise":
+                print(f"[COACHING IPC] Received set_exercise ({message.get('exercise_name')}) from voice agent")
+                self._publish_display({
+                    "type": "workout",
+                    "action": "start",
+                    "exercise": message.get("exercise_name"),
+                    "total_sets": message.get("total_sets") or 0,
+                    "target_reps": message.get("target_reps") or 0,
+                    "weight_lbs": message.get("weight_lbs") or 0.0,
+                })
             # Snapshot the reference — this runs on the coaching IPC thread
             # while the main loop can nil self.ipc_server during shutdown
             pose_ipc = self.ipc_server
@@ -1032,7 +1058,7 @@ class NowvaApp:
                             # Forward coaching-relevant messages to voice agent.
                             # Snapshot the reference — this runs on the pose IPC
                             # thread while the main loop can nil self.coaching_ipc
-                            if msg_type in ('cache_cues', 'fault', 'rep_complete', 'rest_complete', 'frame_data', 'calibration_rep', 'calibration_complete', 'diagnosis_complete', 'assessment_result', 'assessment_rep', 'demo_abort', 'demo_started', 'last_rep_snapshot', 'demo_data_ready'):
+                            if msg_type in COACHING_FORWARD_TYPES:
                                 coaching = self.coaching_ipc
                                 if coaching and coaching.client_socket:
                                     try:
@@ -1082,7 +1108,15 @@ class NowvaApp:
                             # no shoulder width, so stance metrics and the
                             # whole diagnosis engine stay dark for the session.
                             payload = {"thresholds": cal_profile}
-                            payload.update(self._load_athlete_calibration(exercise_name))
+                            # The calibration belongs to the workout's squat,
+                            # which need not be its first exercise.
+                            from agent.agents.shared.helpers import calibration_exercise
+                            session_exercises = [
+                                ex.get("exercise_name", "")
+                                for ex in (self.state.get("workout.current_session") or {}).get("exercises", [])
+                            ]
+                            cal_exercise = calibration_exercise(session_exercises) or exercise_name
+                            payload.update(self._load_athlete_calibration(cal_exercise))
                             with open(cal_file, "w") as f:
                                 json.dump(payload, f)
                             self._cal_file = cal_file

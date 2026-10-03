@@ -39,16 +39,16 @@ _NUM_KEYPOINTS = 19
 
 
 def _make_skeleton_3d(knee_flex_deg: float) -> Skeleton3D:
-    """Build a synthetic 19-keypoint Skeleton3D.
+    """Build a synthetic 19-keypoint Skeleton3D in the production frame (Y down).
 
     Varies hip Y position with knee_flex_deg so deeper squats have
-    lower hips, making the skeleton physically plausible. Ankle and
-    foot positions stay fixed.
+    lower hips (larger y), making the skeleton physically plausible. Ankle
+    and foot positions stay fixed.
     """
-    hip_y = 0.9 - (knee_flex_deg / 180.0) * 0.4
+    hip_y = 0.0 + (knee_flex_deg / 180.0) * 0.4
     knee_y = 0.45
-    ankle_y = 0.05
-    shoulder_y = hip_y + 0.45
+    ankle_y = 0.85
+    shoulder_y = hip_y - 0.45
 
     coords = np.zeros((_NUM_KEYPOINTS, 3))
     # Shoulders (5, 6)
@@ -150,6 +150,15 @@ _ANGLE_KEY_MAP = {
 }
 
 
+def _depth_ratio(skeleton: Skeleton3D) -> float:
+    """Hip height above the knee in thigh lengths (Y down) — the pipeline's bottom criterion."""
+    kpts = skeleton.to_numpy()
+    hip_y = (kpts[11][1] + kpts[12][1]) / 2.0
+    knee_y = (kpts[13][1] + kpts[14][1]) / 2.0
+    thigh = (np.linalg.norm(kpts[11] - kpts[13]) + np.linalg.norm(kpts[12] - kpts[14])) / 2.0
+    return (knee_y - hip_y) / thigh
+
+
 def _simulate_rep_sequence() -> list[float]:
     """Knee flexion values for a realistic squat rep: descend → bottom → ascend."""
     return [15.0, 30.0, 55.0, 80.0, 100.0, 110.0, 105.0, 85.0, 50.0, 20.0]
@@ -163,12 +172,12 @@ def _simulate_rep_sequence() -> list[float]:
 class TestBottomFrameBuffer:
     """Verify the pipeline buffer captures the same bottom frame as the visualizer."""
 
-    def test_buffer_selects_max_knee_flexion_frame(self):
-        """Buffer picks the frame with the highest avg_knee_flexion."""
+    def test_buffer_selects_lowest_hip_frame(self):
+        """Buffer picks the frame where the hip sits lowest relative to the knees."""
         flex_sequence = _simulate_rep_sequence()
         expected_bottom_idx = int(np.argmax(flex_sequence))
 
-        bottom_max = 0.0
+        bottom_min = float("inf")
         bottom_kpts = None
         bottom_angles = None
         captured_idx = -1
@@ -176,9 +185,9 @@ class TestBottomFrameBuffer:
         for i, flex in enumerate(flex_sequence):
             angles = _make_angles(flex)
             skeleton = _make_skeleton_3d(flex)
-            knee_flex = angles.avg_knee_flexion
-            if knee_flex > bottom_max:
-                bottom_max = knee_flex
+            depth = _depth_ratio(skeleton)
+            if depth < bottom_min:
+                bottom_min = depth
                 bottom_kpts = skeleton.to_numpy().tolist()
                 bottom_angles = angles.as_dict()
                 captured_idx = i
@@ -192,7 +201,7 @@ class TestBottomFrameBuffer:
         flex_sequence = _simulate_rep_sequence()
 
         # Path A: pipeline buffer logic
-        bottom_max = 0.0
+        bottom_min = float("inf")
         buffer_kpts = None
         buffer_angles_dict = None
         buffer_idx = -1
@@ -205,9 +214,9 @@ class TestBottomFrameBuffer:
             skeleton = _make_skeleton_3d(flex)
 
             # Buffer path
-            knee_flex = angles.avg_knee_flexion
-            if knee_flex > bottom_max:
-                bottom_max = knee_flex
+            depth = _depth_ratio(skeleton)
+            if depth < bottom_min:
+                bottom_min = depth
                 buffer_kpts = skeleton.to_numpy().tolist()
                 buffer_angles_dict = angles.as_dict()
                 buffer_idx = i
@@ -218,13 +227,13 @@ class TestBottomFrameBuffer:
         vis_bottom = find_bottom_frame(vis_frames)
 
         assert buffer_idx == vis_bottom["frame"]
-        assert bottom_max == vis_bottom["angles"]["knee_flex"]
+        assert buffer_angles_dict["knee_flexion_l"] == vis_bottom["angles"]["knee_flex_l"]
 
     def test_buffer_keypoints_match_visualizer_after_transform(self):
         """Raw pipeline kpts, when transformed, equal the visualizer's kpts."""
         flex_sequence = _simulate_rep_sequence()
 
-        bottom_max = 0.0
+        bottom_min = float("inf")
         buffer_kpts = None
         vis_frames = []
 
@@ -232,9 +241,9 @@ class TestBottomFrameBuffer:
             angles = _make_angles(flex)
             skeleton = _make_skeleton_3d(flex)
 
-            knee_flex = angles.avg_knee_flexion
-            if knee_flex > bottom_max:
-                bottom_max = knee_flex
+            depth = _depth_ratio(skeleton)
+            if depth < bottom_min:
+                bottom_min = depth
                 buffer_kpts = skeleton.to_numpy().tolist()
 
             vis_frames.append(_extract_frame_data(skeleton, angles, i))
@@ -252,7 +261,7 @@ class TestBottomFrameBuffer:
         """Angle values in the buffer match the visualizer's angles for mapped keys."""
         flex_sequence = _simulate_rep_sequence()
 
-        bottom_max = 0.0
+        bottom_min = float("inf")
         buffer_angles_dict = None
         vis_frames = []
 
@@ -260,9 +269,9 @@ class TestBottomFrameBuffer:
             angles = _make_angles(flex)
             skeleton = _make_skeleton_3d(flex)
 
-            knee_flex = angles.avg_knee_flexion
-            if knee_flex > bottom_max:
-                bottom_max = knee_flex
+            depth = _depth_ratio(skeleton)
+            if depth < bottom_min:
+                bottom_min = depth
                 buffer_angles_dict = angles.as_dict()
 
             vis_frames.append(_extract_frame_data(skeleton, angles, i))
@@ -299,7 +308,7 @@ class TestBottomFrameBuffer:
         from biomechanics.pipeline import BiomechanicsPipeline
 
         pipe = BiomechanicsPipeline.__new__(BiomechanicsPipeline)
-        pipe._bottom_max_knee_flex = 110.0
+        pipe._bottom_min_depth_ratio = -0.1
         pipe._bottom_kpts = [[0.0, 0.0, 0.0]] * 19
         pipe._bottom_angles = {"knee_flexion_l": 110.0}
 
@@ -307,7 +316,7 @@ class TestBottomFrameBuffer:
         assert kpts is not None
         assert angles is not None
         assert len(kpts) == 19
-        assert pipe._bottom_max_knee_flex == 0.0
+        assert pipe._bottom_min_depth_ratio == float("inf")
 
         kpts2, angles2 = pipe.consume_bottom_frame()
         assert kpts2 is None
@@ -387,42 +396,39 @@ class TestBottomFrameIPC:
 class TestBottomFrameEdgeCases:
     """Edge cases for the buffering logic."""
 
-    def test_plateau_keeps_first_max(self):
-        """When multiple frames tie for max, the first one wins (strict >)."""
+    def test_plateau_keeps_first_lowest(self):
+        """When multiple frames tie for the lowest hip, the first one wins (strict <)."""
         flex_sequence = [15.0, 110.0, 110.0, 110.0, 50.0]
 
-        bottom_max = 0.0
+        bottom_min = float("inf")
         captured_idx = -1
 
         for i, flex in enumerate(flex_sequence):
-            angles = _make_angles(flex)
-            if angles.avg_knee_flexion > bottom_max:
-                bottom_max = angles.avg_knee_flexion
+            depth = _depth_ratio(_make_skeleton_3d(flex))
+            if depth < bottom_min:
+                bottom_min = depth
                 captured_idx = i
 
         assert captured_idx == 1
 
     def test_monotonic_descent_captures_last(self):
-        """If knee flexion only increases (no ascent phase), last frame is bottom."""
+        """If the hip only drops (no ascent phase), the last frame is the bottom."""
         flex_sequence = [15.0, 40.0, 70.0, 95.0, 115.0]
 
-        bottom_max = 0.0
+        bottom_min = float("inf")
         captured_idx = -1
 
         for i, flex in enumerate(flex_sequence):
-            angles = _make_angles(flex)
-            if angles.avg_knee_flexion > bottom_max:
-                bottom_max = angles.avg_knee_flexion
+            depth = _depth_ratio(_make_skeleton_3d(flex))
+            if depth < bottom_min:
+                bottom_min = depth
                 captured_idx = i
 
         assert captured_idx == 4
-        assert bottom_max == pytest.approx(115.0)
 
-    def test_asymmetric_knee_flexion_uses_average(self):
-        """Buffer uses avg_knee_flexion, matching find_bottom_frame's knee_flex key."""
-        angles_sym = JointAngles(knee_flexion_l=100.0, knee_flexion_r=100.0)
-        angles_asym = JointAngles(knee_flexion_l=110.0, knee_flexion_r=96.0)
+    def test_find_bottom_frame_ignores_knee_angle(self):
+        """The bottom is where the hip is lowest, even if another frame reports more knee bend."""
+        deep = _extract_frame_data(_make_skeleton_3d(110.0), _make_angles(90.0), 0)
+        shallow = _extract_frame_data(_make_skeleton_3d(60.0), _make_angles(120.0), 1)
 
-        assert angles_sym.avg_knee_flexion == pytest.approx(100.0)
-        assert angles_asym.avg_knee_flexion == pytest.approx(103.0)
-        assert angles_asym.avg_knee_flexion > angles_sym.avg_knee_flexion
+        assert find_bottom_frame([shallow, deep])["frame"] == 0

@@ -184,7 +184,7 @@ def build_preik_chain(config: BiomechanicsConfig, multi_camera: bool) -> PreIKCh
         measurement_std_ceiling_m=kalman_cfg.measurement_std_ceiling_m,
         gate_sigma=kalman_cfg.gate_sigma,
         gate_min_radius_m=kalman_cfg.gate_min_radius_m,
-        max_predicted_frames=kalman_cfg.max_predicted_frames,
+        max_prediction_s=kalman_cfg.max_prediction_s,
         min_output_confidence=kalman_cfg.min_output_confidence,
     )
     foot_contact = FootContactModel() if multi_camera and config.foot_contact.enabled else None

@@ -159,7 +159,8 @@ class TestTTS:
         asyncio.run(_drive())
         assert collected[0].startswith('<emotion value="sympathetic"/><speed ratio="0.9"/>')
         assert "angry" not in "".join(collected)
-        assert collected[-1] == "You are done."
+        # The normalizer releases text at word boundaries, so chunks need not match the input's.
+        assert "".join(collected).endswith("Rack it. You are done.")
 
     def test_no_service_falls_back_to_normalizer(self, monkeypatch) -> None:
         agent = _Agent(None)
@@ -181,7 +182,38 @@ class TestTTS:
                 pass
 
         asyncio.run(_drive())
-        assert collected == ["toward 22 degrees today"]
+        assert "".join(collected) == "toward 22 degrees today"
+
+
+class TestAudioTagsOnOtherVoices:
+    def test_laughter_tag_is_dropped_for_a_voice_that_would_read_it(self, monkeypatch) -> None:
+        """Only Cartesia sonic-3 performs [laughter]; ElevenLabs reads the word out,
+        with or without voice perception."""
+        agent = _Agent(None)
+        elevenlabs_tts = type("TTS", (), {"__module__": "livekit.plugins.elevenlabs.tts"})()
+        agent._activity = SimpleNamespace(tts=elevenlabs_tts)
+        collected: list[str] = []
+
+        async def _fake_tts_node(agent_, text, model_settings):
+            async for chunk in text:
+                collected.append(chunk)
+            if False:
+                yield None
+
+        monkeypatch.setattr(Agent.default, "tts_node", staticmethod(_fake_tts_node))
+
+        async def _text():
+            yield "Ha, fair point [laughter] okay, "
+            yield "back to it."
+
+        async def _drive() -> None:
+            async for _ in agent.tts_node(_text(), None):
+                pass
+
+        asyncio.run(_drive())
+        spoken = "".join(collected)
+        assert "laughter" not in spoken
+        assert spoken.endswith("back to it.")
 
 
 class TestHowDoISoundTool:

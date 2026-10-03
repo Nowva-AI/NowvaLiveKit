@@ -15,6 +15,7 @@ import agent.agents.shared.helpers as helpers
 from agent.agents.shared.helpers import (
     build_program_generation_payload,
     check_calibration,
+    normalize_exercise_name,
     normalize_sex,
     service_headers,
 )
@@ -54,6 +55,23 @@ class TestNormalizeSex:
     def test_unclear_returns_none(self):
         assert normalize_sex("yes") is None
         assert normalize_sex("") is None
+
+
+class TestNormalizeExerciseName:
+    def test_plain_squat_defaults_to_bodyweight(self):
+        for alias in ("squat", "squats", "Squat ", "bodyweight squat", "air squats", "bw squat"):
+            assert normalize_exercise_name(alias) == "Bodyweight Squat"
+
+    def test_bar_mention_maps_to_barbell_back_squat(self):
+        for alias in ("back squat", "barbell squat", "barbell back squats"):
+            assert normalize_exercise_name(alias) == "Barbell Back Squat"
+
+    def test_bodyweight_squat_is_a_squat_movement_pattern(self):
+        # Calibration is stored per movement pattern; a bodyweight squat must find
+        # the same calibration as a barbell squat (biomechanics/calibration.py).
+        from biomechanics.calibration import get_movement_pattern
+
+        assert get_movement_pattern("Bodyweight Squat") == "squat"
 
 
 class TestServiceHeaders:
@@ -106,6 +124,23 @@ class TestCheckCalibration:
         result = asyncio.run(check_calibration("user-1", "juggling"))
         assert result is None
         assert "pattern" not in db_spy
+
+    def test_program_library_squat_name_reaches_db_lookup(self, db_spy):
+        asyncio.run(check_calibration("user-1", "Dumbbell Goblet Squat"))
+        assert db_spy["pattern"] == "squat"
+
+    def test_uncalibrated_exercise_returns_none_without_query(self, db_spy):
+        assert asyncio.run(check_calibration("user-1", "Barbell Romanian Deadlift")) is None
+        assert "pattern" not in db_spy
+
+
+class TestCalibrationExercise:
+    def test_first_squat_in_the_workout_is_calibrated(self):
+        names = ["Barbell Overhead Press", "Barbell Back Squat", "Barbell Front Squat"]
+        assert helpers.calibration_exercise(names) == "Barbell Back Squat"
+
+    def test_workout_without_a_squat_has_no_calibration(self):
+        assert helpers.calibration_exercise(["Barbell Overhead Press", "Barbell Bench Press"]) is None
 
 
 class TestBuildProgramGenerationPayload:

@@ -15,7 +15,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from biomechanics.utils.types import Skeleton3D, Point3D, RepData, DEPTH_CLASS_NAMES, NUM_DEPTH_CLASSES
+from biomechanics.utils.types import CocoKeypoints as CK, Skeleton3D, Point3D, RepData, DEPTH_CLASS_NAMES, NUM_DEPTH_CLASSES
 from biomechanics.ml.feature_extractor import LandmarkFeatureExtractor
 from biomechanics.ml.sequence_buffer import SequenceBuffer
 from biomechanics.ml.bilstm_model import BiLSTMRepModel
@@ -54,6 +54,30 @@ def _make_skeleton(scale: float = 1.0, y_offset: float = 0.0) -> Skeleton3D:
     ]) * scale
 
     return Skeleton3D.from_numpy(raw, timestamp=0.0, frame_index=0)
+
+
+FEATURE_TOL = 1e-9
+KNEE_Y_DIFF_INDEX = 11
+
+
+def _y_down(skeleton: Skeleton3D) -> Skeleton3D:
+    points = skeleton.to_numpy()
+    points[:, 1] *= -1.0
+    confidences = np.array([kp.confidence for kp in skeleton.keypoints])
+    return Skeleton3D.from_numpy(
+        points, confidences=confidences, timestamp=skeleton.timestamp, frame_index=skeleton.frame_index,
+    )
+
+
+def _without(skeleton: Skeleton3D, index: int) -> Skeleton3D:
+    """MediaPipe's missing keypoint: zeroed at the hip centre with confidence 0."""
+    points = skeleton.to_numpy()
+    points[index] = 0.0
+    confidences = np.array([kp.confidence for kp in skeleton.keypoints])
+    confidences[index] = 0.0
+    return Skeleton3D.from_numpy(
+        points, confidences=confidences, timestamp=skeleton.timestamp, frame_index=skeleton.frame_index,
+    )
 
 
 def _one_hot(cls: int, num_classes: int = 5) -> np.ndarray:
@@ -115,6 +139,18 @@ class TestLandmarkFeatureExtractor:
         features = self.extractor.extract(sample_skeleton_3d)
         assert features.shape == (LandmarkFeatureExtractor.FEATURE_DIM,)
         assert np.all(np.isfinite(features))
+
+    def test_y_down_input_gives_the_y_up_training_features(self):
+        """The model was trained on Y-up skeletons; live skeletons are Y-down."""
+        y_up = _make_skeleton(y_offset=0.2)
+        y_down = _y_down(y_up)
+
+        training_features = LandmarkFeatureExtractor().extract(y_up)
+        live_features = LandmarkFeatureExtractor(input_y_down=True).extract(y_down)
+
+        assert live_features == pytest.approx(training_features, abs=FEATURE_TOL)
+        # Training convention: a knee below the hip has a negative y difference.
+        assert live_features[KNEE_Y_DIFF_INDEX] < 0.0
 
 
 # ============================================================================
@@ -613,3 +649,47 @@ class TestBiLSTMInference:
 
         assert isinstance(inf.current_depth_class, (int, np.integer))
         assert 0 <= inf.current_depth_class <= 4
+
+    def test_live_skeletons_are_read_as_y_down(self):
+        """Production skeletons are Y-down; the model sees the Y-up training convention."""
+        from biomechanics.ml.inference import BiLSTMInference
+
+        inf = BiLSTMInference(model_path="dummy.pt")
+        inf._model = BiLSTMRepModel(input_dim=14, hidden_dim=32, num_classes=5)
+        inf._model.eval()
+        live = _y_down(_make_skeleton(y_offset=0.2))
+
+        inf.process_skeleton(live)
+
+        expected = LandmarkFeatureExtractor().extract(_make_skeleton(y_offset=0.2))
+        assert inf._buffer._buffer[-1] == pytest.approx(expected, abs=FEATURE_TOL)
+
+    def test_missing_keypoint_holds_its_last_measured_position(self):
+        """A dropped knee sits at the hip centre (0, 0, 0); the model must not see it fold."""
+        from biomechanics.ml.inference import BiLSTMInference
+
+        inf = BiLSTMInference(model_path="dummy.pt")
+        inf._model = BiLSTMRepModel(input_dim=14, hidden_dim=32, num_classes=5)
+        inf._model.eval()
+        live = _y_down(_make_skeleton(y_offset=0.2))
+
+        inf.process_skeleton(live)
+        measured = np.array(inf._buffer._buffer[-1])
+        inf.process_skeleton(_without(live, CK.LEFT_KNEE))
+
+        assert inf._buffer._buffer[-1] == pytest.approx(measured, abs=FEATURE_TOL)
+
+    def test_reset_forgets_held_positions(self):
+        from biomechanics.ml.inference import BiLSTMInference
+
+        inf = BiLSTMInference(model_path="dummy.pt")
+        inf._model = BiLSTMRepModel(input_dim=14, hidden_dim=32, num_classes=5)
+        inf._model.eval()
+        live = _y_down(_make_skeleton(y_offset=0.2))
+        inf.process_skeleton(live)
+
+        inf.reset()
+        inf.process_skeleton(_without(live, CK.LEFT_KNEE))
+
+        unheld = LandmarkFeatureExtractor(input_y_down=True).extract(_without(live, CK.LEFT_KNEE))
+        assert inf._buffer._buffer[-1] == pytest.approx(unheld, abs=FEATURE_TOL)

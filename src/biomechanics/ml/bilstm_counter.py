@@ -77,6 +77,14 @@ class BiLSTMRepCounter:
         """Lower the DOWN-entry threshold so any descent counts as a rep."""
         self._assessment_mode = enabled
 
+    def set_min_depth_class(self, depth_class: int) -> None:
+        """Change the class a descent must reach to open a rep."""
+        self.config.min_depth_class = depth_class
+
+    def reject_last_rep(self) -> None:
+        """Un-count the rep just returned: a caller judged it too shallow."""
+        self.rep_count = max(0, self.rep_count - 1)
+
     @property
     def in_rep(self) -> bool:
         return self.state == BiLSTMCounterState.DOWN

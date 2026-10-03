@@ -200,15 +200,18 @@ async def run_console_voice_onboarding(
                 if not line:
                     break
 
-                # Print output
-                print(line, end='')
-
-                # Look for completion markers
+                # Name and email markers are for this parser only: echoing them would put
+                # personal data in the console log (NOWVA_LOG_CONSOLE tees it to disk).
                 if 'ONBOARDING_FIRST_NAME:' in line:
                     first_name = line.split('ONBOARDING_FIRST_NAME:')[1].strip()
-                elif 'ONBOARDING_EMAIL:' in line:
+                    continue
+                if 'ONBOARDING_EMAIL:' in line:
                     email = line.split('ONBOARDING_EMAIL:')[1].strip()
-                elif 'ONBOARDING_COMPLETE' in line:
+                    continue
+
+                print(line, end='')
+
+                if 'ONBOARDING_COMPLETE' in line:
                     # Data captured - wait for welcome message then return process handle
                     onboarding_complete = True
                     print("[WRAPPER] Onboarding data captured...")

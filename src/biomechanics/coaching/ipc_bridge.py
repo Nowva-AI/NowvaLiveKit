@@ -24,7 +24,15 @@ from biomechanics.diagnosis.bridge import (
     mediapipe_to_viewer_coords,
 )
 from biomechanics.diagnosis.graph.parameter_deltas import dorsi_driven_targets
-from biomechanics.diagnosis.types import DiagnosisResult, RepKinematicSummary, RepScore, SetScoreSummary
+from biomechanics.diagnosis.types import (
+    DiagnosisResult,
+    HypothesizedCause,
+    RepKinematicSummary,
+    RepScore,
+    SetScoreSummary,
+)
+from biomechanics.faults.observability import APPROXIMATE
+from biomechanics.faults.rules.depth import depth_category as geometric_depth_category
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import (
     DEPTH_CLASS_NAMES,
@@ -35,6 +43,16 @@ from biomechanics.utils.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Leg keypoints (hips, knees, ankles) unmeasured this long during a set mean
+# the coach cannot see the rep: the agent is told, and told again when they return.
+TRACKING_LOST_AFTER_S = 0.5
+# Lost legs are only news during a rep or this soon after one: an athlete who
+# racks the bar and walks off at the end of a set has not lost tracking.
+TRACKING_ARMED_AFTER_REP_S = 3.0
+# Legs measured again for this long before "recovered", so a flickering
+# keypoint does not toggle lost and recovered.
+TRACKING_RECOVERED_AFTER_S = 0.3
 
 
 class IPCBridge:
@@ -64,6 +82,11 @@ class IPCBridge:
         self.shoulder_width_m: float = 0.0
         self._target_stance_ratio: float = 0.0
         self._target_toe_out_deg: float = 0.0
+        self._legs_missing_since: float | None = None
+        self._legs_back_since: float | None = None
+        self._last_in_rep_s: float | None = None
+        self._tracking_lost = False
+        self._lost_cameras: list[str] = []
 
     # ------------------------------------------------------------------
     # Athlete parameters
@@ -88,6 +111,8 @@ class IPCBridge:
         self._send({
             "type": "cache_cues",
             "exercise_name": exercise_name,
+            # The agent learns the active exercise profile from this message.
+            "profile": self.cue_cache.profile_name,
             "cues": cues,
         })
         return cues
@@ -148,7 +173,15 @@ class IPCBridge:
         if now - self.last_fault_send[fault.fault_type] < self.fault_cooldown:
             return
 
-        cue_key = self.cue_cache.get_cue_for_fault(fault.fault_type, now)
+        details = fault.details
+        observability = details.get("observability", "observable")
+        # A fault read from monocular depth regression is recorded and can be
+        # mentioned (hedged) after the set, but never cued mid-set.
+        cue_key = None
+        if observability != APPROXIMATE:
+            cue_key = self.cue_cache.get_cue_for_fault(
+                fault.fault_type, now, side=details.get("side"),
+            )
 
         self._send({
             "type": "fault",
@@ -158,6 +191,13 @@ class IPCBridge:
             "message": fault.message,
             "cue": cue_key,
             "rep_number": fault.rep_number,
+            "side": details.get("side"),
+            "phase": details.get("phase"),
+            "observability": observability,
+            "is_drift": details.get("is_drift", False),
+            "value": details.get("value"),
+            "unit": details.get("unit"),
+            "details": details,
         })
 
         self.last_fault_send[fault.fault_type] = now
@@ -174,6 +214,7 @@ class IPCBridge:
         standing_kpts: list | None = None,
         rep_kinematic_summary: RepKinematicSummary | None = None,
         set_number: int | None = None,
+        highlights: list[str] | None = None,
     ) -> None:
         """Send rep data and legacy rep_count.
 
@@ -185,7 +226,10 @@ class IPCBridge:
             "type": "rep_complete",
             "rep_number": rep.rep_number,
             "max_depth_angle": round(rep.max_depth_angle, 1),
-            "depth_category": self._depth_category(rep.max_depth_angle),
+            "depth_category": self._rep_depth_category(rep),
+            "depth_target_met": rep.depth_target_met,
+            "features": rep.features,
+            "highlights": highlights or [],
             # Deduplicated: a fault can be detected on several frames of the
             # same rep, and this list is used for membership tests and for
             # fault counts in the recap, where repeats inflate the totals.
@@ -252,9 +296,10 @@ class IPCBridge:
                 "severity_score": round(fault.severity_score, 2),
                 "message": fault.message,
                 "rep_number": fault.rep_number,
-                "max_knee_flexion": round(
-                    fault.details.get("max_knee_flexion", 0.0), 1
-                ),
+                "depth_ratio": fault.details.get("depth_ratio"),
+                "target_ratio": fault.details.get("target_ratio"),
+                "depth_cm_above_parallel": fault.details.get("depth_cm_above_parallel"),
+                "category": fault.details.get("category"),
             })
         if set_number is not None:
             msg["set_number"] = set_number
@@ -270,27 +315,7 @@ class IPCBridge:
         msg: dict[str, Any] = {
             "type": "rep_diagnosis",
             "rep_number": rep_number,
-            "diagnosis": {
-                "confidence": diagnosis_result.confidence,
-                "detected_symptoms": [
-                    {
-                        "symptom_id": s.symptom_id,
-                        "severity": s.severity,
-                        "contributing_reps": s.contributing_reps,
-                    }
-                    for s in diagnosis_result.detected_symptoms
-                ],
-                "immediate_causes": [
-                    {
-                        "cause_id": c.cause_id,
-                        "score": c.score,
-                        "explanation": c.explanation,
-                        "parameter_delta": c.parameter_delta,
-                        "implicated_by": c.implicated_by,
-                    }
-                    for c in diagnosis_result.immediate_causes
-                ],
-            },
+            "diagnosis": serialize_diagnosis(diagnosis_result),
         }
         if rep_score is not None:
             msg["rep_score"] = rep_score.model_dump()
@@ -308,35 +333,13 @@ class IPCBridge:
     ) -> None:
         """Send structured diagnosis and scoring results for a completed set."""
         per_rep = score_summary.per_rep_scores
-        n = len(per_rep)
         self._send({
             "type": "diagnosis_complete",
             "set_number": set_number,
-            "diagnosis": {
-                "confidence": diagnosis_result.confidence,
-                "detected_symptoms": [
-                    {"symptom_id": s.symptom_id, "severity": s.severity, "contributing_reps": s.contributing_reps}
-                    for s in diagnosis_result.detected_symptoms
-                ],
-                "immediate_causes": [
-                    {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation, "parameter_delta": c.parameter_delta}
-                    for c in diagnosis_result.immediate_causes
-                ],
-                "session_causes": [
-                    {"cause_id": c.cause_id, "score": c.score, "explanation": c.explanation}
-                    for c in diagnosis_result.session_causes
-                ],
-                "combined_perturbation": diagnosis_result.combined_perturbation,
-            },
+            "diagnosis": serialize_diagnosis(diagnosis_result),
             "scoring": {
                 "mean_score": score_summary.mean_score,
-                "per_dimension": {
-                    "depth": round(sum(r.depth_score for r in per_rep) / n, 3),
-                    "trunk_control": round(sum(r.trunk_control_score for r in per_rep) / n, 3),
-                    "knee_tracking": round(sum(r.knee_tracking_score for r in per_rep) / n, 3),
-                    "symmetry": round(sum(r.symmetry_score for r in per_rep) / n, 3),
-                    "tempo": round(sum(r.tempo_score for r in per_rep) / n, 3),
-                },
+                "per_dimension": per_dimension_means(per_rep),
                 "best_rep": score_summary.best_rep_number,
                 "worst_rep": score_summary.worst_rep_number,
                 "trend_slope": score_summary.trend_slope,
@@ -382,6 +385,63 @@ class IPCBridge:
         })
 
     # ------------------------------------------------------------------
+    # Tracking quality
+    # ------------------------------------------------------------------
+
+    def update_tracking_quality(self, frame: PipelineFrame, active: bool, in_rep: bool) -> None:
+        """Send tracking_quality "lost" once the legs have been out of sight for
+        TRACKING_LOST_AFTER_S during a set (active), in a rep or within
+        TRACKING_ARMED_AFTER_REP_S of one, and "recovered" once they have been back
+        for TRACKING_RECOVERED_AFTER_S. Outside a set the state clears silently."""
+        if not active:
+            self._legs_missing_since = None
+            self._legs_back_since = None
+            self._last_in_rep_s = None
+            self._tracking_lost = False
+            return
+        if in_rep:
+            self._last_in_rep_s = frame.timestamp
+        missing = frame.missing_keypoints
+        if missing is None:
+            return
+        if not missing:
+            self._legs_missing_since = None
+            if not self._tracking_lost:
+                return
+            if self._legs_back_since is None:
+                self._legs_back_since = frame.timestamp
+            if frame.timestamp - self._legs_back_since >= TRACKING_RECOVERED_AFTER_S:
+                self._tracking_lost = False
+                self._legs_back_since = None
+                self._send({"type": "tracking_quality", "status": "recovered", "reason": "keypoints", "missing": []})
+            return
+        self._legs_back_since = None
+        if self._legs_missing_since is None:
+            self._legs_missing_since = frame.timestamp
+        armed = (
+            self._last_in_rep_s is not None
+            and frame.timestamp - self._last_in_rep_s <= TRACKING_ARMED_AFTER_REP_S
+        )
+        if armed and not self._tracking_lost and frame.timestamp - self._legs_missing_since > TRACKING_LOST_AFTER_S:
+            self._tracking_lost = True
+            logger.warning("[TRACKING] Lost mid-set: %s unmeasured", ", ".join(missing))
+            self._send({"type": "tracking_quality", "status": "lost", "reason": "keypoints", "missing": list(missing)})
+
+    def update_camera_status(self, frame: PipelineFrame) -> None:
+        """Send tracking_quality with reason "camera" whenever the set of lost cameras changes."""
+        lost = frame.lost_cameras
+        if lost is None or lost == self._lost_cameras:
+            return
+        self._lost_cameras = list(lost)
+        self._send({
+            "type": "tracking_quality",
+            "status": "lost" if lost else "recovered",
+            "reason": "camera",
+            "missing": [],
+            "cameras": list(lost),
+        })
+
+    # ------------------------------------------------------------------
     # Pipeline status
     # ------------------------------------------------------------------
 
@@ -402,6 +462,69 @@ class IPCBridge:
         self.ipc_client.send_message(nan_to_none(message))
 
     @staticmethod
-    def _depth_category(angle: float) -> str:
-        """Categorize squat depth. Delegates to types.depth_category."""
-        return depth_category(angle)
+    def _rep_depth_category(rep: RepData) -> str:
+        """Depth category from the rep's hip height when measured, else its knee angle."""
+        depth_ratio = rep.features.get("depth_ratio")
+        if depth_ratio is not None and depth_ratio == depth_ratio:
+            return geometric_depth_category(depth_ratio)
+        return depth_category(rep.max_depth_angle)
+
+
+def _serialize_cause(cause: HypothesizedCause) -> Dict[str, Any]:
+    return {
+        "cause_id": cause.cause_id,
+        "tier": cause.tier,
+        "score": cause.score,
+        "explanation": cause.explanation,
+        "parameter_delta": cause.parameter_delta,
+        "implicated_by": cause.implicated_by,
+        "observability": cause.observability,
+    }
+
+
+def serialize_diagnosis(diagnosis_result: DiagnosisResult) -> Dict[str, Any]:
+    """The one wire shape of a diagnosis, for every message that carries one.
+
+    ``confidence`` is measurement confidence: below 0.5 the coach hedges.
+    """
+    return {
+        "confidence": diagnosis_result.confidence,
+        "detected_symptoms": [
+            {
+                "symptom_id": symptom.symptom_id,
+                "severity": symptom.severity,
+                "contributing_reps": symptom.contributing_reps,
+                "observability": symptom.observability,
+            }
+            for symptom in diagnosis_result.detected_symptoms
+        ],
+        "immediate_causes": [_serialize_cause(c) for c in diagnosis_result.immediate_causes],
+        "session_causes": [_serialize_cause(c) for c in diagnosis_result.session_causes],
+        "longterm_causes": [_serialize_cause(c) for c in diagnosis_result.longterm_causes],
+        "contextual_notes": [_serialize_cause(c) for c in diagnosis_result.contextual_notes],
+        "combined_perturbation": diagnosis_result.combined_perturbation,
+    }
+
+
+_DIMENSION_FIELDS = (
+    ("depth", "depth_score"),
+    ("trunk_control", "trunk_control_score"),
+    ("knee_tracking", "knee_tracking_score"),
+    ("symmetry", "symmetry_score"),
+    ("tempo", "tempo_score"),
+)
+
+
+def per_dimension_means(per_rep: List[RepScore]) -> Dict[str, float]:
+    """Mean score per dimension over the reps that measured it.
+
+    A dimension no rep measured (feet never seen, no timing) is omitted rather
+    than reported as perfect.
+    """
+    means: Dict[str, float] = {}
+    for key, field in _DIMENSION_FIELDS:
+        values = [getattr(score, field) for score in per_rep]
+        finite = [value for value in values if value == value]
+        if finite:
+            means[key] = round(sum(finite) / len(finite), 3)
+    return means

@@ -55,7 +55,7 @@ def create_user_account(first_name: str, email: str) -> tuple[User, str]:
         # Check if email already exists
         existing_user = db.query(User).filter(User.email == email).first()
         if existing_user:
-            print(f"[WARNING] User with email {email} already exists!")
+            print("[WARNING] A user with that email already exists — returning it")
             return existing_user, existing_user.username
 
         # Generate unique username
@@ -76,7 +76,7 @@ def create_user_account(first_name: str, email: str) -> tuple[User, str]:
         db.commit()
         db.refresh(new_user)
 
-        print(f"[SUCCESS] Created user account: {username} ({email})")
+        print(f"[SUCCESS] Created user account: {username}")
         return new_user, username
 
     except Exception as e:

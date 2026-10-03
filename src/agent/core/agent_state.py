@@ -32,6 +32,7 @@ VALID_MODES = frozenset({
 # runtime-only sections that agents create on the fly.
 VALID_TOP_LEVEL_KEYS = frozenset({
     "mode",
+    "athlete",
     "user",
     "session",
     "workout",
@@ -148,6 +149,7 @@ class AgentState:
         # Reset session-scoped flags so they fire once per session, not once ever
         self.state.setdefault("session", {})
         self.state["session"]["main_menu_greeted"] = False
+        self.state["session"]["last_mode_switch"] = None
         self.state["session"]["started_at"] = datetime.now().isoformat()
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -231,7 +233,7 @@ class AgentState:
         for key, value in kwargs.items():
             if key in self.state["user"]:
                 self.state["user"][key] = value
-                print(f"[STATE] User.{key} updated: {value}")
+                print(f"[STATE] User.{key} updated")
 
     def mark_main_menu_visited(self):
         """Mark that user has visited main menu (no longer first time)"""
@@ -347,7 +349,7 @@ class AgentState:
                     self.state["user"]["height_cm"] = float(user.height_cm) if user.height_cm else None
                     self.state["user"]["created_at"] = user.created_at.isoformat() if user.created_at else None
                     self._user_loaded_from_db = True  # Mark as loaded
-                    print(f"[STATE] Loaded user info from database: {user.name} ({user.username})")
+                    print("[STATE] Loaded user info from database")
                 else:
                     print(f"[STATE] User {user_id} not found in database")
                     self._user_loaded_from_db = True  # Mark as attempted

@@ -8,25 +8,61 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from livekit import rtc
-from livekit.agents import RunContext
+from livekit.agents import RunContext, StopResponse, get_job_context, llm
 from livekit.agents.llm import function_tool
 
 from agent.agents.prompts import get_workout_prompt
 from agent.agents.shared.base_agent import BaseNovaAgent
+from agent.services.athlete_facts import (
+    active_pain_flags,
+    add_pain_flag,
+    athlete_facts_line,
+    resolve_pain_flag,
+)
+from agent.services.squat_card import ExplainSquatMixin
+from biomechanics.faults.observability import OBSERVABLE
 from db.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-# Trunk flexion uses the 180-convention: 180 = upright, lower = more lean.
-UPRIGHT_TRUNK_DEG = 180.0
-# ForwardLeanRule's mild threshold, expressed as lean from vertical.
-NOTABLE_LEAN_DEG = 35.0
+# Live workout state + athlete facts, one system item per conversational turn.
+WORKOUT_STATE_ITEM_ID = "nowva_workout_state"
+
+# A live frame older than this can't describe how the athlete is standing now.
+FORM_SNAPSHOT_MAX_AGE_MS = 3000.0
+
+RPE_MIN = 1.0
+RPE_MAX = 10.0
+RPE_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+RPE_NUMBER_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?|" + "|".join(RPE_NUMBER_WORDS) + r")\b")
+RPE_SCALE_PATTERN = re.compile(r"\bout of (?:10|ten)\b")
+# Effort words -> RPE, checked in order ("very hard" before "hard"). Roughly reps left:
+# easy ~4, medium ~3, hard ~1-2, very hard ~1, max 0.
+EFFORT_WORD_RPE: tuple[tuple[str, float], ...] = (
+    ("very hard", 9.0),
+    ("brutal", 9.0),
+    ("all out", 10.0),
+    ("max", 10.0),
+    ("failure", 10.0),
+    ("hard", 8.5),
+    ("tough", 8.5),
+    ("heavy", 8.5),
+    ("medium", 7.0),
+    ("moderate", 7.0),
+    ("solid", 7.0),
+    ("easy", 6.0),
+    ("light", 6.0),
+)
 
 # Wake word ONNX detection parameters (matching livekit-wakeword internals)
 _WW_SAMPLE_RATE = 16_000
@@ -73,28 +109,47 @@ def _assess_standing_setup(angles: dict) -> list[str]:
     return findings
 
 
-def _assess_in_rep(angles: dict) -> list[str]:
-    """Judge what is visible mid-rep, in plain lean-from-vertical terms."""
-    findings: list[str] = []
+def _assess_last_rep(verdict: dict) -> list[str]:
+    """Relay the engine's verdict on the last rep. Faults this camera setup can only
+    roughly read are left out: a coach who can't see something says nothing about it."""
+    from agent.services.progress_context import fault_label
 
-    trunk = angles.get("trunk_flexion")
-    if trunk is not None:
-        lean = UPRIGHT_TRUNK_DEG - trunk
-        if lean > NOTABLE_LEAN_DEG:
-            findings.append("their chest is dropping forward more than it should")
-        else:
-            findings.append("their torso angle looks good")
-
-    knee_l = angles.get("knee_flexion_l")
-    knee_r = angles.get("knee_flexion_r")
-    if knee_l is not None and knee_r is not None:
-        if abs(knee_l - knee_r) > 10.0:
-            findings.append("one side is bending more than the other")
-
+    findings = [
+        f"their last rep showed {fault_label(fault['fault_type'])}"
+        + (f" on the {fault['side']} side" if fault.get("side") in ("left", "right") else "")
+        for fault in verdict.get("faults", [])
+        if fault.get("observability", OBSERVABLE) == OBSERVABLE
+    ]
+    if not findings:
+        findings.append("their last rep had nothing to correct in what this camera can see")
     return findings
 
 
-class WorkoutAgent(BaseNovaAgent):
+def _wake_word_uses_local_mic() -> bool:
+    """Console jobs have no room audio track to tap, so they listen on the local mic.
+    WAKE_WORD_LOCAL_MIC=1 or 0 overrides the detection."""
+    override = os.environ.get("WAKE_WORD_LOCAL_MIC")
+    if override in ("0", "1"):
+        return override == "1"
+    job_ctx = get_job_context(required=False)
+    return job_ctx is not None and job_ctx.is_fake_job()
+
+
+def _effort_to_rpe(effort: str) -> float | None:
+    # Speech-to-text spells numbers out ("eight"); "out of ten" is the scale, not a rating.
+    text = RPE_SCALE_PATTERN.sub("", effort.lower())
+    numbers = [float(RPE_NUMBER_WORDS.get(n, n)) for n in RPE_NUMBER_PATTERN.findall(text)]
+    if numbers:
+        # "seven, maybe eight": the top of the range they gave
+        rpe = max(numbers)
+        return rpe if RPE_MIN <= rpe <= RPE_MAX else None
+    for word, rpe in EFFORT_WORD_RPE:
+        if re.search(rf"\b{word}\b", text):
+            return rpe
+    return None
+
+
+class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
     """Handles active workout sessions with wake word detection and coaching integration."""
 
     def __init__(self, state, userdata, from_calibration: bool = False) -> None:
@@ -107,6 +162,13 @@ class WorkoutAgent(BaseNovaAgent):
         # Must outlast the turn detector's max endpointing delay (3.0s) so a
         # pending user turn can't commit after the window closes.
         self._wake_word_timeout_seconds: float = 3.0
+        # LLM speech (recaps, motivation, rest lines) still playing or queued —
+        # what "Hey Nova" cuts off. Cached cues and rep counts are never in here.
+        self._llm_speech_handles: set = set()
+        # Fire-and-forget tasks, held so the loop can't garbage-collect them mid-run
+        self._background_tasks: set[asyncio.Task] = set()
+        # Session turn options in effect before the workout, restored after it.
+        self._saved_preemptive_enabled: bool | None = None
 
         # Wake word detection (ONNX default, Porcupine via WAKE_WORD_ENGINE=porcupine)
         self._ww_model = None
@@ -165,7 +227,7 @@ class WorkoutAgent(BaseNovaAgent):
                 await self._say(
                     f"[CONTEXT] quick exercise session just started, "
                     f"first exercise: {first_desc}{progress_block}\n\n"
-                    "Greet the user into the workout with real energy, name "
+                    "Greet the user into the workout, calm and direct, name "
                     "the first exercise, and get them moving. Two sentences "
                     "max. Vary your opener between sessions.",
                     restore=False,
@@ -175,7 +237,7 @@ class WorkoutAgent(BaseNovaAgent):
                 await self._say(
                     f"[CONTEXT] workout just started: {workout_name}, "
                     f"first exercise: {first_desc}{progress_block}\n\n"
-                    "Greet the user into the workout with real energy, name "
+                    "Greet the user into the workout, calm and direct, name "
                     "the first exercise, and mention you're watching their "
                     "form. Two sentences max. Vary your opener between "
                     "sessions.",
@@ -185,7 +247,7 @@ class WorkoutAgent(BaseNovaAgent):
             await self._say(
                 f"[CONTEXT] workout mode just started, no session details "
                 f"available{progress_block}\n\n"
-                "Greet the user into the workout with real energy and get "
+                "Greet the user into the workout, calm and direct, and get "
                 "them moving. Two sentences max. Vary your opener between "
                 "sessions.",
                 restore=False,
@@ -202,7 +264,12 @@ class WorkoutAgent(BaseNovaAgent):
     async def _on_workout_complete_signal(self, data: dict):
         """Called by CoachingService when the entire workout is done."""
         logger.info("[COACHING] Workout complete signal received — scheduling cleanup")
-        asyncio.create_task(self._handle_workout_complete())
+        self._spawn(self._handle_workout_complete())
+
+    def _spawn(self, coroutine) -> None:
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _handle_workout_complete(self):
         """Run cleanup and agent handoff outside the orchestrator's task."""
@@ -210,10 +277,10 @@ class WorkoutAgent(BaseNovaAgent):
         # Brief pause to let the LLM finish processing pending conversation
         # events from the exercise recap before truncation.
         await asyncio.sleep(0.5)
-        await self._truncate_context_for_handoff()
         from agent.agents.main_menu_agent import MainMenuAgent
-        new_agent = MainMenuAgent(state=self.state, userdata=self.userdata)
-        self.session.update_agent(new_agent)
+        self.session.update_agent(
+            await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
+        )
 
     async def _cleanup_workout(self):
         """Shared cleanup for ending a workout (DB logging, state clearing)."""
@@ -305,40 +372,62 @@ class WorkoutAgent(BaseNovaAgent):
             logger.error(f"[WAKE WORD] FAILED to set active listening turn detection: {e}", exc_info=True)
 
     def _on_speech_created_for_wake_word(self, ev):
-        """Cancel auto-generated responses in workout mode.
-        Allows coaching LLM speech and programmatic calls through.
-        """
+        """Track LLM speech so "Hey Nova" can cut it off. Nothing is cancelled here:
+        cached cues and rep counts arrive as say() speech and always play, and late
+        turn replies are dropped in on_user_turn_completed before they exist."""
         logger.info(
             f"[WAKE WORD] speech_created event: user_initiated={ev.user_initiated} "
             f"source={getattr(ev, 'source', 'unknown')} "
             f"active={self._wake_word_active} listening={self._wake_word_listening}"
         )
-
-        if not self._wake_word_active or self._wake_word_listening:
-            logger.info("[WAKE WORD] Allowing speech (wake word inactive or in listening mode)")
+        if ev.source != "generate_reply":
             return
+        self._llm_speech_handles.add(ev.speech_handle)
+        ev.speech_handle.add_done_callback(self._llm_speech_handles.discard)
 
-        # Never cancel speech from the coaching service
+    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
+        if self._wake_word_active and not self._wake_word_listening:
+            # Dormant: a turn that committed after the listening window closed.
+            logger.info("[WAKE WORD] ✗ Dropped user turn (dormant mode)")
+            raise StopResponse()
+        self._inject_workout_state(turn_ctx)
+        await super().on_user_turn_completed(turn_ctx, new_message)
+
+    def _inject_workout_state(self, turn_ctx: llm.ChatContext) -> None:
+        """One fixed-id system item with the live workout state and athlete facts.
+
+        turn_ctx is this reply's own copy, so the item never piles up in the
+        conversation history; an existing one is replaced where it sits."""
         coaching = self.userdata.coaching_service
-        if coaching and coaching.is_coaching_speaking:
-            logger.info("[WAKE WORD] Allowing speech (coaching LLM in progress)")
-            return
+        lines = [
+            coaching.workout_state_line() if coaching else None,
+            athlete_facts_line(self.state),
+        ]
+        text = "\n".join(line for line in lines if line)
+        item = llm.ChatMessage(id=WORKOUT_STATE_ITEM_ID, role="system", content=[text])
+        for index, existing in enumerate(turn_ctx.items):
+            if existing.id == WORKOUT_STATE_ITEM_ID:
+                if text:
+                    turn_ctx.items[index] = item
+                else:
+                    del turn_ctx.items[index]
+                return
+        if text:
+            turn_ctx.items.append(item)
 
-        # Dormant mode: cancel everything else. Turn replies that commit late
-        # (endpointing delay) arrive with user_initiated=True, so that flag
-        # can't distinguish them from programmatic calls.
-        try:
-            ev.speech_handle.cancel()
-            logger.info("[WAKE WORD] ✗ CANCELLED speech (dormant mode)")
-        except Exception as e:
-            logger.error(f"[WAKE WORD] Failed to cancel speech: {e}", exc_info=True)
+    async def _interrupt_llm_speech(self):
+        """Cut off LLM coaching speech, playing or queued, and wait until it stops."""
+        pending = [handle for handle in self._llm_speech_handles if not handle.done()]
+        if not pending:
+            return
+        logger.info(f"[WAKE WORD] Interrupting {len(pending)} coaching LLM speech(es)")
+        for handle in pending:
+            handle.interrupt(force=True)
+        await asyncio.gather(*(handle.wait_for_playout() for handle in pending))
 
     async def _activate_listening_mode(self):
         """Activate listening mode after wake word detection."""
-        coaching = self.userdata.coaching_service
-        if coaching and coaching.is_coaching_speaking:
-            logger.info("[WAKE WORD] Coaching LLM in progress — deferring wake word response")
-            return
+        await self._interrupt_llm_speech()
 
         logger.info("[WAKE WORD] Activating listening mode")
         self._wake_word_listening = True
@@ -347,7 +436,11 @@ class WorkoutAgent(BaseNovaAgent):
         self._set_active_listening_turn_detection()
 
         await self.session.generate_reply(
-            instructions="The user just said 'Hey Nova' during a workout. Respond very briefly (2-5 words max) like 'Yeah?', 'What's up?', or 'I'm here!' — then wait for their question."
+            instructions=(
+                "The user just said the wake word mid-workout to talk to you. Let them "
+                "know you're listening in two to five words, a short acknowledgment that "
+                "invites their question. Vary it every time, then wait."
+            )
         )
 
         self._restart_wake_word_timeout()
@@ -511,7 +604,8 @@ class WorkoutAgent(BaseNovaAgent):
                 if not self._wake_word_active:
                     break
 
-                if self._wake_word_listening or self._ww_session.agent_state == "speaking":
+                # Keeps running while Nova speaks, so "Hey Nova" can cut off a recap.
+                if self._wake_word_listening:
                     samples_filled = 0
                     samples_since_predict = 0
                     prev_scores.clear()
@@ -567,11 +661,7 @@ class WorkoutAgent(BaseNovaAgent):
                                 f"[WAKE WORD] ★ DETECTED '{name}' "
                                 f"(confidence={score:.3f})"
                             )
-                            coaching = self.userdata.coaching_service
-                            if coaching and coaching.is_coaching_speaking:
-                                logger.info("[WAKE WORD] Coaching in progress — ignoring detection")
-                                break
-                            asyncio.create_task(self._activate_listening_mode())
+                            self._spawn(self._activate_listening_mode())
                             break
         except asyncio.CancelledError:
             pass
@@ -600,7 +690,7 @@ class WorkoutAgent(BaseNovaAgent):
                 if not self._wake_word_active:
                     break
 
-                if self._wake_word_listening or self._ww_session.agent_state == "speaking":
+                if self._wake_word_listening:
                     buffer = np.zeros(0, dtype=np.int16)
                     continue
 
@@ -626,11 +716,7 @@ class WorkoutAgent(BaseNovaAgent):
                     self._ww_last_detection = now
                     buffer = np.zeros(0, dtype=np.int16)
                     logger.info("[WAKE WORD] ★ DETECTED 'hey_nova' (porcupine)")
-                    coaching = self.userdata.coaching_service
-                    if coaching and coaching.is_coaching_speaking:
-                        logger.info("[WAKE WORD] Coaching in progress — ignoring detection")
-                        break
-                    asyncio.create_task(self._activate_listening_mode())
+                    self._spawn(self._activate_listening_mode())
                     break
         except asyncio.CancelledError:
             pass
@@ -679,6 +765,14 @@ class WorkoutAgent(BaseNovaAgent):
             logger.error(f"[WAKE WORD] Porcupine init failed: {e} — falling back to ONNX")
             return None
 
+    def _wake_word_session_handlers(self) -> list[tuple[str, Callable]]:
+        return [
+            ("agent_state_changed", self._on_agent_state_changed_for_wake_word),
+            ("speech_created", self._on_speech_created_for_wake_word),
+            ("user_state_changed", self._on_user_state_changed_for_wake_word),
+            ("user_input_transcribed", self._on_user_transcript_for_wake_word),
+        ]
+
     async def _start_wake_word_system(self):
         """Activate wake word detection for workout mode."""
         if self._wake_word_active:
@@ -711,40 +805,22 @@ class WorkoutAgent(BaseNovaAgent):
         self._wake_word_listening = False
         self._ww_session = self.session
 
-        try:
-            self.session.on("agent_state_changed", self._on_agent_state_changed_for_wake_word)
-        except Exception as e:
-            logger.error(f"[WAKE WORD] FAILED to register agent_state_changed: {e}", exc_info=True)
+        for event, handler in self._wake_word_session_handlers():
+            try:
+                self.session.on(event, handler)
+            except Exception as e:
+                logger.error(f"[WAKE WORD] FAILED to register {event}: {e}", exc_info=True)
 
         try:
-            self.session.on("speech_created", self._on_speech_created_for_wake_word)
-        except Exception as e:
-            logger.error(f"[WAKE WORD] FAILED to register speech_created: {e}", exc_info=True)
-
-        try:
-            self.session.on("user_state_changed", self._on_user_state_changed_for_wake_word)
-        except Exception as e:
-            logger.error(f"[WAKE WORD] FAILED to register user_state_changed: {e}", exc_info=True)
-
-        try:
-            self.session.on("user_input_transcribed", self._on_user_transcript_for_wake_word)
-        except Exception as e:
-            logger.error(f"[WAKE WORD] FAILED to register user_input_transcribed: {e}", exc_info=True)
-
-        try:
-            self.session.options.turn_handling["preemptive_generation"]["enabled"] = False
+            preemptive = self.session.options.turn_handling["preemptive_generation"]
+            self._saved_preemptive_enabled = preemptive["enabled"]
+            preemptive["enabled"] = False
         except Exception:
             pass
 
-        try:
-            self.session.options.turn_handling["endpointing"]["min_delay"] = 0.2
-        except Exception:
-            pass
-
-        # Attach to microphone track (or wait for subscription).
-        # WAKE_WORD_LOCAL_MIC=1 captures the local mic instead — console mode
-        # has no LiveKit room track to tap.
-        if os.environ.get("WAKE_WORD_LOCAL_MIC") == "1":
+        # Attach to microphone track (or wait for subscription). Console mode
+        # has no LiveKit room track to tap, so it captures the local mic.
+        if _wake_word_uses_local_mic():
             self._ww_detection_task = asyncio.create_task(
                 self._make_detection_loop(self._local_mic_frames())
             )
@@ -771,6 +847,13 @@ class WorkoutAgent(BaseNovaAgent):
         if self._wake_word_timeout_task:
             self._wake_word_timeout_task.cancel()
             self._wake_word_timeout_task = None
+
+        # A "Hey Nova" acknowledgment still pending must not speak after the
+        # hand-off; the workout-complete task calling this keeps running.
+        current = asyncio.current_task()
+        for task in list(self._background_tasks):
+            if task is not current:
+                task.cancel()
 
         if self._ww_detection_task:
             self._ww_detection_task.cancel()
@@ -800,21 +883,21 @@ class WorkoutAgent(BaseNovaAgent):
         except Exception:
             pass
 
-        try:
-            self.session.off("agent_state_changed", self._on_agent_state_changed_for_wake_word)
-            self.session.off("speech_created", self._on_speech_created_for_wake_word)
-        except Exception:
-            pass
+        if self._ww_session is not None:
+            for event, handler in self._wake_word_session_handlers():
+                try:
+                    self._ww_session.off(event, handler)
+                except Exception:
+                    pass
 
-        try:
-            self.session.options.turn_handling["preemptive_generation"]["enabled"] = True
-        except Exception:
-            pass
-
-        try:
-            self.session.options.turn_handling["endpointing"]["min_delay"] = 0.3
-        except Exception:
-            pass
+        if self._saved_preemptive_enabled is not None:
+            try:
+                self.session.options.turn_handling["preemptive_generation"]["enabled"] = (
+                    self._saved_preemptive_enabled
+                )
+            except Exception:
+                pass
+            self._saved_preemptive_enabled = None
 
         self._set_conversational_turn_detection()
         logger.info("[WAKE WORD] System deactivated")
@@ -824,17 +907,21 @@ class WorkoutAgent(BaseNovaAgent):
     @function_tool
     async def end_workout(self, context: RunContext):
         """
-        Call this when the user wants to end/stop their workout.
+        Call this when the user wants to end/stop their workout. It closes the workout
+        out with a goodbye, so don't say goodbye before calling it.
         User might say: "stop workout", "I'm done", "end session", "finish"
         """
         logger.info("[WORKOUT] User requested to end workout")
         await self._cleanup_workout()
 
-        # Handoff to MainMenuAgent
+        # Handoff to MainMenuAgent; the closing line plays before it takes over.
         await self._suppress_turn_detection()
-        await self._truncate_context_for_handoff()
         from agent.agents.main_menu_agent import MainMenuAgent
-        return MainMenuAgent(state=self.state, userdata=self.userdata)
+        return await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata)), (
+            "The workout is over. Say one short goodbye for this workout: name one specific "
+            "thing they did well if you know it, otherwise keep it plain. No question about "
+            "what to do next. Vary the wording every time."
+        )
 
     @function_tool
     async def end_set_early(self, reps_completed: int, context: RunContext = None):
@@ -864,25 +951,14 @@ class WorkoutAgent(BaseNovaAgent):
         try:
             result = await coaching.force_end_current_set(reps=reps_completed)
 
-            if result["status"] == "advanced":
-                rest_sec = result.get("rest_seconds", 60)
-                next_desc = result.get("next_set_description", "the next set")
-                rest_display = f"{rest_sec // 60}:{rest_sec % 60:02d}" if rest_sec >= 60 else f"{rest_sec} seconds"
-                return None, (
-                    f"Confirm you logged {reps_completed} reps, tell them to rest "
-                    f"for {rest_display}, and name what's next: {next_desc}. "
-                    f"One or two brief sentences, vary the phrasing."
-                )
-            elif result["status"] == "workout_complete":
-                return None, (
-                    f"Celebrate the finish in your own words — "
-                    f"{reps_completed} reps on the final set — one or two "
-                    f"sentences, then call end_workout."
-                )
-            else:
-                return None, (
-                    f"Confirm you logged {reps_completed} reps, in a few words. Vary the phrasing."
-                )
+            # The set's recap (rest and what's next), or after the last set the
+            # exercise recap and the workout's close, follows on its own; a
+            # reply here would talk over it.
+            if result.get("recap_queued"):
+                return None
+            return None, (
+                f"Confirm you logged {reps_completed} reps, in a few words. Vary the phrasing."
+            )
 
         except Exception as e:
             logger.exception("[WORKOUT ERROR] Failed to end set early")
@@ -899,7 +975,8 @@ class WorkoutAgent(BaseNovaAgent):
         Args:
             reason: Optional reason for skipping (e.g., "injury", "no equipment")
         """
-        logger.info(f"[WORKOUT] User wants to skip exercise. Reason: {reason}")
+        logger.info("[WORKOUT] User wants to skip exercise")
+        logger.debug(f"[WORKOUT] Skip reason: {reason}")
 
         from agent.core.workout_session import WorkoutSession
 
@@ -916,10 +993,15 @@ class WorkoutAgent(BaseNovaAgent):
 
             exercise_name = current_exercise.exercise_name
 
-            session.skip_current_exercise(reason=reason)
+            moved_on = session.skip_current_exercise(reason=reason)
 
             self.state.set("workout.current_session", session.to_dict())
             self.state.save_state()
+
+            # The pipeline and the orchestrator follow the plan to the next exercise
+            coaching = self.userdata.coaching_service
+            if moved_on and coaching:
+                coaching.start_current_exercise()
 
             next_exercise = session.get_current_exercise()
             if next_exercise:
@@ -1026,51 +1108,33 @@ class WorkoutAgent(BaseNovaAgent):
             )
 
         snapshot = coaching.get_current_form_snapshot()
-        if not snapshot:
-            return None, (
-                "Ask them to hold their position for a second so you can "
-                "get a read on them. One natural sentence."
-            )
+        fresh = snapshot is not None and snapshot["data_age_ms"] <= FORM_SNAPSHOT_MAX_AGE_MS
+        angles = snapshot["angles"] if fresh else {}
 
-        if snapshot["data_age_ms"] > 3000:
-            return None, (
-                "Ask them to hold the position so you can get a fresh look. "
-                "One brief, encouraging sentence."
-            )
+        # Standing still, the setup they can change right now is judged here.
+        # The movement itself is only ever judged from the engine's verdict on
+        # their last rep, never from one frame, so this answer agrees with the
+        # cues and the recap and stays silent on what the camera can't see.
+        # Whether the last cue took is in the workout state line of this turn.
+        findings = _assess_standing_setup(angles) if angles.get("rep_phase") == "idle" else []
+        verdict = coaching.last_rep_verdict()
+        if verdict is not None:
+            findings += _assess_last_rep(verdict)
 
-        angles = snapshot["angles"]
-        last_cue = snapshot.get("last_cue") or {}
-        standing = angles.get("rep_phase") == "idle"
-
-        # Judge here rather than handing the LLM raw angles: the codebase's
-        # trunk convention is inverted (180 = upright) and valgus has no
-        # fixed scale, so a model reading bare numbers guesses backwards.
-        findings = _assess_standing_setup(angles) if standing else _assess_in_rep(angles)
-
-        # No findings means the metrics were absent, not that everything is
-        # correct — an uncalibrated athlete gets no targets at all, and
-        # claiming their setup looks fine would be a verdict with no evidence.
+        # No findings means nothing was measured yet, not that everything is
+        # correct — claiming their form looks fine would be a verdict with no evidence.
         if not findings:
             return None, (
-                "Tell the user you can't get a clean read from where they "
-                "are — ask them to face the camera and run a rep so you can "
-                "watch the movement. One short sentence, no verdict on their "
-                "form."
-            )
-
-        cue_context = ""
-        if last_cue.get("cue_key"):
-            cue_context = (
-                f" They are asking because your last cue was "
-                f"'{last_cue['cue_key']}'."
+                "Tell the user you haven't seen a rep from them yet — ask them "
+                "to face the camera and do one so you can watch the movement. "
+                "One short sentence, no verdict on their form."
             )
 
         return None, (
-            f"The user asked how their form looks.{cue_context} "
-            f"Here is what you can see right now: {'; '.join(findings)}. "
-            f"Relay this in 1-2 short sentences as a coach — natural "
-            f"language, no numbers, no jargon. Lead with whatever is "
-            f"already correct, then the one thing to change."
+            f"The user asked how their form looks. What you can see: "
+            f"{'; '.join(findings)}. Relay this in 1-2 short sentences as a "
+            f"coach — natural language, no numbers, no jargon. Lead with "
+            f"whatever is already correct, then the one thing to change."
         )
 
     @function_tool
@@ -1112,7 +1176,7 @@ class WorkoutAgent(BaseNovaAgent):
                 f"fault names. Keep it to 1-2 sentences."
             )
 
-        cause_id = coaching.get_last_cue_cause_id()
+        cause_id = coaching.get_top_cause_id()
 
         result = await coaching.request_on_demand_demo(cause_id=cause_id)
         if not result or result.get("error") or result.get("status") == "unavailable":
@@ -1125,3 +1189,69 @@ class WorkoutAgent(BaseNovaAgent):
             "correction looks like. One brief sentence, then let the "
             "visual do the talking."
         )
+
+    @function_tool
+    async def flag_pain(self, body_part: str, note: str, context: RunContext = None):
+        """
+        Call this as soon as the user mentions pain, an injury, or that something feels off,
+        before anything else. It is remembered for the rest of the workout and future sessions.
+
+        Args:
+            body_part: Where it hurts, in plain words, e.g. "left knee"
+            note: What they said about it, in a few words
+        """
+        logger.info("[WORKOUT] Pain flagged")
+        logger.debug(f"[WORKOUT] Pain flagged: {body_part} ({note})")
+        add_pain_flag(self.state, body_part, note)
+        await self._refresh_athlete_facts()
+        return None, (
+            f"Pain noted for the {body_part}. Acknowledge it plainly in one short sentence: "
+            f"no hype, no diagnosis, never suggest pushing through. If they described sharp or "
+            f"worsening pain, numbness, tingling, dizziness or chest pain, tell them to stop this "
+            f"exercise now and get it checked by a medical professional. Otherwise offer to adjust "
+            f"the movement, skip this exercise, or stop for today, and let them choose."
+        )
+
+    @function_tool
+    async def clear_pain(self, body_part: str, context: RunContext = None):
+        """
+        Call this only when the user says a pain they reported earlier is gone or feels fine now.
+
+        Args:
+            body_part: The body part they say feels fine now
+        """
+        part = body_part.lower().strip()
+        flagged = [
+            flag["body_part"] for flag in active_pain_flags(self.state)
+            if part in flag["body_part"] or flag["body_part"] in part
+        ]
+        for flagged_part in flagged:
+            resolve_pain_flag(self.state, flagged_part)
+        await self._refresh_athlete_facts()
+        logger.debug(f"[WORKOUT] Pain cleared for '{body_part}': {flagged}")
+        if not flagged:
+            return None, "There was no open pain report for that. Acknowledge briefly, in a few words."
+        return None, (
+            "The pain report is cleared. Acknowledge in a few words and ask them to tell "
+            "you if it comes back. Vary the phrasing."
+        )
+
+    @function_tool
+    async def log_set_effort(self, effort: str, context: RunContext = None):
+        """
+        Call this when the user tells you how hard their last set felt.
+
+        Args:
+            effort: Their rating as they said it: a number from one to ten, or a word such as easy, medium, hard or max
+        """
+        rpe = _effort_to_rpe(effort)
+        if rpe is None:
+            return None, (
+                "Ask them to rate that set from one to ten, ten meaning nothing left in the tank. "
+                "One short question."
+            )
+        logger.info(f"[WORKOUT] Set effort -> RPE {rpe}")
+        coaching = self.userdata.coaching_service
+        if coaching:
+            coaching.record_set_rpe(rpe)
+        return None, "Acknowledge their rating in a few words. Vary the phrasing."

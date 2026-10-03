@@ -20,7 +20,6 @@ class PipelineConfig(BaseModel):
     """Top-level pipeline configuration."""
     target_fps: int = 30
     log_level: str = "INFO"
-    single_camera_mode: bool = True
 
 
 class CaptureConfig(BaseModel):
@@ -40,8 +39,7 @@ class PoseConfig(BaseModel):
 
 
 class TriangulationConfig(BaseModel):
-    """Stereo triangulation configuration."""
-    enabled: bool = False
+    """Stereo triangulation configuration (multi-camera mode is NOWVA_MULTI_CAMERA)."""
     device_ids: List[int] = [0, 1, 2]
     primary_camera: int = 0
     max_sync_delta_ms: float = 20.0
@@ -70,15 +68,22 @@ class CameraCalibrationConfig(BaseModel):
     drift_check_frames: int = 150
 
 
-class KinematicsConfig(BaseModel):
-    """Inverse kinematics configuration."""
-    backend: str = "analytical"  # analytical | opensim
-
-
 class DepthFaultConfig(BaseModel):
-    """Squat depth fault thresholds."""
-    parallel: float = 90.0
-    below_parallel: float = 100.0
+    """Squat depth as hip height above the knee, in femur lengths (0 = parallel, + = above).
+
+    A rep counts when it reaches the athlete's target within the tolerance.
+    The target is the athlete's assessed capacity, never shallower than
+    max_target_ratio and never asked deeper than default_target_ratio
+    (parallel); uncalibrated_target_ratio applies until calibration runs.
+    """
+    default_target_ratio: float = 0.0
+    # Before calibration measures the athlete, a lenient start: refusing to
+    # count reps of someone not yet measured is worse than counting a high one.
+    uncalibrated_target_ratio: float = 0.2
+    max_target_ratio: float = 0.5
+    tolerance_ratio: float = 0.08
+    moderate_deficit_ratio: float = 0.25
+    severe_deficit_ratio: float = 0.5
 
 
 class BilateralAsymmetryConfig(BaseModel):
@@ -96,13 +101,11 @@ class ForwardLeanConfig(BaseModel):
 
 
 class KneeValgusConfig(BaseModel):
-    """Knee valgus fault thresholds (3D triangulated and 2D FPPA)."""
-    mild: float = 12.0
-    moderate: float = 17.0
-    severe: float = 24.0
-    mild_2d: float = 6.0
-    moderate_2d: float = 10.0
-    severe_2d: float = 16.0
+    """Knees caving inside the toe line: femur deviation (deg) from the knees-over-toes
+    plane. One scale in both capture modes — 8° is ~6 cm of inward knee travel."""
+    mild: float = 8.0
+    moderate: float = 13.0
+    severe: float = 18.0
 
 
 class HeelRiseConfig(BaseModel):
@@ -114,6 +117,71 @@ class HeelRiseConfig(BaseModel):
     min_rise_duration_s: float = 0.23
 
 
+class HipShootConfig(BaseModel):
+    """Chest dropping (deg of extra trunk pitch) while the hip recovers its first third."""
+    mild: float = 8.0
+    moderate: float = 12.0
+    severe: float = 18.0
+
+
+class HipShiftConfig(BaseModel):
+    """Sideways pelvis travel during a rep, as a fraction of ankle separation
+    (0.10 ≈ 3.5 cm on a 35 cm stance). Mild sits above the recorded
+    single-camera noise floor (median 0.066)."""
+    mild: float = 0.10
+    moderate: float = 0.15
+    severe: float = 0.22
+
+
+class BalanceConfig(BaseModel):
+    """Load offset from midfoot at the bottom, as a fraction of ankle-to-toe length."""
+    forward_mild: float = 0.20
+    forward_moderate: float = 0.30
+    forward_severe: float = 0.40
+    backward_mild: float = 0.30
+    backward_moderate: float = 0.40
+    backward_severe: float = 0.50
+
+
+class DepthDriftConfig(BaseModel):
+    """Rep shallower than the session's reference depth (median of its 3 deepest
+    reps), in femur lengths. Within-set depth noise is ~0.1 on one camera."""
+    mild: float = 0.15
+    moderate: float = 0.25
+    severe: float = 0.35
+
+
+class LockoutConfig(BaseModel):
+    """Top-of-rep hip height short of full standing, as a fraction of leg length."""
+    mild: float = 0.05
+    moderate: float = 0.08
+    severe: float = 0.12
+
+
+class DescentControlConfig(BaseModel):
+    """Descents shorter than these (seconds) are dive-bombed."""
+    mild_seconds: float = 0.6
+    moderate_seconds: float = 0.45
+    severe_seconds: float = 0.3
+
+
+class VelocityLossConfig(BaseModel):
+    """Concentric velocity loss (%) against the set's fastest rep."""
+    mild_pct: float = 20.0
+    moderate_pct: float = 30.0
+    severe_pct: float = 40.0
+
+
+class FootPlacementConfig(BaseModel):
+    """Setup asymmetry: front-back stagger (fraction of ankle-to-toe length) and toe-out difference (deg)."""
+    stagger_mild: float = 0.15
+    stagger_moderate: float = 0.25
+    stagger_severe: float = 0.35
+    flare_mild_deg: float = 10.0
+    flare_moderate_deg: float = 15.0
+    flare_severe_deg: float = 22.0
+
+
 class FaultsConfig(BaseModel):
     """Fault detection configuration."""
     depth: DepthFaultConfig = Field(default_factory=DepthFaultConfig)
@@ -121,6 +189,14 @@ class FaultsConfig(BaseModel):
     forward_lean: ForwardLeanConfig = Field(default_factory=ForwardLeanConfig)
     knee_valgus: KneeValgusConfig = Field(default_factory=KneeValgusConfig)
     heel_rise: HeelRiseConfig = Field(default_factory=HeelRiseConfig)
+    hip_shoot: HipShootConfig = Field(default_factory=HipShootConfig)
+    hip_shift: HipShiftConfig = Field(default_factory=HipShiftConfig)
+    balance: BalanceConfig = Field(default_factory=BalanceConfig)
+    depth_drift: DepthDriftConfig = Field(default_factory=DepthDriftConfig)
+    lockout: LockoutConfig = Field(default_factory=LockoutConfig)
+    descent_control: DescentControlConfig = Field(default_factory=DescentControlConfig)
+    velocity_loss: VelocityLossConfig = Field(default_factory=VelocityLossConfig)
+    foot_placement: FootPlacementConfig = Field(default_factory=FootPlacementConfig)
 
 
 class BiLSTMConfig(BaseModel):
@@ -170,12 +246,6 @@ class BarbellTrackingConfig(BaseModel):
     tilt_asym_severe_cm: float = 10.0
 
 
-class RepDetectionConfig(BaseModel):
-    """Rep detection configuration."""
-    entry_threshold: float = 30.0
-    min_rep_duration_frames: int = 20
-
-
 class HipPositionCounterConfig(BaseModel):
     """Hip-position-based rep counter thresholds.
 
@@ -191,13 +261,14 @@ class HipPositionCounterConfig(BaseModel):
     min_depth_cm: float = 10.0              # minimum displacement for valid rep (prominence)
     standing_return_cm: float = 3.0         # must return within this of baseline
 
-    # Minimum frames in each state (prevents noise flipping)
-    min_frames_descending: int = 3
-    min_frames_bottom: int = 2
-    min_frames_ascending: int = 3
+    # Minimum time in each state (prevents noise flipping): 3, 2 and 3 frames
+    # at 30 fps. Seconds, not frames, so 12 fps capture keeps the same timing.
+    min_descending_s: float = 0.1
+    min_bottom_s: float = 0.067
+    min_ascending_s: float = 0.1
 
     # Rep validation
-    min_rep_duration_frames: int = 15       # ~0.5s at 30fps
+    min_rep_duration_s: float = 0.5         # 15 frames at 30 fps
 
 
 class CoachingConfig(BaseModel):
@@ -224,7 +295,8 @@ class KalmanSmootherConfig(BaseModel):
     measurement_std_ceiling_m: float = 0.08
     gate_sigma: float = 4.0
     gate_min_radius_m: float = 0.08
-    max_predicted_frames: int = 5
+    # Analysis carries an unmeasured keypoint this long (5 frames at 30 fps).
+    max_prediction_s: float = 0.17
     min_output_confidence: float = 0.15
 
 
@@ -279,9 +351,7 @@ class BiomechanicsConfig(BaseModel):
     pose: PoseConfig = Field(default_factory=PoseConfig)
     triangulation: TriangulationConfig = Field(default_factory=TriangulationConfig)
     camera_calibration: CameraCalibrationConfig = Field(default_factory=CameraCalibrationConfig)
-    kinematics: KinematicsConfig = Field(default_factory=KinematicsConfig)
     faults: FaultsConfig = Field(default_factory=FaultsConfig)
-    rep_detection: RepDetectionConfig = Field(default_factory=RepDetectionConfig)
     coaching: CoachingConfig = Field(default_factory=CoachingConfig)
     ipc: IPCConfig = Field(default_factory=IPCConfig)
     bilstm: BiLSTMConfig = Field(default_factory=BiLSTMConfig)
@@ -375,22 +445,10 @@ def load_pipeline_config(path: Optional[str] = None) -> BiomechanicsConfig:
     if "camera_calibration" in raw_config:
         config_dict["camera_calibration"] = CameraCalibrationConfig(**raw_config["camera_calibration"])
 
-    if "kinematics" in raw_config:
-        config_dict["kinematics"] = KinematicsConfig(**raw_config["kinematics"])
-
     if "faults" in raw_config:
-        faults_data = raw_config["faults"]
-        faults_config = FaultsConfig(
-            depth=DepthFaultConfig(**faults_data.get("depth", {})),
-            bilateral_asymmetry=BilateralAsymmetryConfig(**faults_data.get("bilateral_asymmetry", {})),
-            forward_lean=ForwardLeanConfig(**faults_data.get("forward_lean", {})),
-            knee_valgus=KneeValgusConfig(**faults_data.get("knee_valgus", {})),
-            heel_rise=HeelRiseConfig(**faults_data.get("heel_rise", {})),
-        )
-        config_dict["faults"] = faults_config
-
-    if "rep_detection" in raw_config:
-        config_dict["rep_detection"] = RepDetectionConfig(**raw_config["rep_detection"])
+        # Validated as one nested model, so a new fault's YAML block can never
+        # be silently dropped by a hand-written field list.
+        config_dict["faults"] = FaultsConfig(**raw_config["faults"])
 
     if "coaching" in raw_config:
         config_dict["coaching"] = CoachingConfig(**raw_config["coaching"])

@@ -5,7 +5,9 @@ Extracts a fixed-length, body-size-normalized feature vector from a Skeleton3D.
 Features: joint angles + normalized bone lengths + normalized vertical displacements.
 
 The normalization factor (torso or thigh length) removes scale variance from
-camera distance and body size differences.
+camera distance and body size differences. Features are in the training
+convention: Y-up (the synthetic training skeletons). Live skeletons are Y-down
+(geometry.WORLD_UP), so the live extractor flips their vertical differences.
 """
 
 import numpy as np
@@ -48,6 +50,9 @@ class LandmarkFeatureExtractor:
 
     FEATURE_DIM = 14
 
+    def __init__(self, input_y_down: bool = False):
+        self._vertical_sign = -1.0 if input_y_down else 1.0
+
     def extract(self, skeleton: Skeleton3D) -> np.ndarray:
         """
         Extract feature vector from a single frame's skeleton.
@@ -58,8 +63,10 @@ class LandmarkFeatureExtractor:
         Returns:
             numpy array of shape (FEATURE_DIM,)
         """
-        kpts = skeleton.to_numpy()  # (17, 3)
+        return self.extract_points(skeleton.to_numpy())
 
+    def extract_points(self, kpts: np.ndarray) -> np.ndarray:
+        """Feature vector from an (N, 3) keypoint array."""
         norm = self._compute_normalization_factor(kpts)
         angles = self._compute_angles(kpts)
         distances = self._compute_normalized_distances(kpts, norm)
@@ -110,7 +117,7 @@ class LandmarkFeatureExtractor:
         shoulder_mid = midpoint(kpts[CK.LEFT_SHOULDER], kpts[CK.RIGHT_SHOULDER])
 
         ref_y = hip_mid[1]
-        return np.array([
+        return self._vertical_sign * np.array([
             (hip_mid[1] - ref_y) / norm,       # always 0, but keeps vector fixed-length
             (knee_mid[1] - ref_y) / norm,
             (ankle_mid[1] - ref_y) / norm,

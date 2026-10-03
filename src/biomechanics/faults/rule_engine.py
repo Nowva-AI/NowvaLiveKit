@@ -8,15 +8,20 @@ and deduplicates same-fault reports that arrive within DEDUP_INTERVAL_S.
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from typing import TYPE_CHECKING, List, Optional, Dict
 
 from biomechanics.utils.types import JointAngles, FaultEvent, BarbellDetection
 from biomechanics.utils.derivatives import AngleDerivatives
-from biomechanics.faults.fault_types import FaultRule, FaultType
+from biomechanics.faults.fault_types import FaultRule, FaultType, RepFaultRule
+from biomechanics.faults.observability import NOT_OBSERVABLE, capture_mode_from_env, fault_observability
+from biomechanics.faults.rules.depth import DepthRule
+from biomechanics.faults.session_reference import SessionReference
 from biomechanics.config import BiomechanicsConfig, get_config
 
 if TYPE_CHECKING:
+    from biomechanics.analysis.rep_features import RepFeatures
     from biomechanics.utils.segment_lengths import BodyProportions
 
 logger = logging.getLogger(__name__)
@@ -45,6 +50,7 @@ class RuleEngine:
         config: Optional[BiomechanicsConfig] = None,
         history_maxlen: int = 90,
         rules: Optional[List[FaultRule]] = None,
+        capture_mode: Optional[str] = None,
     ):
         """
         Initialize the rule engine.
@@ -55,6 +61,8 @@ class RuleEngine:
             rules: List of fault rules from the exercise profile. Required —
                    the profile is the single source of truth for which rules
                    apply to each exercise.
+            capture_mode: "single_camera" or "triangulated"; decides which
+                   faults are observable. Defaults to NOWVA_MULTI_CAMERA.
         """
         self.config = config or get_config()
         self.history: deque = deque(maxlen=history_maxlen)
@@ -69,15 +77,15 @@ class RuleEngine:
         # Deduplication tracking: fault_type -> timestamp of the last report
         self._last_fault_times: Dict[str, float] = {}
 
-        # Baseline calibration — after first clean rep, adjust thresholds
-        # to the user's natural movement pattern. The profile owns the
-        # exercise-specific tracking logic; RuleEngine just holds the state
-        # dict and calls the profile hooks.
-        self._calibrated: bool = False
-        self._calibration_reps: int = 0
-        self._calibration_target: int = 1  # Calibrate after 1 clean rep
-        self._calibration_state: Dict = {}  # Profile-owned state bag
-        self._profile = None  # Set by pipeline after construction
+        self.capture_mode = capture_mode or capture_mode_from_env()
+
+        # The athlete's best rep this session (fatigue drift) and depth target.
+        # Absolute thresholds never move from observed reps — a fault on the
+        # first rep is still a fault.
+        depth_rule = self._depth_rule()
+        self.reference = SessionReference(
+            depth_tolerance_ratio=depth_rule.tolerance_ratio if depth_rule else 0.08,
+        )
 
     def apply_body_proportion_scaling(self, proportions: BodyProportions) -> None:
         """Scale fault thresholds based on the user's body proportions.
@@ -94,9 +102,10 @@ class RuleEngine:
             )
 
     def reset(self) -> None:
-        """Reset engine state (clear history and rule states)."""
+        """Reset per-set state. Session bests and the depth target survive."""
         self.history.clear()
         self._last_fault_times.clear()
+        self.reference.start_new_set()
 
         # Reset stateful rules
         for rule in self.rules:
@@ -156,7 +165,7 @@ class RuleEngine:
                 rep_number=rep_number,
             )
 
-            if fault is not None:
+            if fault is not None and self._tag_observability(fault):
                 # Deduplicate same-fault reports within the dedup interval
                 if self._should_report_fault(fault, angles.timestamp):
                     faults.append(fault)
@@ -164,56 +173,83 @@ class RuleEngine:
 
         return faults
 
+    def _tag_observability(self, fault: FaultEvent) -> bool:
+        """Stamp how trustworthy the fault is; False when the camera setup cannot see it."""
+        level = fault_observability(fault.fault_type, self.capture_mode)
+        if level == NOT_OBSERVABLE:
+            return False
+        fault.details.setdefault("observability", level)
+        return True
+
     def _should_report_fault(self, fault: FaultEvent, timestamp: float) -> bool:
         """Check if fault should be reported (time-based deduplication)."""
         last_time = self._last_fault_times.get(fault.fault_type, float("-inf"))
         return timestamp - last_time >= DEDUP_INTERVAL_S
 
     # ------------------------------------------------------------------
-    # Baseline calibration (delegates to profile)
+    # Per-rep verdicts and the depth target
     # ------------------------------------------------------------------
 
-    def set_profile(self, profile) -> None:
-        """Set the exercise profile for calibration delegation."""
-        self._profile = profile
+    def _depth_rule(self) -> Optional[DepthRule]:
+        return next((rule for rule in self.rules if isinstance(rule, DepthRule)), None)
 
-    def record_frame_for_calibration(self, angles: JointAngles) -> None:
-        """Track peak angle values during reps for baseline calibration."""
-        if self._calibrated:
-            return
-        if self._profile is not None:
-            self._profile.record_calibration_frame(angles, self._calibration_state)
-
-    def on_rep_complete_calibration(self, is_clean: bool) -> None:
-        """Called after a rep completes to advance calibration."""
-        if self._calibrated:
-            return
-
-        if is_clean:
-            self._calibration_reps += 1
-
-        if self._calibration_reps >= self._calibration_target:
-            self._calibrated = True
-            if self._profile is not None:
-                self._profile.apply_baseline(self.rules, self._calibration_state)
-            logger.info("[RULE ENGINE] Baseline calibration complete")
+    def set_depth_target(self, target_ratio: Optional[float]) -> None:
+        """The athlete's depth target in femur lengths above parallel; None counts every descent."""
+        self.reference.depth_target_ratio = target_ratio
 
     @property
-    def calibrated(self) -> bool:
-        """Whether baseline calibration is complete."""
-        return self._calibrated
+    def depth_target_ratio(self) -> Optional[float]:
+        return self.reference.depth_target_ratio
 
-    def finish_rep(self, angles: JointAngles, rep_number: int) -> List[FaultEvent]:
-        """Give per-rep rules their verdict on the rep that just completed."""
+    def reaches_depth_target(self, depth_ratio: float) -> bool:
+        return self.reference.reaches_depth_target(depth_ratio)
+
+    def judge_shallow_descent(
+        self,
+        depth_ratio: float,
+        angles: JointAngles,
+        rep_number: int,
+        depth_cm_above_parallel: float = math.nan,
+    ) -> List[FaultEvent]:
+        """The depth fault for a descent that was not counted because it missed the target."""
+        rule = self._depth_rule()
+        target = self.reference.depth_target_ratio
+        if rule is None or target is None:
+            return []
+        fault = rule.judge_shallow_descent(
+            depth_ratio, target, angles, rep_number, depth_cm_above_parallel,
+        )
+        if fault is None or not self._tag_observability(fault):
+            return []
+        return [fault]
+
+    def finish_rep(
+        self,
+        angles: JointAngles,
+        rep_number: int,
+        features: Optional[RepFeatures] = None,
+    ) -> List[FaultEvent]:
+        """Give per-rep rules their verdict on the rep that just completed.
+
+        Rep-feature rules judge against the session bests as they stood before
+        this rep; the rep is folded into the bests afterwards.
+        """
         faults: List[FaultEvent] = []
+        if features is not None:
+            self.reference.annotate(features)
         for rule in self.rules:
-            finish = getattr(rule, "finish_rep", None)
-            if finish is None:
+            if isinstance(rule, RepFaultRule):
+                fault = rule.judge_rep(features, self.reference, angles) if features is not None else None
+            else:
+                finish = getattr(rule, "finish_rep", None)
+                fault = finish(angles, rep_number) if finish is not None else None
+            if fault is None or not self._tag_observability(fault):
                 continue
-            fault = finish(angles, rep_number)
-            if fault is not None and self._should_report_fault(fault, angles.timestamp):
+            if self._should_report_fault(fault, angles.timestamp):
                 faults.append(fault)
                 self._last_fault_times[fault.fault_type] = angles.timestamp
+        if features is not None:
+            self.reference.update(features)
         return faults
 
     def discard_rep(self) -> None:
@@ -253,37 +289,6 @@ class RuleEngine:
                         max_knee_flexion=max_depth_angle,
                         angles=angles,
                         rep_number=rep_number,
-                    )
-                    if fault is not None:
-                        faults.append(fault)
-                break
-
-        return faults
-
-    def evaluate_shallow_rep(
-        self,
-        max_depth_class: int,
-        angles: JointAngles,
-        rep_number: int,
-        max_knee_flexion: float = 0.0,
-    ) -> List[FaultEvent]:
-        """
-        Evaluate a rep that was rejected for insufficient depth.
-
-        Mirrors evaluate_rep_complete, but the depth class from the rep
-        counter is the input rather than the measured knee angle — the rep
-        was rejected on that class, so the fault must follow it.
-        """
-        faults: List[FaultEvent] = []
-
-        for rule in self.rules:
-            if rule.fault_type == FaultType.DEPTH:
-                if hasattr(rule, "evaluate_depth_class"):
-                    fault = rule.evaluate_depth_class(
-                        max_depth_class=max_depth_class,
-                        angles=angles,
-                        rep_number=rep_number,
-                        max_knee_flexion=max_knee_flexion,
                     )
                     if fault is not None:
                         faults.append(fault)

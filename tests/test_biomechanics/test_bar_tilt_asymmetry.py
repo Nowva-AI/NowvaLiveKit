@@ -29,20 +29,12 @@ def _detection(left_y: float, right_y: float, bar_len_px: float = 500.0) -> Barb
 
 
 def _run_rep(rule: BarTiltAsymmetryRule, detections, rep_number: int = 1):
-    """Run a rep by feeding detections with in_rep=True, then one frame with in_rep=False."""
+    """Feed a rep's detections with in_rep=True, then complete it the way the engine does."""
     history = deque(maxlen=90)
     for i, det in enumerate(detections):
         rule.set_frame_context(bar_detection=det)
         rule.evaluate(_make_angles(i), history, in_rep=True, rep_number=rep_number)
-
-    # Rep-end frame (in_rep=False)
-    rule.set_frame_context(bar_detection=None)
-    return rule.evaluate(
-        _make_angles(len(detections)),
-        history,
-        in_rep=False,
-        rep_number=rep_number,
-    )
+    return rule.finish_rep(_make_angles(len(detections)), rep_number)
 
 
 def test_no_detections_returns_none():
@@ -54,9 +46,27 @@ def test_no_detections_returns_none():
         rule.set_frame_context(bar_detection=None)
         rule.evaluate(_make_angles(i), history, in_rep=True, rep_number=1)
 
-    rule.set_frame_context(bar_detection=None)
-    fault = rule.evaluate(_make_angles(10), history, in_rep=False, rep_number=1)
+    fault = rule.finish_rep(_make_angles(10), rep_number=1)
     assert fault is None
+
+
+def test_fault_lands_on_the_rep_that_tilted():
+    """The verdict used to arrive on the next frame tagged with the next rep's number."""
+    rule = BarTiltAsymmetryRule()
+    fault = _run_rep(rule, [_detection(300.0, 340.0)] * 10, rep_number=3)
+    assert fault is not None
+    assert fault.rep_number == 3
+    assert fault.details["side"] == "right"
+
+
+def test_evaluate_never_emits_on_its_own():
+    rule = BarTiltAsymmetryRule()
+    history = deque(maxlen=90)
+    for i in range(10):
+        rule.set_frame_context(bar_detection=_detection(300.0, 340.0))
+        assert rule.evaluate(_make_angles(i), history, in_rep=True, rep_number=1) is None
+    rule.set_frame_context(bar_detection=None)
+    assert rule.evaluate(_make_angles(10), history, in_rep=False, rep_number=2) is None
 
 
 def test_horizontal_bar_no_fault():

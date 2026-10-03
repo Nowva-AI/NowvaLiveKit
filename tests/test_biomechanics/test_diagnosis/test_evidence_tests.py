@@ -6,11 +6,14 @@ import pytest
 
 from biomechanics.diagnosis.graph.evidence_tests import (
     ankle_df_limitation,
+    test_bracing_failure as bracing_failure_evidence,
+    test_femur_torso_ratio as femur_torso_ratio_evidence,
     test_limited_ankle_df as limited_ankle_df_evidence,
     test_narrow_stance as narrow_stance_evidence,
     test_progressive_degradation as progressive_degradation_evidence,
 )
 from biomechanics.diagnosis.graph.parameter_deltas import dorsi_driven_targets
+from biomechanics.diagnosis.lean_model import UNRESTRICTED_SHANK_DEG, expected_pitches
 from biomechanics.diagnosis.types import (
     RepKinematicSummary,
     RepScore,
@@ -21,6 +24,20 @@ ANTHRO = {"femur_torso_ratio": 0.93}
 ROM = {"peak_dorsiflexion": 35.0, "avg_depth": 120.0}
 
 EVIDENCE_TOLERANCE = 1e-6
+
+LONG_FEMUR_ANTHRO = {
+    "torso_length": 0.48,
+    "femur_length_avg": 0.53,
+    "tibia_length_avg": 0.43,
+    "foot_length": 0.20,
+}
+REFERENCE_BUILD_ANTHRO = {
+    "torso_length": 0.543,
+    "femur_length_avg": 0.462,
+    "tibia_length_avg": 0.464,
+    "foot_length": 0.20,
+}
+PARALLEL_RATIO = 0.0
 
 
 def _make_rep(rep_number: int = 1, **overrides) -> RepKinematicSummary:
@@ -42,6 +59,21 @@ def _make_rep(rep_number: int = 1, **overrides) -> RepKinematicSummary:
     )
     values.update(overrides)
     return RepKinematicSummary(**values)
+
+
+def _lean_rep(anthro: dict, shank_deg: float, extra_lean_deg: float, **overrides) -> RepKinematicSummary:
+    """A rep leaning ``extra_lean_deg`` past the balanced pitch its build and ankles need."""
+    reference, athlete, with_ankles = expected_pitches(anthro, PARALLEL_RATIO, shank_deg)
+    return _make_rep(
+        trunk_pitch_at_bottom=with_ankles + extra_lean_deg,
+        ankle_df_l_max=shank_deg,
+        ankle_df_r_max=shank_deg,
+        depth_ratio=PARALLEL_RATIO,
+        expected_pitch_reference=reference,
+        expected_pitch_athlete=athlete,
+        expected_pitch_with_ankles=with_ankles,
+        **overrides,
+    )
 
 
 def _make_summary(
@@ -186,3 +218,42 @@ class TestAnkleDorsiflexionLimitation:
         ) == pytest.approx(
             limited_ankle_df_evidence(rep, ANTHRO, deep_baseline, None)
         )
+
+
+class TestLeanAttribution:
+    """Lean past the reference lifter's is split into anatomy (the athlete's
+    proportions), ankles, and a residual that only bracing explains."""
+
+    def test_long_femur_lean_at_own_balance_is_all_anatomy(self):
+        rep = _lean_rep(LONG_FEMUR_ANTHRO, UNRESTRICTED_SHANK_DEG, 0.0)
+        assert femur_torso_ratio_evidence(rep, ANTHRO, ROM, None) == pytest.approx(1.0)
+        assert bracing_failure_evidence(rep, ANTHRO, ROM, None) == pytest.approx(
+            0.0, abs=EVIDENCE_TOLERANCE
+        )
+
+    def test_reference_build_lean_is_not_anatomy(self):
+        rep = _lean_rep(REFERENCE_BUILD_ANTHRO, UNRESTRICTED_SHANK_DEG, 20.0)
+        assert femur_torso_ratio_evidence(rep, ANTHRO, ROM, None) < 0.05
+
+    def test_anatomy_share_shrinks_as_unexplained_lean_grows(self):
+        at_balance = _lean_rep(LONG_FEMUR_ANTHRO, UNRESTRICTED_SHANK_DEG, 0.0)
+        beyond = _lean_rep(LONG_FEMUR_ANTHRO, UNRESTRICTED_SHANK_DEG, 20.0)
+        anthro_part = at_balance.expected_pitch_athlete - at_balance.expected_pitch_reference
+        expected_share = anthro_part / (anthro_part + 20.0)
+        assert femur_torso_ratio_evidence(beyond, ANTHRO, ROM, None) == pytest.approx(
+            expected_share, abs=EVIDENCE_TOLERANCE
+        )
+
+    def test_stiff_ankle_lean_at_own_balance_is_not_bracing(self):
+        rep = _lean_rep(REFERENCE_BUILD_ANTHRO, 18.0, 0.0)
+        assert bracing_failure_evidence(rep, ANTHRO, ROM, None) == pytest.approx(
+            0.0, abs=EVIDENCE_TOLERANCE
+        )
+
+    def test_unexplained_lean_is_bracing(self):
+        rep = _lean_rep(REFERENCE_BUILD_ANTHRO, UNRESTRICTED_SHANK_DEG, 20.0)
+        assert bracing_failure_evidence(rep, ANTHRO, ROM, None) > 0.9
+
+    def test_chest_dropping_out_of_the_hole_is_bracing_evidence(self):
+        rep = _lean_rep(REFERENCE_BUILD_ANTHRO, UNRESTRICTED_SHANK_DEG, 0.0, hip_shoot_deg=18.0)
+        assert bracing_failure_evidence(rep, ANTHRO, ROM, None) == pytest.approx(0.6)

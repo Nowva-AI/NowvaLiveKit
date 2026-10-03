@@ -28,6 +28,12 @@ class FaultType(str, Enum):
     TRUNK_STABILITY = "trunk_stability"
     TEMPO = "tempo"  # Tempo-related faults (too fast, stalling)
     HEEL_RISE = "heel_rise"
+    HIP_SHOOT = "hip_shoot"
+    HIP_SHIFT = "hip_shift"
+    BALANCE = "balance"
+    DEPTH_DRIFT = "depth_drift"
+    VELOCITY_LOSS = "velocity_loss"
+    FOOT_PLACEMENT = "foot_placement"
 
 
 # Default thresholds from config (degrees unless specified)
@@ -66,18 +72,22 @@ DEFAULT_THRESHOLDS: Dict[FaultType, Dict[str, float]] = {
 }
 
 
-# Human-readable fault messages
+# Human-readable fault messages. Plain words and external-focus cues — the
+# athlete never hears biomechanics jargon.
 FAULT_MESSAGES: Dict[FaultType, Dict[str, str]] = {
     FaultType.DEPTH: {
-        "quarter": "Only quarter squat — try to go deeper",
-        "half": "Half squat depth — push a bit lower",
+        "quarter": "Only a quarter squat — sit lower",
+        "half": "Half squat — sit a little lower",
         "parallel": "Good depth at parallel",
-        "below_parallel": "Great depth below parallel!",
+        "below_parallel": "Great depth below parallel",
+        "mild": "Just short of your depth — sit a little lower",
+        "moderate": "Short of your depth — sit lower",
+        "severe": "Well short of your depth — sit down between your heels",
     },
     FaultType.BILATERAL_ASYMMETRY: {
-        "mild": "Slight imbalance between sides",
-        "moderate": "Noticeable weight shift — even it out",
-        "severe": "Significant asymmetry — focus on balance",
+        "mild": "Bar tipping slightly — keep it level",
+        "moderate": "Bar tilting — push evenly with both feet",
+        "severe": "Bar tilting a lot — even out both sides",
     },
     FaultType.FORWARD_LEAN: {
         "mild": "Slight forward lean",
@@ -85,9 +95,9 @@ FAULT_MESSAGES: Dict[FaultType, Dict[str, str]] = {
         "severe": "Excessive forward lean — stay upright",
     },
     FaultType.KNEE_VALGUS: {
-        "mild": "Slight knee cave",
-        "moderate": "Knees caving in — push knees out",
-        "severe": "Significant knee valgus — knees out!",
+        "mild": "Knees drifting in — spread the floor",
+        "moderate": "Knees caving — push them out over your little toes",
+        "severe": "Knees collapsing in — knees out, spread the floor",
     },
     FaultType.BACK_ROUNDING: {
         "mild": "Slight back rounding",
@@ -95,9 +105,47 @@ FAULT_MESSAGES: Dict[FaultType, Dict[str, str]] = {
         "severe": "Excessive back rounding — brace core",
     },
     FaultType.TEMPO: {
-        "eccentric_fast": "Slow down! Control your descent",
-        "stalling": "Grinding — push through!",
+        "eccentric_fast": "Slow down — control the way down",
+        "stalling": "Keep driving up",
         "good": "Good tempo",
+        "mild": "A bit fast on the way down — control it",
+        "moderate": "Dropping fast — control the way down",
+        "severe": "Dropping into the bottom — slow the descent",
+    },
+    FaultType.HIP_SHOOT: {
+        "mild": "Hips rising first — chest and hips up together",
+        "moderate": "Hips shooting up — drive your back into the bar",
+        "severe": "Turning it into a good morning — lead with your chest",
+    },
+    FaultType.HIP_SHIFT: {
+        "mild": "Hips drifting to one side — stay centered",
+        "moderate": "Hips shifting — push evenly through both feet",
+        "severe": "Big hip shift — center up between your feet",
+    },
+    FaultType.BALANCE: {
+        "mild": "Weight drifting — stay over the whole foot",
+        "moderate": "Off balance — feel your heel and big toe",
+        "severe": "Way off balance — whole foot on the floor",
+    },
+    FaultType.DEPTH_DRIFT: {
+        "mild": "Getting a little shallower — same depth as your first rep",
+        "moderate": "Cutting depth — match your first rep",
+        "severe": "Much shallower than earlier — match your first rep",
+    },
+    FaultType.LOCKOUT: {
+        "mild": "Stand all the way up",
+        "moderate": "Not standing tall — finish each rep",
+        "severe": "Stand fully between reps",
+    },
+    FaultType.VELOCITY_LOSS: {
+        "mild": "Rep slowing down — drive hard",
+        "moderate": "That one slowed a lot — drive out of the bottom",
+        "severe": "Big slowdown — that's close to your limit",
+    },
+    FaultType.FOOT_PLACEMENT: {
+        "mild": "Feet a little uneven — square them up",
+        "moderate": "Feet uneven — line them up",
+        "severe": "Feet set up crooked — reset your stance",
     },
 }
 
@@ -223,3 +271,58 @@ class FaultRule(ABC):
             return FaultSeverity.MILD, score
         else:
             return FaultSeverity.NONE, 0.0
+
+
+class RepFaultRule(FaultRule):
+    """A rule judged once per rep from the rep's features, never frame by frame.
+
+    The engine calls ``judge_rep`` when a rep completes. Judging the whole rep
+    keeps one noisy frame from producing a fault and puts each verdict on the
+    rep it belongs to.
+    """
+
+    def evaluate(
+        self,
+        angles: JointAngles,
+        history: deque,
+        in_rep: bool = False,
+        rep_number: int = 0,
+    ) -> Optional[FaultEvent]:
+        return None
+
+    @abstractmethod
+    def judge_rep(self, features, reference, angles: JointAngles) -> Optional[FaultEvent]:
+        """Return this rep's fault, or None. ``reference`` is the SessionReference."""
+
+    def _rep_fault(
+        self,
+        value: float,
+        thresholds: Dict[str, float],
+        angles: JointAngles,
+        rep_number: int,
+        unit: str,
+        side: Optional[str] = None,
+        phase: Optional[str] = None,
+        is_drift: bool = False,
+        **extra: Any,
+    ) -> Optional[FaultEvent]:
+        severity, score = self._get_severity(value, thresholds)
+        if severity == FaultSeverity.NONE:
+            return None
+        message = FAULT_MESSAGES.get(self.fault_type, {}).get(severity.value, self.fault_type.value)
+        details: Dict[str, Any] = {
+            "side": side,
+            "phase": phase,
+            "is_drift": is_drift,
+            "value": value,
+            "unit": unit,
+        }
+        details.update(extra)
+        return self._create_fault_event(
+            severity=severity,
+            severity_score=score,
+            message=message,
+            angles=angles,
+            rep_number=rep_number,
+            details=details,
+        )

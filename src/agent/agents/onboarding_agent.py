@@ -32,7 +32,9 @@ class OnboardingAgent(BaseNovaAgent):
             userdata=self.userdata,
         )
         from agent.agents.main_menu_agent import MainMenuAgent
-        self.session.update_agent(MainMenuAgent(state=self.state, userdata=self.userdata))
+        self.session.update_agent(
+            await self._carry_context_to(MainMenuAgent(state=self.state, userdata=self.userdata))
+        )
 
 
 class CollectOnboardingDataTask(AffectNodesMixin, AgentTask):
@@ -168,30 +170,35 @@ class CollectOnboardingDataTask(AffectNodesMixin, AgentTask):
         self.userdata.email_confirmed = True
         logger.debug(f"[DEBUG] Email '{self.userdata.temp_email}' confirmed by user!")
 
-        user_id = None
-        username = None
         try:
             user, username = create_user_account(self.userdata.temp_first_name, self.userdata.temp_email)
-            user_id = str(user.id)
-            print(f"ONBOARDING_USERNAME: {username}")
-            print(f"ONBOARDING_USER_ID: {user_id}")
-
-            self.state.update_user(
-                id=user_id,
-                name=self.userdata.temp_first_name,
-                email=self.userdata.temp_email,
-                username=username
-            )
-
-            self.state.switch_mode("main_menu")
-            self.state.save_state()
-
-            logger.info("[ONBOARDING] User account created successfully")
-            logger.info("[ONBOARDING] State updated - ready for main menu")
-
         except Exception as e:
             logger.error(f"[ERROR] User account creation failed: {str(e)}")
+            user = None
+        if user is None or not user.id:
+            # Without a user id nothing the user does later can be saved, so the main
+            # menu must not be reached. Stay here and let them retry the confirmation.
+            return None, (
+                "Saving their account just failed on your side — not their fault. Tell them "
+                "plainly in one or two sentences that you couldn't set up their account yet, "
+                "and ask them to confirm their email once more so you can retry. Don't move on."
+            )
 
+        user_id = str(user.id)
+        print(f"ONBOARDING_USER_ID: {user_id}")
+        self.state.update_user(
+            id=user_id,
+            name=self.userdata.temp_first_name,
+            email=self.userdata.temp_email,
+            username=username
+        )
+        self.state.switch_mode("main_menu")
+        self.state.save_state()
+
+        logger.info("[ONBOARDING] User account created successfully")
+        logger.info("[ONBOARDING] State updated - ready for main menu")
+
+        # console_launcher reads these two markers (and does not echo them)
         print(f"ONBOARDING_FIRST_NAME: {self.userdata.temp_first_name}")
         print(f"ONBOARDING_EMAIL: {self.userdata.temp_email}")
         print(f"ONBOARDING_COMPLETE")
