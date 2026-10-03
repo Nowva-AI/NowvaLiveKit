@@ -1010,6 +1010,31 @@ class DeadliftRepAnalyzer:
             tibia_m=tibia, femur_m=femur, torso_m=torso, arm_m=arm, grip_offset_m=self._grip_offset_m(),
         )
 
+    def _shin_bar_distance_m(self, frames: list[_Measure]) -> float:
+        """How far in front of this lifter's shin line the bar sits at setup.
+
+        Shin thickness and how hard the shins press the bar vary by person; with
+        an assumed distance, 2 cm of difference moved the model's hip band ~7 cm
+        and its trunk prediction ~7 deg (simulator), faking D4 and D2 on a clean
+        setup. Measured on the setup frames and clipped to what a shin allows.
+        """
+        cfg = self.config
+        distances = []
+        for frame in frames:
+            if frame.knee_mid is None or frame.bar_centre is None:
+                continue
+            shin_forward = forward_m(frame.frame, frame.knee_mid, frame.ankle_mid)
+            shin_up = height_m(frame.frame, frame.knee_mid, frame.ankle_mid)
+            bar_forward = forward_m(frame.frame, frame.bar_centre, frame.ankle_mid)
+            bar_up = height_m(frame.frame, frame.bar_centre, frame.ankle_mid)
+            shin_length = math.hypot(shin_forward, shin_up)
+            if shin_length > 0.0:
+                distances.append((bar_forward * shin_up - bar_up * shin_forward) / shin_length)
+        measured = _median(distances)
+        if not math.isfinite(measured):
+            return cfg.shin_bar_distance_m
+        return min(max(measured, cfg.min_shin_bar_distance_m), cfg.max_shin_bar_distance_m)
+
     def _predict_setup(self, frames: list[_Measure], shoulder_vs_bar_cm: float) -> SetupPrediction | None:
         segments = self._segment_lengths(frames)
         if segments is None:
@@ -1023,7 +1048,7 @@ class DeadliftRepAnalyzer:
             bar_height_m=bar_height,
             shoulder_band_m=(cfg.shoulder_band_low_m, cfg.shoulder_band_high_m),
             shoulder_ahead_m=shoulder_vs_bar_cm / 100.0,
-            shin_bar_m=cfg.shin_bar_distance_m,
+            shin_bar_m=self._shin_bar_distance_m(frames),
         )
         if prediction is None:
             logger.info(

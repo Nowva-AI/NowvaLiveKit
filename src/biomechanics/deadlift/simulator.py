@@ -101,6 +101,9 @@ class Scenario(BaseModel):
     # The world's Y axis tilted from true gravity by this much (about the lateral axis).
     world_tilt_deg: float = 0.0
     track_bar: bool = True
+    # Bar axis to the shin line at contact; the analyser's setup model assumes
+    # 5 cm, real lifters vary, so a different value tests that assumption.
+    shin_bar_m: float = 0.05
     seed: int = 7
     start_time: float = 100.0
 
@@ -366,7 +369,7 @@ class _Builder:
     def _setup_pose(self, script: RepScript) -> _Pose:
         athlete = self.athlete
         solution = solve_setup(
-            athlete.segments(), self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, 0.05,
+            athlete.segments(), self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, self.scenario.shin_bar_m,
         )
         trunk = solution.trunk_deg if solution is not None else 60.0
         return _pose_from_bar(self.bar_rest, trunk, script.shoulder_ahead_m, 0.0, 0.0, 0.0, athlete)
@@ -405,8 +408,9 @@ class _Builder:
     def _rep(self, script: RepScript, touch_and_go_in: bool, next_is_touch_and_go: bool) -> None:
         athlete = self.athlete
         segments = athlete.segments()
-        setup = solve_setup(segments, self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, 0.05)
-        knee_pass = solve_knee_pass(segments, self.bar_rest[0], script.shoulder_ahead_m, 0.05)
+        shin_bar = self.scenario.shin_bar_m
+        setup = solve_setup(segments, self.bar_rest[0], self.bar_rest[1], script.shoulder_ahead_m, shin_bar)
+        knee_pass = solve_knee_pass(segments, self.bar_rest[0], script.shoulder_ahead_m, shin_bar)
         trunk_setup = setup.trunk_deg if setup is not None else 60.0
         trunk_knee = knee_pass.trunk_deg if knee_pass is not None else 45.0
         knee_up = knee_pass.knee_height_m if knee_pass is not None else athlete.tibia_m

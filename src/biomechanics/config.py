@@ -374,8 +374,11 @@ class DeadliftConfig(BaseModel):
     wrist_to_bar_offset_m: float = 0.075
     min_wrist_to_bar_offset_m: float = 0.04
     max_wrist_to_bar_offset_m: float = 0.12
-    # Setup model (§2.7): bar axis to the shin line at contact, and the shoulder band.
+    # Setup model (§2.7): bar axis to the shin line at contact (measured per lifter
+    # on the setup frames, this default when it cannot be), and the shoulder band.
     shin_bar_distance_m: float = 0.05
+    min_shin_bar_distance_m: float = 0.02
+    max_shin_bar_distance_m: float = 0.10
     shoulder_band_low_m: float = 0.0
     shoulder_band_high_m: float = 0.06
     # A bar state older than this (or a prediction) is not trusted for the setup.

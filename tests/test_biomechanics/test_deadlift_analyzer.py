@@ -12,7 +12,7 @@ import pytest
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.deadlift.analyzer import DeadliftFrameInput, DeadliftRepAnalyzer
 from biomechanics.deadlift.session_reference import DeadliftSessionReference
-from biomechanics.deadlift.simulator import RepScript, Scenario, SimulatedSet, simulate
+from biomechanics.deadlift.simulator import RepScript, Scenario, SimAthlete, SimulatedSet, simulate
 from biomechanics.deadlift.types import (
     BAR_SOURCE_BAR,
     BAR_SOURCE_WRIST_PROXY,
@@ -274,3 +274,28 @@ class TestFaultScenarios:
     def test_a_clean_set_is_fault_free(self, scenario: Scenario):
         _, features, _, _ = _analyse(scenario)
         assert _judge(features) == [{}] * len(features)
+
+
+class TestBodiesAndSetups:
+    """The setup model is the analyser's, so these vary what it must measure rather
+    than assume: segment proportions, and how far in front of the shins the bar
+    sits (shin thickness, how hard the shins press the bar)."""
+
+    @pytest.mark.parametrize(
+        "athlete",
+        [
+            SimAthlete(),
+            SimAthlete(torso_m=0.58, upper_arm_m=0.28, forearm_m=0.27),
+            SimAthlete(femur_m=0.50, tibia_m=0.45),
+            SimAthlete(tibia_m=0.38, femur_m=0.40, torso_m=0.47, upper_arm_m=0.27, forearm_m=0.26),
+        ],
+        ids=["average", "long_torso_short_arms", "long_femurs", "short"],
+    )
+    @pytest.mark.parametrize("shin_bar_m", [0.03, 0.05, 0.07])
+    def test_a_clean_set_is_fault_free_whatever_the_body_and_shin_contact(self, athlete: SimAthlete, shin_bar_m: float):
+        _, features, _, _ = _analyse(Scenario(athlete=athlete, shin_bar_m=shin_bar_m, reps=[RepScript()] * 2))
+        assert len(features) == 2
+        assert _judge(features) == [{}, {}]
+        for rep in features:
+            assert rep.trunk_change_liftoff_knee_deg == pytest.approx(0.0, abs=CLEAN_ANGLE_TOLERANCE_DEG)
+            assert rep.setup_hip_band_low_cm <= rep.setup_hip_height_cm <= rep.setup_hip_band_high_cm
