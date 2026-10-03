@@ -1,6 +1,6 @@
-# Conventional deadlift — plan v13 (built on the multi-exercise platform)
+# Conventional deadlift — plan v14 (built on the multi-exercise platform)
 
-Status: proposal for Ambaka. Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
+Status: software implemented on `claude/deadlift-v1-impl` (see `docs/deadlift/IMPLEMENTATION.md`); data, hardware and validation milestones open. Version 14: v13 plus two corrections found while implementing (D2 thresholds, D4/D7 priority, §2.6). Version 13: v12 plus Ambaka's answers of 2026-10-03 (§11). Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10–v12. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
 
 ## 0. Decisions
 
@@ -162,9 +162,9 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 | # | fault_type | Meaning | Measured from | Thresholds (mild / moderate / severe) | Min tier at start | Observability | Cue key | Prio |
 |---|---|---|---|---|---|---|---|---|
 | D1 ★α | `deadlift_bar_position` | Bar not over midfoot at setup | `bar_midfoot_setup_cm` (the stance value drives the closed loop) | 3 / 5 / 8 cm | mild | `bar_3d` (new class) | `deadlift_bar_midfoot` | 20 |
-| D4 ★ | `deadlift_setup_hips` | Hips too low / too high at setup | `setup_hip_height_cm` vs band | outside band by 4 / 7 / 10 cm | §2.7 | `side_view` | `deadlift_hips_up` / `deadlift_hips_down` | 21 |
-| D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | `shoulder_vs_bar_cm` | 2 / 4 / 6 cm | moderate | `side_view` | `deadlift_shoulders_over` | 22 |
-| D2 ★ | `deadlift_hips_shoot` | Hips rise before the chest off the floor | `trunk_change_liftoff_knee_deg`; cross-check ratio > 1.4 | 10 / 15 / 20° | moderate | `side_view` (≥ 30 fps) | `deadlift_chest_with_hips` | 23 |
+| D4 ★ | `deadlift_setup_hips` | Hips too low / too high at setup | `setup_hip_height_cm` vs band | outside band by 4 / 7 / 10 cm | §2.7 (severe until measured) | `side_view` | `deadlift_hips_up` / `deadlift_hips_down` | 22 |
+| D7 | `deadlift_shoulders_behind` | Shoulders behind the bar at setup | `shoulder_vs_bar_cm` | 2 / 4 / 6 cm | moderate | `side_view` | `deadlift_shoulders_over` | 21 |
+| D2 ★ | `deadlift_hips_shoot` | Hips rise before the chest off the floor | `trunk_change_liftoff_knee_deg`; cross-check ratio ≥ 1.0 | 5 / 8 / 11° (v14; was 10 / 15 / 20°, which straight legs make unreachable: the excess caps at ~8–12° for typical bodies) | moderate | `side_view` (≥ 30 fps) | `deadlift_chest_with_hips` | 23 |
 | D3 ★α | `deadlift_bar_drift` | Bar drifts away from the legs | `bar_drift_cm` | 3 / 5 / 8 cm | moderate | `bar_3d` | `deadlift_bar_close` | 24 |
 | D6 | `deadlift_lockout` | Incomplete lockout | hip or knee extension deficit | 8 / 12 / 20° | moderate | `side_view` | `deadlift_lockout` | 25 |
 | D5 | `deadlift_lean_back` | Over-extension at the top | `lean_back_deg` | 8 / 12 / 18° | moderate | `side_view` | `deadlift_finish_neutral` | 26 |
@@ -176,7 +176,7 @@ There is one feature vector per rep, built from measured frames only. NaN means 
 ★ = hero fault; α = in Demo α.
 
 - **Cue text.** Cue keys get ≤ 4-word external-focus text from the cue pipeline (§4.2). Drafts: "Bar over midfoot", "Bar close", "Chest and hips together", "Stand tall", "Long arms".
-- **Priority.** Ranks 20–30 are appended to `FAULT_CUE_PRIORITY`. Squat ranks 0–11 and `DEFAULT_FAULT_CUE_PRIORITY = 12` stay unchanged.
+- **Priority.** Ranks 20–30 are appended to `FAULT_CUE_PRIORITY`. Squat ranks 0–11 and `DEFAULT_FAULT_CUE_PRIORITY = 12` stay unchanged. D7 ranks before D4 (§2.7 coupling; v13's table had them reversed).
 - **Drift.** D2, D3 and D8 also report `is_drift` against the session best (§2.8).
 - **Mixed grip.** Trunk rotation is not part of D8, because a mixed grip rotates the trunk. The grip type is recorded (§4.6).
 - **No `deadlift_flat_back` cue.** The placeholder mapping `back_rounding → deadlift_flat_back` (`profiles/deadlift.py:92-96`) is removed (§2.10).
@@ -251,7 +251,7 @@ A tier is cued only if the P95 measurement error against ground truth (§8.4) is
 | D1 | 3 cm | 1 cm | ≤ 1 cm (static, ≥ 15 frames) | mild |
 | D3 | 3 cm | 1 cm | 1–2 cm | moderate |
 | D8 / D8b | 0.10 / 3 cm | 0.033 / 1 cm | 1–2 cm | moderate |
-| D2 | 10° | 3.3° | 2–4° + model error | moderate |
+| D2 | 5° | 1.7° | 2–4° + model error | moderate (8°: max error 2.7°) |
 | D5 / D6 | 8° | 2.7° | 2–3° (relative) | moderate unless ground truth ≤ 1.5° |
 | D9 | 15° | 5° | 3–5° | mild |
 | D4 | 4 cm | 1.3 cm | model + hip-keypoint bias (§2.7) | per §2.7 |
