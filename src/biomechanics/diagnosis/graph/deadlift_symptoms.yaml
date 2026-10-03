@@ -56,7 +56,7 @@ hips_shoot:
     aggregation: median
   expected_value_fn: expected_zero
   severity_scoring: relative_excess
-  threshold: 10.0
+  threshold: 5.0
   measurement: side_view
   candidate_causes:
     - { cause_id: hips_too_low, prior: 0.30 }

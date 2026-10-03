@@ -258,11 +258,13 @@ class DeadliftSetDiagnosis:
         self._engine = HypothesisEngine(DEADLIFT_GRAPH)
         self._reps: list[DeadliftRepSummary] = []
 
-    def on_rep(self, features: DeadliftRepFeatures) -> DiagnosisResult | None:
-        """Adds a counted rep and re-diagnoses the set so far. None while the
-        set has measured none of the core measures (nothing to say yet)."""
-        self._reps.append(DeadliftRepSummary.from_features(features))
-        result = self._diagnose(f"rolling_rep_{features.rep_number}")
+    def on_rep(self, features: DeadliftRepFeatures | dict[str, Any]) -> DiagnosisResult | None:
+        """Adds a counted rep (its features, or their dict as RepData carries them)
+        and re-diagnoses the set so far. None while the set has measured none of
+        the core measures (nothing to say yet)."""
+        summary = DeadliftRepSummary.from_features(features)
+        self._reps.append(summary)
+        result = self._diagnose(f"rolling_rep_{summary.rep_number}")
         return result if result.confidence > 0.0 else None
 
     def finish_set(self, set_id: str) -> tuple[DiagnosisResult, SetScoreSummary | None] | None:
