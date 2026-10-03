@@ -1,6 +1,6 @@
-# Conventional deadlift — plan v11 (built on the multi-exercise platform)
+# Conventional deadlift — plan v12 (built on the multi-exercise platform)
 
-Status: proposal for Ambaka. Version 11. Replaces v1–v9, which assumed a separate deadlift subprocess, and v10. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
+Status: proposal for Ambaka. Version 12. Replaces v1–v9, which assumed a separate deadlift subprocess, plus v10 and v11. Since PR #20 (`squat-v1-integration`), every exercise runs in one pipeline process as a swappable profile, and this plan plugs the deadlift into that platform.
 
 ## 0. Decisions
 
@@ -21,7 +21,7 @@ Demo loop:
 
 > "Let's deadlift" → while standing at the bar, Nova guides the feet in closed loop ("bar over midfoot — a bit closer… good") → the athlete sets up and pulls → the rep is judged as a whole → **one** cue at the floor before the next rep → the next rep improves → set recap with numbers.
 
-**Demo α** comes first. It covers D1 bar position (closed loop) and D3 bar drift, plus rep counting. Both faults need the 3D bar, so the bar work (J4) runs in parallel from J1 and Demo α lands around week 8. The **full hero set** adds D2 hips shoot and D4 setup hip height.
+**Demo α** comes first: D1 bar position (closed loop) and D3 bar drift, plus rep counting. It needs three things: the 3D bar (J4), the profile (J3, accepted on the J2 simulator), and a delivery slice J5α (closed-loop mode, D1/D3 cue audio, contract fields). With two engineers (J4 in parallel with J2→J3) it lands around week 8; with one, around week 10. The **full hero set** adds D2 hips shoot and D4 setup hip height.
 
 Every other v1 fault is "provisional": it is cued only at its minimum tier (§2.9) until it has enough data.
 
@@ -86,7 +86,7 @@ The statistical analysis plan (metrics, bootstrap scheme, exclusions) is pre-reg
 
 | Transition | Condition (initial values in the `deadlift:` config section, §3.5) |
 |---|---|
-| APPROACH → STANCE | Standing, midfoot within 15 cm (horizontal) of the bar, feet still ≥ 0.5 s |
+| APPROACH → STANCE | Standing still ≥ 0.5 s, facing the bar (foot forward axis toward it), with the bar ≤ 40 cm ahead of the midfoot horizontally. Within that range the closed loop (§4.3) guides the feet in: a coarse "step closer" beyond 15 cm, then fine cues |
 | STANCE → SETUP | Hands within 10 cm above the bar, still ≥ 0.3 s |
 | SETUP → STANCE / APPROACH | Stands back up without lifting |
 | SETUP → PULL | Bar > rest + 3 cm and vertical velocity > 0.10 m/s |
@@ -273,12 +273,12 @@ Rewrite `src/biomechanics/profiles/deadlift.py` as `DeadliftProfile`. It is **st
 | `movement_pattern` | `"deadlift"` | |
 | `uses_diagnosis_engine` | `False` | Squat assessment, calibration and `HypothesisEngine` stay squat-only (`pipeline_process.py:303`, `:1014`; `calibration.py:19-28`) |
 | `uses_bilstm_counter` | `False` | |
-| `coaching_ready` | computed at import: `"deadlift" in NOWVA_DEV_COACHING_READY.split(",")` (False by default) until J8, then `True` | Set as the class attribute itself, so every reader sees the same value: `main_menu_agent.py:215` reads the attribute directly, and `coaching_ready_profiles()` (`registry.py:76-82`) does too |
+| `coaching_ready` | computed at import: `"deadlift" in NOWVA_DEV_COACHING_READY.split(",")` (False by default) until J8, then `True` | Set as the class attribute itself, so every reader sees the same value: `main_menu_agent.py:215` reads the attribute directly, and `coaching_ready_profiles()` (`registry.py:76-82`) does too. The env var must be set for the agent process; the pipeline subprocess inherits it. Tests patch the class attribute (`monkeypatch.setattr(DeadliftProfile, "coaching_ready", True)`), not the env |
 | `gate_until_ready` | `True` (new attribute, default `False`) | `get_profile` returns `UntrackedProfile` for such a profile while it is not coaching-ready. This closes the scheduled-workout leak (O4) without changing other placeholder profiles |
 | `display_name` | `"conventional deadlift"` | |
 | `create_fault_rules` | D1–D10 rules, **no `DepthRule`** | A `DepthRule` would turn on depth-gated counting (`pipeline.py:391-399`) |
 | `create_rep_counter` | `DeadliftRepCounter` (§2.3) | |
-| `get_rep_signal` | not used for the deadlift: the analyser supplies the signal (§3.3) | |
+| `get_rep_signal` | Overridden to return NaN (the base raises `NotImplementedError`). Never called for the deadlift: the analyser supplies the signal (§3.3) | |
 | `get_fault_to_cue_map` / `get_cue_dict` | `deadlift_*` keys, with `_left` / `_right` variants | |
 
 ### 3.2 Registry
@@ -286,7 +286,9 @@ Rewrite `src/biomechanics/profiles/deadlift.py` as `DeadliftProfile`. It is **st
 Matching is whole-word, longest key wins (`registry.py:40-55`).
 - A new `UntrackedVariantProfile(UntrackedProfile)` is registered for `sumo_deadlift`, `trap_bar_deadlift`, `hex_bar_deadlift`, `deficit_deadlift`, `snatch_grip_deadlift`, `single_leg_deadlift` and `rack_pull`.
 - `romanian_deadlift`, `rdl` and `stiff_leg_deadlift` stay on the RDL profile.
-- **Existing pin changed on purpose:** `test_profile_registry.py:30` (`"Barbell Sumo Deadlift" → "deadlift"`) becomes `→ untracked`. This changes in the J3 PR, with Ambaka's review.
+- **Existing pins changed on purpose**, in the J3 PR with Ambaka's review:
+  - `test_profile_registry.py:30` (`"Barbell Sumo Deadlift" → "deadlift"`) becomes `→ untracked` permanently;
+  - `:29` (`"Barbell Conventional Deadlift" → "deadlift"`) becomes `→ untracked` while gated, and resolves to `DeadliftProfile` again at J8 (or when a test patches the override).
 - New tests:
   - every squat alias → `SquatProfile`;
   - the variants never resolve to `DeadliftProfile`;
@@ -303,6 +305,7 @@ Hooks are added to `ExerciseProfile`. Each default reproduces today's squat path
 | `create_session_reference()` | `None` (the engine builds `SessionReference`) | `DeadliftSessionReference` (§2.8) |
 | `create_set_diagnosis()` | `None` | deadlift set diagnosis (§7) |
 | `allows_camera_refine: bool` | `True` | `False` |
+| `feeds_body_calibration: bool` | `True` | `False` (§5.2) |
 | `set_idle_timeout_s`, `min_cue_tiers`, `tracking_keypoints` | squat values | deadlift values (§4.3) |
 
 **The `process_frame` fork** in `pipeline.py`, with `analyzer = self._rep_analyzer`. Every branch below is `if analyzer is not None: <deadlift> else: <existing lines, unchanged>`:
@@ -313,7 +316,7 @@ Hooks are added to `ExerciseProfile`. Each default reproduces today's squat path
 | :976-986 | `build_frame_sample(...)` | skipped (the analyser builds its own samples) |
 | :990-1019 | standing frame, `_track_setup`, `_start_rep_setup`, bottom frame, trajectory | skipped; `_standing_kpts` is set from the analyser's standing frame for replay |
 | :1072 | `max_depth_angle = _rep_max_knee_flex` | `max_depth_angle = NaN` |
-| :1075-1077 | `compute_rep_features`, dump, `depth_target_met` | `features = analyzer.finish_rep()`; `depth_target_met = None`; features dumped **after** `finish_rep` (avoids O2a) |
+| :1075-1077 | `compute_rep_features`, dump, `depth_target_met` | `features = analyzer.finish_rep()`; `depth_target_met = True` (the field is `bool = True`, `types.py:488`; with no depth target the requirement is trivially met, so no depth messaging triggers, and depth lines are also gated on `is_squat`); features dumped **after** `finish_rep` (avoids O2a) |
 | :1082-1086 | `evaluate_rep_complete` (DEPTH rules only) | same line, no-op without a `DepthRule` |
 | :1115-1121 (touch-and-go) | `_track_setup`, `_start_rep_setup`, trajectory append | `analyzer.start_rep(liftoff=low_point)` |
 
@@ -331,14 +334,14 @@ Today, "Let's deadlift" launches the pipeline with the exercise as a CLI argumen
   - applies the session metadata (§4.6);
   - calls `prepare_exercise`.
 - For the squat it sets exactly what the two current call sites set, which `TestSwitchExercise` and the goldens pin.
-- **Metadata at startup** comes in on `start_capture`. `main.py` sends that message after `greeting_done` (`:1104-1118`) and adds an `exercise_meta` field read from state. `_wait_for_start_capture` (`pipeline_process.py:895-908`) returns the message instead of a bool.
+- **Metadata at startup** comes in on `start_capture`. The pose subprocess is always launched preloaded (`main.py:1129-1133`), so `start_capture` is always sent after `greeting_done` (`main.py:1139-1155`). `main.py` adds an `exercise_meta` field read from state, and `_wait_for_start_capture` (`pipeline_process.py:906-920`) returns the message instead of a bool.
 - **Metadata on a switch** comes in on `set_exercise.meta`, which is already relayed (`main.py:617-645`; `pipeline_process.py:1743-1748`).
 
 ### 3.5 Config
 
 Two additions to the existing config, both additive:
 - **Fault thresholds** go under `faults:` as new `deadlift_*` fields of `FaultsConfig`. That model is validated whole, so a fault block can't be silently dropped (`config.py:448-451`).
-- **Counter and analyser parameters** (§2.3) go in a new `DeadliftConfig`. This needs a `deadlift` field on `BiomechanicsConfig` and an explicit `if "deadlift" in raw_config` parse branch in `load_pipeline_config` (`config.py:427-470`), because sections are parsed one by one.
+- **Counter and analyser parameters** (§2.3) go in a new `DeadliftConfig`. This needs a `deadlift` field on `BiomechanicsConfig` and an explicit `if "deadlift" in raw_config` parse branch in `load_pipeline_config` (`config.py:427-483`), because sections are parsed one by one.
 
 Squat sections are unchanged.
 
@@ -355,8 +358,8 @@ Squat sections are unchanged.
 6. writes the result to the timestamped ring buffer (§2.2).
 
 **Camera calibration.** Shared rig state stays squat-safe.
-- `allows_camera_refine=False` gates **every** refine started at a set boundary: the drift refine, **and** the world-anchor refine (`keep_world_frame=False`, `pipeline_process.py:619-621`), so the vertical is never re-anchored on deadlift frames. The drift monitor still measures and warns.
-- While the deadlift is active, the provider stops appending views to `_view_buffer` (`multi_camera.py:108`). Deadlift frames can therefore never feed a later squat refine.
+- `allows_camera_refine=False` gates **every** refine started at a set boundary (`pipeline_process.py:610-651`): the drift refine, **and** the world-anchor refine (`keep_world_frame=False`, `:619-621`). The vertical is therefore never re-anchored on deadlift frames. The drift *check* is skipped too during deadlift sets, because it would read stale views, and resumes at the next squat set. The deadlift's own health signal is the bar/skeleton reprojection residual, logged per set.
+- While the deadlift is active **and no capture window is open**, the provider stops appending views to `_view_buffer` (`multi_camera.py:108`). Deadlift frames can therefore never feed a later squat refine. The bootstrap capture window is exempt (`_capture_window_open`, `multi_camera.py:393-396`; `pipeline_process.py:681-693`): a deadlift-first session on an uncalibrated rig still calibrates, and the person-calibration solve asks for its two slow bodyweight squats, as today.
 
 ## 4. Platform integration — delivery side
 
@@ -392,6 +395,7 @@ Every item is a dispatch with squat as the default, or an addition.
    - Both now use `cache_cues.fault_to_cue`, which equals `FAULT_TO_CUE_MAP` for the squat.
 2. **Minimum cue tier.**
    - The orchestrator cues mild faults that repeat on 2 of the last 3 reps (`_passes_bandwidth`, `:1139-1143`). It now also drops any cue whose severity is below `min_cue_tiers[fault_type]`, received via `cache_cues`.
+   - A set focus taken from the diagnosis (`carry_focus_from`, `:613-617`) is adopted only if that fault reached its min tier in the set.
    - The fault is still recorded and still reaches the recap and the DB.
    - The squat's map is empty, so nothing changes for it.
 3. **`is_squat`** (`:489-492`).
@@ -448,10 +452,10 @@ Grip type (double / mixed / hook), plate diameter (default 45 cm), belt, shoes.
 |---|---|---|
 | Existing pins | `test_fault_priority.py:73-125`; `test_coaching.py:111-124`; `test_pipeline.py` `TestExerciseProfiles` :920-983; `test_pipeline_process.py` `TestSwitchExercise`; `test_coaching_orchestrator.py` :1199-1223; `test_coaching_service.py`:916-1000; `test_main_forwarding.py` | keep green |
 | Squat golden master, fresh | Replay fixed squat scenarios through `BiomechanicsPipeline` (harness `test_pipeline.py:329-392`) + `SessionTracker` / `IPCBridge`. Snapshot frames, faults, `rep_complete.features` and IPC messages | J0 |
-| Squat golden master **after a switch** | Same scenarios after `set_exercise("deadlift")` → simulated deadlift reps → `set_exercise("squat")`. Expected output = the fresh golden, apart from the carry-overs listed in §5.2 | J0 (deadlift part at J3) |
+| Squat golden master **after a switch** | Same scenarios after `set_exercise("deadlift")` → simulated deadlift reps → `set_exercise("squat")`. Expected output = the fresh golden, apart from the carry-overs listed in §5.2. Both goldens run in two variants, so the body-measurement path is compared like for like: with the same stored athlete params applied up front, and with none (first-time user) | J0 (deadlift part at J3) |
 | Delivery golden master | Squat IPC stream through `CoachingService` + `CoachingOrchestrator` with fake TTS / LLM / DB. Snapshot cues, recap text and recorder ops | J0 |
 | Invariants | Squat rule order; the full `FAULT_TO_CUE_MAP`; squat `CUE_TEXT_MAP` strings; squat tool list; squat `cache_cues` payload | J0 |
-| Intentional changes | J3: `test_profile_registry.py:30` (sumo → untracked). J8: `:58-59` (`coaching_ready == ["squat"]`) and `test_agent_prompts.py:116` (`"deadlift" not in` the menu prompt) | reviewed by Ambaka |
+| Intentional changes | J3: `test_profile_registry.py:30` (sumo → untracked) and `:29` (conventional → untracked while gated). J8: `:29` back to deadlift, `:58-59` (`coaching_ready == ["squat"]`), `test_agent_prompts.py:116` (`"deadlift" not in` the menu prompt) | reviewed by Ambaka |
 
 ### 5.2 Shared state a deadlift could leave behind (each pinned by the after-switch golden)
 
@@ -463,7 +467,7 @@ Grip type (double / mixed / hook), plate diameter (default 45 cm), belt, shoes.
 | Rig calibration (`_refined`) | refined at set boundaries | no refine of any kind during deadlift sets (§3.6) |
 | Provider `_view_buffer` | holds recent views for refines | not appended during deadlift sets (§3.6) |
 | Foot-contact anchors and floor | session-scoped (`preik_chain.py:78-90`) | reset when switching to or from the deadlift. The squat then re-plants exactly as at the start of a session; the golden compares against a fresh session |
-| Body measurements | session-scoped | Mixed sessions already load the stored squat params (`main.py:1110-1119`). Deadlift-only sessions measure from their own frames and contain no squat |
+| Body measurements (`pipeline.body_calibration`) | session-scoped; fed every frame by `_record_body_measurements` (`pipeline.py:749-752`, `:950`) | Stored squat params load only when a calibration profile exists (`main.py:1100-1101`). Without a fix, a first-time user whose program puts deadlifts before squats would have the squat use body lengths measured on deadlift frames. New profile flag `feeds_body_calibration` (default `True`, deadlift `False`): deadlift frames never feed `pipeline.body_calibration`. The deadlift keeps its own `SegmentLengthEstimator` for the setup model, seeded read-only from `body_calibration` when that is already complete. The squat after a switch therefore measures exactly as in a fresh session |
 | `_latest_diagnosis` | not cleared on a switch (O6) | squat monitor gated on `is_squat` |
 
 ## 6. Bar on the floor
@@ -614,7 +618,7 @@ Extend `.claude/preik-audit/harness/preik_harness/`, after fixing `__init__.py:1
 - **J1 measurement** on a Jetson Orin Nano Super: RTMPose on 3 views + the bar detector on 3 views (TensorRT FP16) + the full chain.
 - The new geometry, state machine and diagnosis add < 1 ms.
 - **Degraded mode**, in order of preference:
-  1. pose at 30 Hz and bar at 15 Hz, with Kalman prediction in between;
+  1. pose at 30 Hz and bar at 15 Hz. On frames without a detection, the bar Kalman filter still writes a *predicted* state (flagged `predicted`) into the ring buffer, so the time alignment (§2.2) finds a state on every frame;
   2. otherwise, everything at 15 Hz.
 - The deadlift adds no cloud dependency. The conversational stack is cloud today (O3).
 
@@ -629,13 +633,14 @@ J4 starts in parallel with J1. With two engineers, J2 and J3 also run alongside 
 | **J4 3D bar** (from J1) | Annotation, training, export, tracker, provider frames, time-aligned buffer, ArUco ground truth | Recall ≥ 95 %; 3D error ≤ 1 / 1.5 cm; Jetson budget | 2–3 wk |
 | **J2 Simulator** | Deadlift generator and scenarios | Each scenario carries ground truth | 1 wk |
 | **J3 Deadlift profile on the platform** | Profile, gating, registry variants; `_activate_profile`; hooks and `process_frame` fork; analyser, counter, D1–D10; deadlift reference; config; global-map entries; camera-refine and view-buffer gates; after-switch golden. **Thin slice:** dev override, voice counts reps on the rack | Simulator: exact-once counting (incl. touch-and-go, bumper bounce), events ≤ 100 ms, each injected fault detected, clean scenario fault-free; squat goldens unchanged | 2.5 wk |
-| **Demo α** (≈ week 8) | D1 closed loop + D3 at the floor, on the rack, dev override | 10 runs in a row; team round-1 lifters | — |
+| **J5α delivery slice** | Closed-loop mode (§4.3 item 5); D1/D3 cue text and audio; contract fields in `cache_cues` and `frame_data` | Slice runs on the rack under the dev override | 1 wk |
+| **Demo α** (≈ week 8 with two engineers, ≈ week 10 with one) | D1 closed loop + D3 at the floor, rep counting | 10 runs in a row; team round-1 lifters | — |
 | **J5 Delivery integration** | Contract; FINDINGS checklist touchpoints; orchestrator items in §4.3; recap; display; DB; metadata; first session; card and form-check | Full rack session (first time and returning, quick and scheduled under the override); no clip synthesised at run time; squat goldens (pipeline + delivery) unchanged | 2 wk |
 | **J6 Real validation** | Round 1 → thresholds, min tiers, margins, ρ; round 2 → test set | Demo gate (§1) on ≥ 10 unseen lifters, per the pre-registered plan; κ ≥ 0.6; status per fault | 3–4 wk |
 | **J7 Set diagnosis** | Graph (a or b), scoring, recap | Top cause matches the coach on ≥ 70 % of sets | 1–1.5 wk |
 | **J8 Ship** | `coaching_ready=True`; the two intentional test changes; hero demo | 10 consecutive demos; Jetson budget | 1 wk |
 
-Total: about 15–17 weeks for one person, or 9–10 weeks for two. Demo α lands at about week 8.
+Total: about 16–18 weeks for one person, or about 10 weeks for two. Demo α lands at about week 8 with two engineers, or about week 10 with one.
 
 ## 11. Decisions for Ambaka
 
@@ -664,7 +669,7 @@ Total: about 15–17 weeks for one person, or 9–10 weeks for two. Demo α land
 | Bar detector generalisation; licence | Varied data split by lifter, negatives; licence decided before J4 |
 | Thresholds invented | Initial values only; min tiers; error budget; real data |
 | Optimistic validation | Clustered design, pre-registration, natural sets reported separately |
-| Long timeline for YC | Demo α at about week 8 |
+| Long timeline for YC | Demo α at about week 8 with two engineers (about week 10 with one) |
 
 ## 13. Observations on the current code (outside this plan, not changed)
 
