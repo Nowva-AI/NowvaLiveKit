@@ -90,6 +90,9 @@ class DeadliftRepFeatures(BaseModel):
     trunk_change_liftoff_knee_deg: float = NAN
     trunk_change_predicted_deg: float = NAN
     hip_shoulder_rise_ratio: float = NAN
+    # Median rise ratio over this set's last reps (up to 3, this one included);
+    # NaN until two reps measured it.
+    set_rise_ratio: float = NAN
     bar_drift_cm: float = NAN
     hip_extension_deficit_deg: float = NAN
     knee_extension_deficit_deg: float = NAN

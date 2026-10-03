@@ -27,6 +27,7 @@ from biomechanics.diagnosis.graph.deadlift_parameter_deltas import (
 from biomechanics.diagnosis.graph.loader import load_graph
 from biomechanics.diagnosis.rep_scoring import summarize_rep_scores
 from biomechanics.diagnosis.types import DeadliftRepScore, DiagnosisResult, SetScoreSummary
+from biomechanics.faults.rules.deadlift_hips_shoot import hips_led
 
 from .types import NAN, DeadliftRepFeatures
 
@@ -170,7 +171,14 @@ class DeadliftRepSummary(BaseModel):
             features = DeadliftRepFeatures.model_validate(
                 {name: value for name, value in features.items() if value is not None}
             )
-        return cls(**{name: getattr(features, name) for name in cls.model_fields})
+        summary = cls(**{name: getattr(features, name) for name in cls.model_fields})
+        # As D2 judges it: a trunk tip the setup model did not expect is a hips
+        # shoot only if the hips decisively out-rose the shoulders; otherwise none.
+        if not math.isfinite(features.hip_shoulder_rise_ratio):
+            summary.trunk_change_liftoff_knee_deg = NAN
+        elif not hips_led(features):
+            summary.trunk_change_liftoff_knee_deg = min(summary.trunk_change_liftoff_knee_deg, 0.0)
+        return summary
 
 
 def score_deadlift_rep(rep: DeadliftRepSummary) -> DeadliftRepScore:

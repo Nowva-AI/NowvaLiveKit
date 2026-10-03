@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 
 from biomechanics.config import DeadliftConfig
+from biomechanics.utils.types import CocoKeypoints as CK
 
 from .features import AthleteState, RepTrack, measure_setup, rep_features
 from .frame import default_up, forward_m, lateral_m
@@ -71,6 +72,15 @@ TOP_PEAK_WINDOW_S = 0.1
 # The top hold: frames in TOP with the bar this close to its top height (or two
 # noise bands, on a noisier bar).
 TOP_HOLD_BAND_M = 0.02
+# The live bar-over-midfoot offset the foot guidance speaks from is the median
+# over this long.
+LIVE_OFFSET_WINDOW_S = 0.5
+# D2's set-level evidence: the median rise ratio over this many recent reps.
+SET_RISE_RATIO_REPS = 3
+# Without a bar axis, the lifter's left-right is locked from up to this many
+# stance and setup frames (2 s), or from this much history before the setup.
+LATERAL_LOCK_FRAMES = 60
+LATERAL_LOCK_WINDOW_S = 0.5
 # Rest height is the median of this many recent still frames of the bar (1 s):
 # the first, still-slow frames of a grind never move it.
 REST_FRAMES = 30
@@ -81,8 +91,6 @@ MAD_TO_STD = 1.4826
 # Event bands (liftoff, touchdown, top arrival) are this many noise deviations
 # wide, never under liftoff_rest_band_m: a noisy bar crosses a fixed band at random.
 EVENT_NOISE_BANDS = 3.0
-# Frame-to-frame dip still counted as "rising" off a touch-and-go low point.
-TOUCH_GO_JITTER_M = 0.003
 # A rep never lasts longer than this; a stuck PULL is abandoned.
 MAX_PULL_S = 15.0
 _NOT_IN_REP = (DeadliftPhase.APPROACH, DeadliftPhase.STANCE, DeadliftPhase.SETUP, DeadliftPhase.FLOOR)
@@ -94,6 +102,17 @@ class _CompletedRep(NamedTuple):
     end_time: float
     start_frame: int
     end_frame: int
+
+
+def _lateral_line(measure: FrameMeasure) -> np.ndarray:
+    """The lifter's left-to-right on one frame, horizontal: hips, ankles and wrists
+    summed, so the widest baseline (the hands on the bar) weighs most."""
+    line = measure.points[CK.RIGHT_HIP] - measure.points[CK.LEFT_HIP]
+    for left, right in ((measure.l_ankle, measure.r_ankle), (measure.l_wrist, measure.r_wrist)):
+        if left is not None and right is not None:
+            line = line + (right - left)
+    up = measure.frame.up
+    return line - float(np.dot(line, up)) * up
 
 
 def _median(values: list[float]) -> float:
@@ -182,6 +201,8 @@ class DeadliftRepAnalyzer:
         self._last_bar_t = -math.inf
         self._planted_feet: dict[int, np.ndarray] = {}
         self._stance_midfoots: deque[np.ndarray] = deque(maxlen=self.config.midfoot_lock_frames)
+        self._stance_laterals: deque[np.ndarray] = deque(maxlen=LATERAL_LOCK_FRAMES)
+        self._locked_lateral: np.ndarray | None = None
         self._stance_bar_offsets: deque[tuple[float, float]] = deque()
         self._locked_midfoot: np.ndarray | None = None
         self._setup_frames: deque[FrameMeasure] = deque()
@@ -191,6 +212,7 @@ class DeadliftRepAnalyzer:
         self._awaiting_finish: deque[DeadliftRepFeatures] = deque()
         self._set_top_heights: list[float] = []
         self._set_predicted_change_deg = NAN
+        self._set_rise_ratios: list[float] = []
         self._stance_bar_midfoot_cm = NAN
         self._top_still_frames = 0
         self._dead_stop_frames = 0
@@ -270,7 +292,10 @@ class DeadliftRepAnalyzer:
         context = MeasureContext(
             up=self._up,
             rest_source=self._rest_source,
-            rest_axis=self._rest_axis,
+            # Without a bar axis, the lifter's left-right is locked per set: rebuilt
+            # from the noisy hip line every frame, it turned forward travel into
+            # sideways hip shift.
+            rest_axis=self._rest_axis if self._rest_axis is not None else self._locked_lateral,
             grip_offset_m=self._grip_offset_m(),
             carried_bar=self._last_bar if bar is None and bar_recent else None,
             # Feet stay planted once the lifter is at the bar: the plates hiding
@@ -420,7 +445,9 @@ class DeadliftRepAnalyzer:
             self._standing_run = []
             return
         if not (measure.standing and measure.legs_measured and self._is_settled):
-            self._standing_run = []
+            # A noisy knee angle on one frame is not the lifter moving.
+            if self._standing_run and measure.t - self._standing_run[-1].t > self.config.hold_grace_s:
+                self._standing_run = []
             return
         self._standing_run.append(measure)
         run = self._standing_run
@@ -505,7 +532,9 @@ class DeadliftRepAnalyzer:
         if phase == DeadliftPhase.APPROACH:
             self._planted_feet = {}
             self._stance_midfoots.clear()
+            self._stance_laterals.clear()
             self._stance_bar_offsets.clear()
+            self._locked_lateral = None
         self.phase = phase
         self._phase_since = t
         self._held_since.clear()
@@ -575,10 +604,15 @@ class DeadliftRepAnalyzer:
         cfg = self.config
         if measure.midfoot is not None and measure.feet_measured and measure.legs_measured and self._is_settled:
             self._stance_midfoots.append(measure.midfoot)
-        if measure.midfoot is not None and measure.bar_centre is not None and measure.bar_source == BAR_SOURCE_BAR:
+        if measure.legs_measured and self._is_settled:
+            self._stance_laterals.append(_lateral_line(measure))
+        if (
+            measure.midfoot is not None and measure.bar_centre is not None
+            and measure.bar_source == BAR_SOURCE_BAR and self._is_settled
+        ):
             offset_cm = forward_m(measure.frame, measure.bar_centre, measure.midfoot) * 100.0
             self._stance_bar_offsets.append((measure.t, offset_cm))
-            while measure.t - self._stance_bar_offsets[0][0] > cfg.setup_window_s:
+            while measure.t - self._stance_bar_offsets[0][0] > LIVE_OFFSET_WINDOW_S:
                 self._stance_bar_offsets.popleft()
         if self._pulled_without_setup(measure, velocity):
             return
@@ -596,7 +630,23 @@ class DeadliftRepAnalyzer:
             self._locked_midfoot = np.mean(list(self._stance_midfoots), axis=0)
         elif measure.midfoot is not None:
             self._locked_midfoot = measure.midfoot
+        # The last settled stance frames, before the hinge to the bar began.
         self._stance_bar_midfoot_cm = _median([offset for _, offset in self._stance_bar_offsets])
+        self._lock_lateral(measure)
+
+    def _lock_lateral(self, measure: FrameMeasure) -> None:
+        """The lifter's left-right for the set, when no bar axis gives it: the
+        stance and setup frames' lines, or the last half second's."""
+        if self._rest_axis is not None:
+            return
+        laterals = list(self._stance_laterals) or [
+            _lateral_line(frame) for frame in self._history if measure.t - frame.t <= LATERAL_LOCK_WINDOW_S
+        ]
+        lateral = np.sum(laterals, axis=0)
+        self._locked_lateral = lateral / float(np.linalg.norm(lateral))
+
+    def _recent_stance_offset_cm(self, t: float, window_s: float) -> float:
+        return _median([offset for when, offset in self._stance_bar_offsets if t - when <= window_s + 1e-6])
 
     def _begin_setup(self, measure: FrameMeasure) -> None:
         self._lock_midfoot(measure)
@@ -620,11 +670,16 @@ class DeadliftRepAnalyzer:
         near, facing = self._near_and_facing(measure)
         self._enter(DeadliftPhase.STANCE if near and facing else DeadliftPhase.APPROACH, measure.t)
         self._stance_midfoots.clear()
+        self._stance_laterals.clear()
         self._stance_bar_offsets.clear()
         self._locked_midfoot = None
+        self._locked_lateral = None
 
     def _step_setup(self, measure: FrameMeasure, velocity: float) -> None:
+        if measure.hands_on_bar and measure.legs_measured:
+            self._stance_laterals.append(_lateral_line(measure))
         if self._lifted_off(measure, velocity):
+            self._lock_lateral(measure)
             self._start_rep(measure, touch_and_go=False, window_s=self.config.setup_window_s)
             return
         if self._stood_up(measure):
@@ -695,7 +750,9 @@ class DeadliftRepAnalyzer:
             return False
         expected = self._expected_top_up()
         if math.isfinite(expected) and rep.peak_up < expected - cfg.top_margin_m:
-            return False
+            # Leaning back past vertical the hips went through: a lockout (D5
+            # judges it), however low the bar hangs from shoulders pulled back.
+            return measure.trunk_deg <= -cfg.overextended_top_deg
         return abs(measure.trunk_deg) <= cfg.top_max_trunk_deg
 
     def _step_pull(self, measure: FrameMeasure, velocity: float) -> None:
@@ -775,7 +832,7 @@ class DeadliftRepAnalyzer:
         if math.isnan(rep.floor_time) and measure.bar_up - self._rest_up <= self._event_band_m():
             # Touchdown: back on the rest itself, not just inside the dead-stop band.
             rep.floor_time = measure.t
-        if self._touch_and_go(rep, measure):
+        if self._touch_and_go(rep, measure, velocity):
             self._finish_touch_and_go(rep, measure)
             return
         if self._back_on_floor(measure):
@@ -798,23 +855,22 @@ class DeadliftRepAnalyzer:
                 lowest = index
         return lowest
 
-    def _touch_and_go(self, rep: RepTrack, measure: FrameMeasure) -> bool:
+    def _touch_and_go(self, rep: RepTrack, measure: FrameMeasure, velocity: float) -> bool:
+        """Back up off a low point near the rest with the hands on the bar: risen
+        clear of the noise band and still rising over the last sustain window. The
+        slope over that window, not every step since the low point: one noisy frame
+        must not hide a rep (and with no dead stop, every rep after it)."""
         cfg = self.config
         if not measure.hands_on_bar or not math.isfinite(measure.bar_up):
             return False
-        low_index = self._lowest_since_lower(rep)
-        low = rep.frames[low_index]
+        low = rep.frames[self._lowest_since_lower(rep)]
         if not low.bar_up - self._rest_up <= cfg.touch_go_band_m:
             return False
-        if measure.bar_up - low.bar_up <= cfg.touch_go_rise_m:
+        if measure.bar_up - low.bar_up <= cfg.touch_go_rise_m + self._event_band_m():
             return False
-        # Upward the whole way since the low point, for long enough. Positions, not
-        # the windowed velocity, which still reads the descent for a frame or two.
-        after = [frame for frame in rep.frames[low_index:] if math.isfinite(frame.bar_up)]
-        rising = all(
-            later.bar_up >= earlier.bar_up - TOUCH_GO_JITTER_M for earlier, later in zip(after, after[1:])
-        )
-        return rising and measure.t - low.t >= cfg.touch_go_sustain_s - 1e-6
+        if measure.t - low.t < cfg.touch_go_sustain_s - 1e-6:
+            return False
+        return self._bar_velocity(max(cfg.touch_go_sustain_s, self._velocity_window_s())) > cfg.liftoff_velocity_mps
 
     def _finish_touch_and_go(self, rep: RepTrack, measure: FrameMeasure) -> None:
         low_index = self._lowest_since_lower(rep)
@@ -846,6 +902,11 @@ class DeadliftRepAnalyzer:
             rep, self.rep_count, self._rest_up, self._event_band_m(), self._locked_midfoot, self._athlete(),
             self.gravity_source, self._grip,
         )
+        if math.isfinite(features.hip_shoulder_rise_ratio):
+            self._set_rise_ratios.append(features.hip_shoulder_rise_ratio)
+            recent = self._set_rise_ratios[-SET_RISE_RATIO_REPS:]
+            if len(recent) >= 2:
+                features.set_rise_ratio = float(np.median(recent))
         self._completed.append(_CompletedRep(
             features=features,
             start_time=features.liftoff_time,
@@ -866,14 +927,15 @@ class DeadliftRepAnalyzer:
     def _frame_status(self, measure: FrameMeasure) -> DeadliftFrameStatus:
         live_cm = NAN
         # Closed-loop foot guidance needs the bar itself: the hanging wrists of
-        # the proxy are nowhere near where the bar sits on the floor.
-        if (
-            self.phase == DeadliftPhase.STANCE
-            and measure.bar_source == BAR_SOURCE_BAR
-            and measure.midfoot is not None
-            and measure.bar_centre is not None
-        ):
-            live_cm = forward_m(measure.frame, measure.bar_centre, measure.midfoot) * 100.0
+        # the proxy are nowhere near where the bar sits on the floor. It speaks to
+        # a lifter standing at the bar before the set's first rep, not walking off
+        # after it, from a median over half a second: one noisy frame must not
+        # start it.
+        guiding = self.phase == DeadliftPhase.STANCE and self.rep_count == 0 and self._is_settled
+        if guiding and measure.bar_source == BAR_SOURCE_BAR:
+            live_cm = self._recent_stance_offset_cm(measure.t, LIVE_OFFSET_WINDOW_S)
+            if math.isnan(live_cm) and measure.midfoot is not None and measure.bar_centre is not None:
+                live_cm = forward_m(measure.frame, measure.bar_centre, measure.midfoot) * 100.0
         height_cm = NAN
         if math.isfinite(self._rest_up) and math.isfinite(measure.bar_up):
             height_cm = (measure.bar_up - self._rest_up) * 100.0

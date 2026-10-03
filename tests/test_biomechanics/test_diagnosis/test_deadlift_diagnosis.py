@@ -62,6 +62,7 @@ CLEAN_REP: dict = dict(
     setup_hip_band_high_cm=54.0,
     shoulder_vs_bar_cm=3.0,
     trunk_change_liftoff_knee_deg=1.0,
+    hip_shoulder_rise_ratio=0.6,
     bar_drift_cm=1.0,
     hip_extension_deficit_deg=1.0,
     knee_extension_deficit_deg=1.0,
@@ -80,6 +81,8 @@ FAULTY_REP: dict = dict(
     setup_hip_band_high_cm=54.0,
     shoulder_vs_bar_cm=-3.0,
     trunk_change_liftoff_knee_deg=15.0,
+    hip_shoulder_rise_ratio=1.2,
+    set_rise_ratio=1.2,
     bar_drift_cm=6.0,
     hip_extension_deficit_deg=12.0,
     knee_extension_deficit_deg=9.0,
@@ -90,13 +93,17 @@ FAULTY_REP: dict = dict(
     velocity_loss_pct=30.0,
 )
 
+# The trunk tips forward off the floor and the hips out-rise the shoulders, rep
+# after rep.
+HIPS_FIRST: dict = dict(trunk_change_liftoff_knee_deg=20.0, hip_shoulder_rise_ratio=1.2, set_rise_ratio=1.2)
+
 # One synthetic set per symptom: per-rep overrides of the clean rep.
 SYMPTOM_SETS: dict[str, list[dict]] = {
     "bar_off_midfoot": [dict(bar_midfoot_stance_cm=6.0, bar_midfoot_setup_cm=6.0)] * 3,
     # Hips that start too low leave the shoulders at the bar, not in front of it.
     "setup_hips_off": [dict(setup_hip_height_cm=38.0, shoulder_vs_bar_cm=-1.0)] * 3,
     "shoulders_behind_bar": [dict(shoulder_vs_bar_cm=-5.0)] * 3,
-    "hips_shoot": [dict(trunk_change_liftoff_knee_deg=20.0)] * 3,
+    "hips_shoot": [HIPS_FIRST] * 3,
     "bar_drift": [dict(bar_drift_cm=7.0)] * 3,
     "incomplete_lockout": [dict(hip_extension_deficit_deg=16.0)] * 3,
     "lean_back": [dict(lean_back_deg=16.0)] * 3,
@@ -313,7 +320,7 @@ class TestCauseAttribution:
 
     def test_hips_shoot_from_a_low_start_is_the_setup(self):
         result = _diagnose(
-            _set_from([dict(trunk_change_liftoff_knee_deg=20.0, **SYMPTOM_SETS["setup_hips_off"][0])] * 3)
+            _set_from([dict(**HIPS_FIRST, **SYMPTOM_SETS["setup_hips_off"][0])] * 3)
         )
         hips_low = _hypothesis(result, "hips_too_low")
         assert "hips_shoot" in hips_low.implicated_by
@@ -322,7 +329,7 @@ class TestCauseAttribution:
     def test_touch_and_go_strengthens_the_slack_cause(self):
         dead_stop = _diagnose(_set_from(SYMPTOM_SETS["hips_shoot"]))
         touch_and_go = _diagnose(
-            _set_from([dict(trunk_change_liftoff_knee_deg=20.0, touch_and_go=True)] * 3)
+            _set_from([dict(**HIPS_FIRST, touch_and_go=True)] * 3)
         )
         assert (
             _hypothesis(touch_and_go, "slack_not_pulled").score
@@ -331,7 +338,7 @@ class TestCauseAttribution:
 
     def test_slow_pull_with_hips_shooting_points_at_leg_strength(self):
         slow = _diagnose(
-            _set_from([dict(trunk_change_liftoff_knee_deg=20.0, concentric_velocity_mps=0.25)] * 3)
+            _set_from([dict(**HIPS_FIRST, concentric_velocity_mps=0.25)] * 3)
         )
         assert "weak_off_floor" in [h.cause_id for h in slow.longterm_causes]
         fast = _diagnose(_set_from(SYMPTOM_SETS["hips_shoot"]))
@@ -704,3 +711,17 @@ class TestGraphs:
         explicit = HypothesisEngine(SQUAT_GRAPH).diagnose(set_features)
         assert "knee_not_tracking_toes" in _symptom_ids(default)
         assert default.model_dump() == explicit.model_dump()
+
+
+class TestHipsShootAgreesWithD2:
+    def test_a_held_back_angle_is_no_hips_shoot_symptom(self):
+        """The setup model expects the chest to rise; a lifter whose hips and chest
+        rose together (ratio ~1) reads a model excess, but D2 does not fire, and
+        neither does the diagnosis."""
+        result = _diagnose(_set_from([dict(trunk_change_liftoff_knee_deg=9.0, hip_shoulder_rise_ratio=1.0,
+                                           set_rise_ratio=1.0)] * 3))
+        assert "hips_shoot" not in _symptom_ids(result)
+
+    def test_an_unmeasured_rise_ratio_leaves_coordination_unmeasured(self):
+        summary = DeadliftRepSummary.from_features({"rep_number": 1, "trunk_change_liftoff_knee_deg": 9.0})
+        assert math.isnan(summary.trunk_change_liftoff_knee_deg)

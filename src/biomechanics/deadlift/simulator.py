@@ -94,6 +94,10 @@ class RepScript(BaseModel):
     # legs cannot reach is brought upright until they can (RepTruth has the result).
     setup_trunk_deg: float | None = None
     knee_pass_trunk_deg: float | None = None
+    # A sticking point: the bar stops this fraction of the way up for stall_s,
+    # then the lifter grinds through it.
+    stall_fraction: float | None = None
+    stall_s: float = 0.0
 
 
 class Scenario(BaseModel):
@@ -119,6 +123,9 @@ class Scenario(BaseModel):
     # The plates hide the feet (confidence 0) whenever the bar is this far off its
     # rest; None: never hidden.
     plates_hide_feet_above_m: float | None = None
+    # Between dead-stop reps the lifter stands up without the bar for this long,
+    # then sets up again (a re-setup); None: stays on the bar.
+    stand_between_reps_s: float | None = None
     seed: int = 7
     start_time: float = 100.0
 
@@ -483,12 +490,11 @@ class _Builder:
             self.reps.append(RepTruth(liftoff_time, math.nan, math.nan, math.nan, False, touch_and_go_in))
             return
 
-        steps = int(round(script.pull_s * self.scenario.fps))
         start_pose = self._pull_pose(script, 0.0, top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
         previous_pose = start_pose
         knee_pass: tuple[float, float, _Pose] | None = None
-        for step in range(1, steps + 1):
-            pose = self._pull_pose(script, _smooth(step / steps), top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
+        for fraction in self._pull_fractions(script):
+            pose = self._pull_pose(script, fraction, top_up, trunk_top, trunk_setup, trunk_knee, knee_up)
             if knee_pass is None and pose.bar[1] >= pose.knee[1]:
                 # The bar crosses the knee's height between the previous frame and this one.
                 before = previous_pose.bar[1] - previous_pose.knee[1]
@@ -529,8 +535,27 @@ class _Builder:
             setup_hip_height_m=start_pose.hip[1],
             **truth_angles,
         ))
-        if not next_is_touch_and_go:
+        if script.drop_bar:
+            # The lifter let go at the top and stays standing over the dropped bar.
+            self._hold(_standing_pose(athlete, self.bar_rest, 0.0), script.floor_hold_s)
+        elif not next_is_touch_and_go:
             self._hold(self._setup_pose(script), script.floor_hold_s)
+
+    def _pull_fractions(self, script: RepScript) -> list[float]:
+        """The bar's share of the way up on each pull frame: one eased move, or two
+        either side of a sticking point the bar holds at."""
+        fps = self.scenario.fps
+        if script.stall_fraction is None:
+            steps = int(round(script.pull_s * fps))
+            return [_smooth(step / steps) for step in range(1, steps + 1)]
+        stall = script.stall_fraction
+        before = max(1, int(round(script.pull_s * stall * fps)))
+        after = max(1, int(round(script.pull_s * (1.0 - stall) * fps)))
+        return (
+            [stall * _smooth(step / before) for step in range(1, before + 1)]
+            + [stall] * int(round(script.stall_s * fps))
+            + [stall + (1.0 - stall) * _smooth(step / after) for step in range(1, after + 1)]
+        )
 
     def _drop(self, top_pose: _Pose, top_up: float) -> float:
         """Hands open at the top: the bar falls, bounces on bumpers, settles. The
@@ -574,6 +599,12 @@ class _Builder:
             self._rep(script, touch_and_go_in, next_tng)
             if script.drop_bar and index + 1 < len(reps):
                 # Back down to the bar for the next rep.
+                self._blend(standing, self._setup_pose(reps[index + 1]), scenario.hinge_s)
+                self._hold(self._setup_pose(reps[index + 1]), scenario.setup_hold_s)
+            elif scenario.stand_between_reps_s is not None and index + 1 < len(reps) and not next_tng:
+                # Stands up off the bar, then sets up again.
+                self._blend(self._setup_pose(script), standing, scenario.hinge_s)
+                self._hold(standing, scenario.stand_between_reps_s)
                 self._blend(standing, self._setup_pose(reps[index + 1]), scenario.hinge_s)
                 self._hold(self._setup_pose(reps[index + 1]), scenario.setup_hold_s)
             touch_and_go_in = next_tng

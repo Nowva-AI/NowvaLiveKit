@@ -90,23 +90,29 @@ class TestSetupRules:
 
 
 class TestPullAndTopRules:
-    def test_hips_shoot_reports_the_rise_ratio_cross_check(self):
+    @pytest.mark.parametrize(
+        ("rep_ratio", "set_ratio"), [(1.2, 1.2), (1.35, math.nan)], ids=["the_set_agrees", "beyond_noise_alone"],
+    )
+    def test_hips_shoot_fires_when_the_hips_decisively_led(self, rep_ratio: float, set_ratio: float):
         rule = DeadliftHipsShootRule(FAULTS.deadlift_hips_shoot)
-        fault = _judge(rule, _features(trunk_change_liftoff_knee_deg=9.0, hip_shoulder_rise_ratio=1.05,
-                                       trunk_change_predicted_deg=-16.0))
+        fault = _judge(rule, _features(trunk_change_liftoff_knee_deg=9.0, hip_shoulder_rise_ratio=rep_ratio,
+                                       set_rise_ratio=set_ratio, trunk_change_predicted_deg=-16.0))
         assert fault.severity.value == "moderate"
-        assert fault.details["ratio_confirms"] is True
+        assert fault.details["rise_ratio"] == pytest.approx(rep_ratio, abs=VALUE_TOLERANCE)
         assert fault.details["model_predicted"] is True
         assert fault.details["min_tier"] == "moderate"
 
-    @pytest.mark.parametrize("ratio", [0.95, 1.0, math.nan])
-    def test_hips_shoot_the_ratio_does_not_confirm_is_cued_only_when_severe(self, ratio: float):
+    @pytest.mark.parametrize(
+        ("rep_ratio", "set_ratio"),
+        [(0.95, 1.2), (1.05, 1.2), (1.2, 1.1), (1.2, math.nan), (math.nan, 1.2)],
+        ids=["rep_chest_led", "rep_even", "set_not_decisive", "first_rep_not_decisive", "rep_unmeasured"],
+    )
+    def test_no_hips_shoot_unless_the_hips_decisively_led(self, rep_ratio: float, set_ratio: float):
+        """A held back angle (ratio ~1) reads 6-12 deg against the setup model: the
+        rise ratio, not the model, decides whether there is a fault."""
         rule = DeadliftHipsShootRule(FAULTS.deadlift_hips_shoot)
-        fault = _judge(rule, _features(trunk_change_liftoff_knee_deg=9.0, hip_shoulder_rise_ratio=ratio,
-                                       trunk_change_predicted_deg=-16.0))
-        assert fault.severity.value == "moderate"
-        assert fault.details["ratio_confirms"] is False
-        assert fault.details["min_tier"] == "severe"
+        assert _judge(rule, _features(trunk_change_liftoff_knee_deg=12.0, hip_shoulder_rise_ratio=rep_ratio,
+                                      set_rise_ratio=set_ratio, trunk_change_predicted_deg=-16.0)) is None
 
     def test_body_vertical_raises_the_gravity_rules_to_moderate(self):
         for rule, field in (
@@ -115,7 +121,7 @@ class TestPullAndTopRules:
             (DeadliftLeanBackRule(FAULTS.deadlift_lean_back), "lean_back_deg"),
         ):
             fault = _judge(rule, _features(**{
-                field: 30.0, "gravity_source": GRAVITY_SOURCE_BODY, "hip_shoulder_rise_ratio": 1.2,
+                field: 30.0, "gravity_source": GRAVITY_SOURCE_BODY, "hip_shoulder_rise_ratio": 1.35,
             }))
             assert fault.details["min_tier"] == "moderate"
             assert fault.details["gravity_source"] == GRAVITY_SOURCE_BODY

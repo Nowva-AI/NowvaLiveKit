@@ -35,6 +35,10 @@ PROXY_HUB_SPAN_M = 1.70
 MIN_GRIP_WIDTH_M = 0.25
 # Tilt is read on a running median over this many frames.
 TILT_SMOOTHING_FRAMES = 5
+# D2's poses: the median over this long before liftoff, a line fitted over this
+# long up to the knee pass (needs this many frames, else a median).
+COORDINATION_WINDOW_S = 0.2
+COORDINATION_FIT_FRAMES = 4
 # Hip/shoulder rise ratio needs this much shoulder rise to be a ratio at all.
 MIN_SHOULDER_RISE_M = 0.01
 # Plausible segment lengths for the setup model (m); outside them the keypoints are wrong.
@@ -251,22 +255,22 @@ def measure_setup(
 ) -> dict[str, float]:
     """The setup over window_s before liftoff: hip height, trunk, shoulders vs bar,
     bar vs midfoot and the model's band and trunk change. "grip_offset_m" is the
-    wrist-to-bar offset measured on the tracked bar, for the athlete. Empty when
-    too few measured frames."""
-    frames = [
-        frame for frame in setup_frames
-        if liftoff_t - window_s - 1e-6 <= frame.t <= liftoff_t and frame.legs_measured
-    ]
-    if len(frames) < config.min_setup_frames:
-        return {}
-    setup: dict[str, float] = {
-        "hip_height_cm": _median([height_m(f.frame, f.hip_mid, f.ankle_mid) * 100.0 for f in frames]),
-        "trunk_deg": _median([f.trunk_deg for f in frames]),
-    }
+    wrist-to-bar offset measured on the tracked bar, for the athlete.
+
+    The leg measures need frames whose legs were measured, not carried by the
+    Kalman. The bar measures need only the bar, the shoulders and the midfoot
+    locked at the stance, so feet hidden by the plates at setup still leave D1
+    and D7 judged. Missing keys mean too few frames."""
+    window = [frame for frame in setup_frames if liftoff_t - window_s - 1e-6 <= frame.t <= liftoff_t]
+    setup: dict[str, float] = {}
+    legs = [f for f in window if f.legs_measured]
+    if len(legs) >= config.min_setup_frames:
+        setup["hip_height_cm"] = _median([height_m(f.frame, f.hip_mid, f.ankle_mid) * 100.0 for f in legs])
+        setup["trunk_deg"] = _median([f.trunk_deg for f in legs])
     # A bar carried over a tracking gap or predicted by the tracker is not a
     # setup measurement.
-    bar_frames = [f for f in frames if f.bar_centre is not None and f.bar_measured]
-    if not bar_frames:
+    bar_frames = [f for f in window if f.bar_centre is not None and f.bar_measured]
+    if len(bar_frames) < config.min_setup_frames:
         return setup
     setup["shoulder_vs_bar_cm"] = _median([
         forward_m(f.frame, f.shoulder_mid, f.bar_centre) * 100.0 for f in bar_frames
@@ -283,12 +287,30 @@ def measure_setup(
                 max(offset, config.min_wrist_to_bar_offset_m), config.max_wrist_to_bar_offset_m,
             )
             athlete = athlete._replace(grip_offset_m=setup["grip_offset_m"])
-    prediction = _predict_setup(bar_frames, setup["shoulder_vs_bar_cm"], athlete, config)
+    model_frames = [f for f in bar_frames if f.legs_measured]
+    if len(model_frames) < config.min_setup_frames:
+        return setup
+    prediction = _predict_setup(model_frames, setup["shoulder_vs_bar_cm"], athlete, config)
     if prediction is not None:
         setup["band_low_cm"] = prediction.hip_band_low_m * 100.0
         setup["band_high_cm"] = prediction.hip_band_high_m * 100.0
         setup["predicted_trunk_change_deg"] = prediction.trunk_change_deg
     return setup
+
+
+def _pose_at(frames: list[FrameMeasure], t: float, up: np.ndarray) -> tuple[float, float, float]:
+    """(trunk deg, hip height, shoulder height) at time t, from a straight line
+    fitted through the frames around it (their median when too few): a single
+    frame carries the whole keypoint noise into D2."""
+    times = np.array([frame.t for frame in frames]) - t
+    values = np.array([
+        (frame.trunk_deg, float(np.dot(frame.hip_mid, up)), float(np.dot(frame.shoulder_mid, up)))
+        for frame in frames
+    ])
+    if len(frames) < COORDINATION_FIT_FRAMES or np.ptp(times) <= 0.0:
+        return tuple(float(value) for value in np.median(values, axis=0))
+    _, intercept = np.polyfit(times, values, 1)
+    return tuple(float(value) for value in intercept)
 
 
 def _coordination_features(rep: RepTrack, features: DeadliftRepFeatures) -> None:
@@ -297,14 +319,23 @@ def _coordination_features(rep: RepTrack, features: DeadliftRepFeatures) -> None
     if knee_pass is None or math.isnan(rep.top_time) or knee_pass.t > rep.top_time:
         return
     features.knee_pass_time = knee_pass.t
-    change = knee_pass.trunk_deg - liftoff.trunk_deg
+    up = knee_pass.frame.up
+    # Before liftoff the lifter is set (a median); up to the knee pass, moving (a
+    # line through the frames leading to it: past the knees the trunk changes course).
+    before = [frame for frame in rep.lead_in if liftoff.t - frame.t <= COORDINATION_WINDOW_S] + [liftoff]
+    trunk_lo, hip_lo, shoulder_lo = (float(value) for value in np.median([
+        (frame.trunk_deg, float(np.dot(frame.hip_mid, up)), float(np.dot(frame.shoulder_mid, up)))
+        for frame in before
+    ], axis=0))
+    leading = [frame for frame in rep.frames if 0.0 <= knee_pass.t - frame.t <= COORDINATION_WINDOW_S]
+    trunk_kp, hip_kp, shoulder_kp = _pose_at(leading, knee_pass.t, up)
     predicted = features.trunk_change_predicted_deg
+    change = trunk_kp - trunk_lo
     # Without the setup model the raw change is judged: the trunk must still
     # not tip further forward off the floor.
     features.trunk_change_liftoff_knee_deg = change - predicted if math.isfinite(predicted) else change
-    frame = knee_pass.frame
-    hip_rise = height_m(frame, knee_pass.hip_mid, liftoff.hip_mid)
-    shoulder_rise = height_m(frame, knee_pass.shoulder_mid, liftoff.shoulder_mid)
+    hip_rise = hip_kp - hip_lo
+    shoulder_rise = shoulder_kp - shoulder_lo
     if shoulder_rise > MIN_SHOULDER_RISE_M:
         features.hip_shoulder_rise_ratio = hip_rise / shoulder_rise
 
@@ -314,7 +345,19 @@ def _running_median(values: list[float], frames: int) -> list[float]:
     return [float(np.median(values[max(0, i - half):i + half + 1])) for i in range(len(values))]
 
 
-def _bar_path_features(pull: list[FrameMeasure], features: DeadliftRepFeatures) -> None:
+def _tilt_cm(frame: FrameMeasure) -> float:
+    """Left end above the right end (cm) at the plate hubs: measured there on the
+    tracked bar; without it, the hands' height difference carried out to the hubs."""
+    if frame.bar_left is not None and frame.bar_right is not None:
+        return height_m(frame.frame, frame.bar_left, frame.bar_right) * 100.0
+    if frame.bar_source == BAR_SOURCE_WRIST_PROXY and frame.l_wrist is not None and frame.r_wrist is not None:
+        grip_m = abs(lateral_m(frame.frame, frame.r_wrist, frame.l_wrist))
+        if grip_m >= MIN_GRIP_WIDTH_M:
+            return height_m(frame.frame, frame.l_wrist, frame.r_wrist) * PROXY_HUB_SPAN_M / grip_m * 100.0
+    return NAN
+
+
+def _bar_path_features(pull: list[FrameMeasure], hold: list[FrameMeasure], features: DeadliftRepFeatures) -> None:
     bar_frames = [f for f in pull if f.bar_centre is not None]
     if len(bar_frames) < 2:
         return
@@ -323,25 +366,18 @@ def _bar_path_features(pull: list[FrameMeasure], features: DeadliftRepFeatures) 
         max(0.0, forward_m(f.frame, f.bar_centre, start.bar_centre)) * 100.0 for f in bar_frames
     ]
     features.bar_drift_cm = _percentile(drift, WORST_PERCENTILE)
-    # Left end above the right end (cm) at the plate hubs: measured there on the
-    # tracked bar; without it, the hands' height difference carried out to the hubs.
-    tilts: list[float] = []
-    for frame in bar_frames:
-        if frame.bar_left is not None and frame.bar_right is not None:
-            tilts.append(height_m(frame.frame, frame.bar_left, frame.bar_right) * 100.0)
-        elif frame.bar_source == BAR_SOURCE_WRIST_PROXY and frame.l_wrist is not None and frame.r_wrist is not None:
-            grip_m = abs(lateral_m(frame.frame, frame.r_wrist, frame.l_wrist))
-            if grip_m >= MIN_GRIP_WIDTH_M:
-                hand_tilt_m = height_m(frame.frame, frame.l_wrist, frame.r_wrist)
-                tilts.append(hand_tilt_m * PROXY_HUB_SPAN_M / grip_m * 100.0)
-    if not tilts:
-        return
     if bar_frames[0].bar_source == BAR_SOURCE_WRIST_PROXY:
         # The hands' keypoint noise, carried ~3x out to the hubs, swamps any one
-        # frame: on the proxy the tilt is the level held over the second half of
-        # the pull.
-        features.bar_tilt_cm = abs(_median(tilts[len(tilts) // 2:]))
+        # frame: on the proxy the tilt is the level held from mid-pull through the top.
+        held = bar_frames[len(bar_frames) // 2:] + [f for f in hold if f.bar_centre is not None]
+        tilts = [tilt for tilt in (_tilt_cm(frame) for frame in held) if math.isfinite(tilt)]
+        if not tilts:
+            return
+        features.bar_tilt_cm = abs(_median(tilts))
     else:
+        tilts = [tilt for tilt in (_tilt_cm(frame) for frame in bar_frames) if math.isfinite(tilt)]
+        if not tilts:
+            return
         if len(tilts) >= TILT_SMOOTHING_FRAMES:
             tilts = _running_median(tilts, TILT_SMOOTHING_FRAMES)
         features.bar_tilt_cm = _percentile([abs(tilt) for tilt in tilts], WORST_PERCENTILE)
@@ -427,7 +463,7 @@ def rep_features(
         features.lower_time_s = features.floor_time - rep.lower_start
 
     _coordination_features(rep, features)
-    _bar_path_features(pull, features)
+    _bar_path_features(pull, rep.top_frames, features)
     _top_features(rep, refs, features)
     _hip_shift_feature(pull, locked_midfoot, features)
     if refs and math.isfinite(refs.get("elbow_flex_deg", NAN)):

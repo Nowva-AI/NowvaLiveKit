@@ -5,7 +5,7 @@ Loads configuration from YAML files and provides typed access to settings.
 """
 
 import os
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from pathlib import Path
 
 import yaml
@@ -192,7 +192,7 @@ class DeadliftFaultConfig(BaseModel):
     min_tier: str = "moderate"
 
 
-def _deadlift_fault(mild: float, moderate: float, severe: float, min_tier: str):
+def _deadlift_fault(mild: float, moderate: float, severe: float, min_tier: str) -> Any:
     return Field(default_factory=lambda: DeadliftFaultConfig(
         mild=mild, moderate=moderate, severe=severe, min_tier=min_tier,
     ))
@@ -224,8 +224,8 @@ class FaultsConfig(BaseModel):
     # Lower than the plan's first 10/15/20: with the bar at the knees, straight legs
     # cap the excess at ~8-12 deg for typical bodies (simulator, J2), so 10/15/20
     # could almost never reach moderate. Mild stays uncued (error budget §2.9). The
-    # sizes come from the unvalidated setup model, so the rule cues moderate only
-    # when the hips out-rose the shoulders (rise ratio > 1), else severe only.
+    # sizes come from the unvalidated setup model, so the rule fires only when the
+    # hips decisively out-rose the shoulders (faults/rules/deadlift_hips_shoot.py).
     deadlift_hips_shoot: DeadliftFaultConfig = _deadlift_fault(5.0, 8.0, 11.0, "moderate")
     deadlift_bar_drift: DeadliftFaultConfig = _deadlift_fault(3.0, 5.0, 8.0, "moderate")
     deadlift_lockout: DeadliftFaultConfig = _deadlift_fault(8.0, 12.0, 20.0, "moderate")
@@ -347,6 +347,9 @@ class DeadliftConfig(BaseModel):
     top_still_speed_mps: float = 0.05
     top_still_frames: int = 3
     top_max_trunk_deg: float = 35.0
+    # A trunk this far behind vertical is an over-extended lockout, below the
+    # expected top height or not.
+    overextended_top_deg: float = 10.0
     # A pull that rose this far but never reached the top is a failed rep.
     failed_rep_min_rise_m: float = 0.10
     # TOP -> LOWER.
