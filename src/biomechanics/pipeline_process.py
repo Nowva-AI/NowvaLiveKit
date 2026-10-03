@@ -325,6 +325,20 @@ def _measured_gravity(provider) -> tuple:
     return load_world_up_for_provider(provider)
 
 
+def _refine_at_rest(camera_calibration: "CameraCalibrationSession | None", profile) -> None:
+    """A set just ended. Deadlift sets never start a refine, nor its drift check
+    (their frames are not even buffered): the rig calibration stays the squat's."""
+    if camera_calibration is not None and profile.allows_camera_refine:
+        camera_calibration.on_rest_start()
+
+
+def _anchor_world_if_pending(camera_calibration: "CameraCalibrationSession | None", profile) -> None:
+    """A factory (board-anchored) calibration moves its world frame onto the lifter
+    from the reps just buffered — never from deadlift reps."""
+    if camera_calibration is not None and camera_calibration.needs_world_anchor and profile.allows_camera_refine:
+        camera_calibration.anchor_world_on_lifter()
+
+
 def _switch_exercise(
     pipeline: BiomechanicsPipeline,
     session_tracker: SessionTracker,
@@ -1496,12 +1510,7 @@ def run_biomechanics_pipeline(
 
             # A factory (board-anchored) camera calibration moves its world frame
             # onto the lifter using the assessment reps just buffered.
-            if (
-                camera_calibration is not None
-                and camera_calibration.needs_world_anchor
-                and pipeline.profile.allows_camera_refine
-            ):
-                camera_calibration.anchor_world_on_lifter()
+            _anchor_world_if_pending(camera_calibration, pipeline.profile)
 
         except KeyboardInterrupt:
             print("\nAssessment stopped by user")
@@ -1783,10 +1792,7 @@ def run_biomechanics_pipeline(
                     else:
                         set_collector.reset()
 
-                    # Deadlift sets never start a refine, nor its drift check (their
-                    # frames are not even buffered): the rig calibration stays the squat's.
-                    if camera_calibration is not None and pipeline.profile.allows_camera_refine:
-                        camera_calibration.on_rest_start()
+                    _refine_at_rest(camera_calibration, pipeline.profile)
 
                     print(f"[REST] Starting {rest_seconds}s rest timer")
                 elif incoming.get("type") == "set_exercise":

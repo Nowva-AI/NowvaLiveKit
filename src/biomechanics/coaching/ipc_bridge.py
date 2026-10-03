@@ -9,6 +9,7 @@ Maintains backward compatibility with the legacy rep_count message format.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 import time
 from collections import defaultdict
@@ -398,8 +399,13 @@ class IPCBridge:
             return
 
         depths = [r.max_depth_angle for r in reps]
-        avg_depth = statistics.mean(depths)
-        depth_consistency = statistics.stdev(depths) if len(depths) > 1 else 0.0
+        if not any(depth == depth for depth in depths):
+            # No depth at all (a deadlift set): null, not NaN arithmetic that
+            # statistics.stdev cannot do.
+            avg_depth = depth_consistency = math.nan
+        else:
+            avg_depth = statistics.mean(depths)
+            depth_consistency = statistics.stdev(depths) if len(depths) > 1 else 0.0
 
         # Build per-fault-type summary
         fault_summary: Dict[str, Dict[str, Any]] = {}
