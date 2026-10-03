@@ -7,6 +7,7 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -977,7 +978,9 @@ class TestExerciseSwitch:
 
     def test_db_session_is_tagged_with_the_exercise_profile(self, monkeypatch):
         import db.biomechanics_persistence as persistence
+        from biomechanics.profiles import find_profile_class
 
+        monkeypatch.setattr(find_profile_class("Barbell Romanian Deadlift"), "coaching_ready", True)
         created: list[dict] = []
 
         class _Recorder:
@@ -1028,3 +1031,203 @@ class TestCalibrationNeedsAPattern:
         asyncio.run(service._on_calibration_complete({
             "type": "calibration_complete", "peaks": {}, "thresholds": {},
         }))
+
+
+# =============================================================================
+# Other exercises: cache_cues fields, recorded-only verdicts, depth, progress
+# =============================================================================
+
+PRESS_CUE_MAP = {"press_uneven": "press_uneven", "press_lockout": "press_lockout"}
+
+
+def _press_cache_cues(**fields) -> dict:
+    return {
+        "type": "cache_cues", "exercise_name": "Barbell Overhead Press", "profile": "overhead_press",
+        "cues": {"press_uneven": "press_uneven", "good_rep": "good_rep"}, **fields,
+    }
+
+
+def _press_service() -> tuple[CoachingService, CoachingOrchestrator, _FakeRecorder]:
+    service, orchestrator, recorder = _wired_service()
+    service._audio_cue_service = _FakeAudioCueService()
+    recorder.exercise = "overhead_press"
+    asyncio.run(service._on_cache_cues(_press_cache_cues(fault_to_cue=PRESS_CUE_MAP, reports_depth=False)))
+    return service, orchestrator, recorder
+
+
+class TestExerciseCacheCues:
+    def test_cue_map_and_depth_flag_reach_the_orchestrator(self):
+        _, orchestrator, _ = _press_service()
+        assert orchestrator.fault_to_cue == PRESS_CUE_MAP
+        assert orchestrator.reports_depth is False
+        assert orchestrator._profile_name == "overhead_press"
+        assert orchestrator._waits_for_diagnosis is False
+
+    def test_missing_fields_follow_the_profile(self):
+        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
+
+        service, orchestrator, recorder = _wired_service()
+        service._audio_cue_service = _FakeAudioCueService()
+        recorder.exercise = "squat"
+        asyncio.run(service._on_cache_cues({
+            "type": "cache_cues", "exercise_name": "Barbell Back Squat", "profile": "squat", "cues": {},
+        }))
+        assert orchestrator.fault_to_cue == FAULT_TO_CUE_MAP
+        assert orchestrator.reports_depth is True
+        assert orchestrator._waits_for_diagnosis is True
+        assert orchestrator._set_idle_timeout_s == pytest.approx(15.0, abs=1e-9)
+
+    def test_absent_fields_mean_the_squat_defaults_for_any_profile(self):
+        service, orchestrator, recorder = _wired_service()
+        service._audio_cue_service = _FakeAudioCueService()
+        recorder.exercise = "deadlift"
+        asyncio.run(service._on_cache_cues({
+            "type": "cache_cues", "exercise_name": "Barbell Deadlift", "profile": "deadlift", "cues": {},
+            "set_idle_timeout_s": 25.0, "waits_for_diagnosis": True,
+        }))
+        assert orchestrator.reports_depth is True
+        assert orchestrator._waits_for_diagnosis is True
+        assert orchestrator._set_idle_timeout_s == pytest.approx(25.0, abs=1e-9)
+
+
+class TestRecordedOnlyFaultMessage:
+    def test_is_recorded_but_never_cued(self):
+        service, orchestrator, recorder = _press_service()
+        message = {
+            "type": "fault", "fault_type": "press_uneven", "severity": "moderate", "cue": None,
+            "rep_number": 1, "side": "left", "observability": "observable", "recorded_only": True,
+        }
+
+        async def _run():
+            await service._handle_message(message)
+            await service._handle_message({
+                "type": "rep_complete", "rep_number": 1, "is_clean": True, "faults_in_rep": [],
+                "faults_detailed": [{
+                    "fault_type": "press_uneven", "severity": "moderate",
+                    "details": {"side": "left", "observability": "observable", "recorded_only": True},
+                }],
+            })
+            orchestrator.stop()
+            return [e.cue_key for e in _queued(orchestrator) if e.event_type == "cached_cue"]
+
+        assert asyncio.run(_run()) == []
+        assert recorder.faults == [message]
+
+
+class TestRepCompleteForExercisesWithoutDepth:
+    def test_null_depth_is_not_coerced_and_features_are_forwarded(self):
+        service, orchestrator, _ = _press_service()
+        asyncio.run(service._handle_message({
+            "type": "rep_complete", "rep_number": 1, "is_clean": True, "faults_in_rep": [],
+            "max_depth_angle": None, "features": {"exercise": "overhead_press", "highlight_score": 0.55},
+        }))
+        orchestrator.stop()
+        event = orchestrator._set_rep_events[-1]
+        assert event["max_depth_angle"] is None
+        assert event["highlight_score"] == pytest.approx(0.55, abs=1e-9)
+
+    def test_squat_null_depth_still_reads_zero(self):
+        service, orchestrator, _ = _wired_service()
+        asyncio.run(service._handle_message({
+            "type": "rep_complete", "rep_number": 1, "is_clean": True, "faults_in_rep": [],
+            "max_depth_angle": None,
+        }))
+        orchestrator.stop()
+        assert orchestrator._set_rep_events[-1]["max_depth_angle"] == 0.0
+
+
+class TestLastRepVerdictFilter:
+    def test_recorded_only_is_dropped_and_approximate_stays_flagged(self):
+        async def _run():
+            service, orchestrator, _ = _workout_service()
+            await service._handle_message({
+                **_rep_message(1),
+                "faults_detailed": [
+                    {"fault_type": "press_uneven", "severity": "mild",
+                     "details": {"side": "left", "observability": "observable", "recorded_only": True}},
+                    {"fault_type": "press_lockout", "severity": "mild",
+                     "details": {"side": "both", "observability": "approximate"}},
+                ],
+            })
+            orchestrator.stop()
+            return service.last_rep_verdict()
+
+        assert asyncio.run(_run()) == {
+            "rep_number": 1,
+            "faults": [{"fault_type": "press_lockout", "side": "both", "observability": "approximate"}],
+        }
+
+
+class TestRestCompletePromptForOtherExercises:
+    def test_focus_line_uses_the_exercise_cue_and_its_set_up_line(self):
+        service, orchestrator, _ = _workout_service()
+        orchestrator.set_exercise(
+            "Barbell Overhead Press", is_squat=False, fault_to_cue=PRESS_CUE_MAP,
+            reports_depth=False, profile_name="overhead_press",
+        )
+        orchestrator._set_focus_fault = "press_uneven"
+        prompt = service._build_rest_complete_prompt()
+        orchestrator.stop()
+        assert "one hand lagging" in prompt
+        assert "'Push both hands up evenly!'" in prompt
+        assert "Keep the bar level all the way up." in prompt
+
+    def test_focus_without_a_cue_in_the_map_names_no_cue(self):
+        service, orchestrator, _ = _workout_service()
+        orchestrator.set_exercise("Barbell Overhead Press", is_squat=False, fault_to_cue={})
+        orchestrator._set_focus_fault = "lockout"
+        prompt = service._build_rest_complete_prompt()
+        orchestrator.stop()
+        assert "Stand tall" not in prompt
+        assert "Mid-set" not in prompt
+
+
+class TestProgressQueriesPassTheExercise:
+    def test_baseline_and_trends_are_fetched_for_the_current_profile(self, monkeypatch):
+        import db.biomechanics_persistence as persistence
+        import db.database as database
+        from biomechanics.profiles import find_profile_class
+
+        monkeypatch.setattr(find_profile_class("Barbell Romanian Deadlift"), "coaching_ready", True)
+
+        class _Db:
+            def close(self) -> None:
+                pass
+
+        calls: list[tuple[str, str]] = []
+
+        def _baseline(db, user_id, exercise="squat"):
+            calls.append(("baseline", exercise))
+
+        def _trends(db, user_id, exercise="squat"):
+            calls.append(("trends", exercise))
+            return {"sessions_analyzed": 0, "total_reps": 0, "fault_profile": [], "chronic_faults": []}
+
+        monkeypatch.setattr(database, "SessionLocal", _Db)
+        monkeypatch.setattr(persistence, "get_progress_baseline", _baseline)
+        monkeypatch.setattr(persistence, "get_multi_session_fault_trends", _trends)
+        monkeypatch.setattr(persistence, "get_cue_effectiveness", lambda db, user_id: [])
+        state = _StubState("u1")
+        state.set("workout.exercise_name", "Barbell Romanian Deadlift")
+        service = CoachingService(session=None, state=state)
+
+        asyncio.run(service._fetch_progress_baseline("u1"))
+        assert calls == [("baseline", "romanian_deadlift"), ("trends", "romanian_deadlift")]
+
+
+class TestProfileNameFollowsTheGate:
+    def test_gated_profile_is_untracked_until_ready(self, monkeypatch):
+        from agent.services.coaching_service import _profile_name
+        from biomechanics.profiles import find_profile_class
+
+        press = find_profile_class("Barbell Overhead Press")
+        monkeypatch.setattr(press, "coaching_ready", False)
+        assert _profile_name("Barbell Overhead Press") == "untracked"
+        monkeypatch.setattr(press, "coaching_ready", True)
+        assert _profile_name("Barbell Overhead Press") == "overhead_press"
+
+    def test_squat_and_unknown_exercises(self):
+        from agent.services.coaching_service import _profile_name
+
+        assert _profile_name("Barbell Back Squat") == "squat"
+        assert _profile_name("Barbell Bench Press") == "untracked"

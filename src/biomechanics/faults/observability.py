@@ -35,10 +35,20 @@ _MEASUREMENT_LEVELS: dict[str, dict[str, str]] = {
     "side_view": {SINGLE_CAMERA: NOT_OBSERVABLE, TRIANGULATED: OBSERVABLE},
     "foot_contact": {SINGLE_CAMERA: NOT_OBSERVABLE, TRIANGULATED: OBSERVABLE},
     "bar": {SINGLE_CAMERA: OBSERVABLE, TRIANGULATED: OBSERVABLE},
+    # Depth-axis metrics no camera can resolve, emitted on the rig but only
+    # hedged until the rig validation promotes them (shared across exercises).
+    "rig_unvalidated": {SINGLE_CAMERA: NOT_OBSERVABLE, TRIANGULATED: APPROXIMATE},
+    # The overhead press keeps its own classes so each promotion is a one-line
+    # edit that cannot move another exercise (docs/exercises/ohp.md §5.9).
+    "press_vertical": {SINGLE_CAMERA: OBSERVABLE, TRIANGULATED: OBSERVABLE},
+    "press_frontal": {SINGLE_CAMERA: OBSERVABLE, TRIANGULATED: OBSERVABLE},
+    "press_elbow": {SINGLE_CAMERA: APPROXIMATE, TRIANGULATED: APPROXIMATE},
+    "press_side_view": {SINGLE_CAMERA: NOT_OBSERVABLE, TRIANGULATED: APPROXIMATE},
 }
 
-# What each squat fault is measured from.
+# What each fault is measured from.
 FAULT_MEASUREMENT: dict[str, str] = {
+    # Squat
     "depth": "vertical",
     "depth_drift": "vertical",
     "lockout": "vertical",
@@ -51,6 +61,23 @@ FAULT_MEASUREMENT: dict[str, str] = {
     "foot_placement": "sagittal",
     "heel_rise": "foot_contact",
     "bilateral_asymmetry": "bar",
+    # Standing barbell overhead press (ohp.md §5.9)
+    "press_leg_drive": "press_vertical",
+    "press_missed": "press_vertical",
+    "press_uneven": "press_frontal",
+    "press_grip": "press_frontal",
+    "press_lockout": "press_elbow",
+    "press_layback": "press_side_view",
+    "press_bar_forward": "press_side_view",
+    "press_velocity_loss": "press_side_view",
+    # Barbell Romanian deadlift (rdl.md §5)
+    "rdl_hip_sink": "vertical",
+    "rdl_range_drift": "vertical",
+    "rdl_partial": "vertical",
+    "rdl_tempo": "vertical",
+    "rdl_bar_tilt": "frontal",
+    "rdl_bar_drift": "rig_unvalidated",
+    "rdl_lockout": "rig_unvalidated",
 }
 
 

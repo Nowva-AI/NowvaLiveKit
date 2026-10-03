@@ -26,8 +26,8 @@ from agent.services.athlete_facts import (
     athlete_facts_line,
     resolve_pain_flag,
 )
+from agent.services.fault_filters import reportable_faults
 from agent.services.squat_card import ExplainSquatMixin
-from biomechanics.faults.observability import OBSERVABLE
 from db.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,9 @@ WORKOUT_STATE_ITEM_ID = "nowva_workout_state"
 
 # A live frame older than this can't describe how the athlete is standing now.
 FORM_SNAPSHOT_MAX_AGE_MS = 3000.0
+
+# A rep whose verdicts this camera setup can only roughly read, or only record
+NOTHING_TO_CORRECT = "nothing to correct in what this camera can see"
 
 RPE_MIN = 1.0
 RPE_MAX = 10.0
@@ -111,17 +114,17 @@ def _assess_standing_setup(angles: dict) -> list[str]:
 
 def _assess_last_rep(verdict: dict) -> list[str]:
     """Relay the engine's verdict on the last rep. Faults this camera setup can only
-    roughly read are left out: a coach who can't see something says nothing about it."""
+    roughly read, or only record, are left out: a coach who can't see something
+    says nothing about it."""
     from agent.services.progress_context import fault_label
 
     findings = [
         f"their last rep showed {fault_label(fault['fault_type'])}"
         + (f" on the {fault['side']} side" if fault.get("side") in ("left", "right") else "")
-        for fault in verdict.get("faults", [])
-        if fault.get("observability", OBSERVABLE) == OBSERVABLE
+        for fault in reportable_faults(verdict.get("faults", []), spoken=True)
     ]
     if not findings:
-        findings.append("their last rep had nothing to correct in what this camera can see")
+        findings.append(f"their last rep had {NOTHING_TO_CORRECT}")
     return findings
 
 
@@ -1164,11 +1167,13 @@ class WorkoutAgent(ExplainSquatMixin, BaseNovaAgent):
 
             rep_data = result.get("rep_data", {})
             faults = rep_data.get("faults", [])
-            fault_desc = (
-                ", ".join(fault_label(f["fault_type"]) for f in faults)
-                if faults
-                else "clean form"
-            )
+            spoken_faults = reportable_faults(faults, spoken=True)
+            if spoken_faults:
+                fault_desc = ", ".join(fault_label(f["fault_type"]) for f in spoken_faults)
+            elif faults:
+                fault_desc = NOTHING_TO_CORRECT
+            else:
+                fault_desc = "clean form"
             return None, (
                 f"Tell the user their last rep is up on the screen and to "
                 f"take a look. The rep had: {fault_desc}. Briefly describe "

@@ -381,10 +381,12 @@
     color: var(--ink-dim); font-weight: 600; margin-top: 4px;
   }
 
+  /* one equal column per visible tile: exercises without depth hide two */
   #report .tiles {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 10px;
     margin-bottom: 26px;
   }
+  #report .tile.hidden { display: none; }
   #report .tile {
     background: rgba(255,255,255,.045);
     border: 1px solid rgba(255,255,255,.06);
@@ -448,6 +450,8 @@
 
   /* hide empty report gracefully until data lands */
   #report.empty .tiles, #report.empty #scores, #report.empty .focus { opacity: .25; }
+  /* exercises with no form score (no set diagnosis) */
+  #report.unscored #score-hero, #report.unscored #scores { display: none; }
 
   /* ================= workout complete ================= */
 
@@ -1219,13 +1223,17 @@
 
   /* ================= workout state ================= */
 
-  const SCORE_DIMS = [
-    ["depth", "Depth"],
-    ["trunk_control", "Trunk control"],
-    ["knee_tracking", "Knee tracking"],
-    ["symmetry", "Symmetry"],
-    ["tempo", "Tempo"],
-  ];
+  // Form-score dimensions by exercise profile. Only exercises with a set
+  // diagnosis are scored; any other profile hides the score panel.
+  const SCORE_DIMS = {
+    squat: [
+      ["depth", "Depth"],
+      ["trunk_control", "Trunk control"],
+      ["knee_tracking", "Knee tracking"],
+      ["symmetry", "Symmetry"],
+      ["tempo", "Tempo"],
+    ],
+  };
 
   // fault_type → what to do about it, phrased as coaching, not diagnostics
   const FOCUS_TEXT = {
@@ -1248,11 +1256,26 @@
     shoulder_stability: "Lock your shoulders down",
     trunk_stability: "Stay braced through your core",
     tempo: "Control the way down",
+    press_layback: "Glutes tight, ribs down",
+    press_bar_forward: "Get your head through at the top",
+    press_lockout: "Reach the bar to the ceiling",
+    press_leg_drive: "Keep your knees locked",
+    press_uneven: "Push both hands up evenly",
+    press_velocity_loss: "Fast off your shoulders",
+    press_grip: "Grip just outside your shoulders",
+    rdl_hip_sink: "Hips back, not down",
+    rdl_bar_drift: "Keep the bar on your legs",
+    rdl_lockout: "Finish tall at the top",
+    rdl_bar_tilt: "Keep the bar level",
+    rdl_range_drift: "Same depth every rep",
+    rdl_tempo: "Two seconds on the way down",
+    rdl_partial: "Take the bar lower",
   };
 
   const workout = {
     active: false,
     exercise: "",
+    profile: "squat",
     totalSets: 0,
     targetReps: 0,
     weightLbs: 0,
@@ -1280,6 +1303,8 @@
     leaveMenuStates();
     workout.active = true;
     workout.exercise = msg.exercise || "Workout";
+    // A hub that doesn't send the profile predates other exercises: squat.
+    workout.profile = msg.profile || "squat";
     workout.totalSets = msg.total_sets || 0;
     workout.targetReps = msg.target_reps || 0;
     workout.weightLbs = msg.weight_lbs || 0;
@@ -1430,16 +1455,23 @@
         summary.avg_depth != null ? `${Math.round(summary.avg_depth)}°` : "—";
       t("tile-consistency").textContent =
         summary.depth_consistency != null ? `±${summary.depth_consistency}°` : "—";
+      // An exercise without depth sends both as null: no depth tiles at all
+      t("tile-depth").parentElement.classList.toggle("hidden", summary.avg_depth == null);
+      t("tile-consistency").parentElement.classList.toggle(
+        "hidden", summary.depth_consistency == null);
       document.getElementById("focus-text").textContent = focusLine(summary);
     }
+
+    const dims = SCORE_DIMS[workout.profile];
+    report.classList.toggle("unscored", !dims);
 
     const scoreNum = document.getElementById("score-num");
     scoreNum.textContent = scores && scores.mean_score != null
       ? Math.round(scores.mean_score * 100) : "—";
 
     scoresBox.innerHTML = "";
-    if (scores && scores.per_dimension) {
-      SCORE_DIMS.forEach(([key, label], i) => {
+    if (dims && scores && scores.per_dimension) {
+      dims.forEach(([key, label], i) => {
         const v = scores.per_dimension[key];
         if (v == null) return;
         const pct = Math.round(v * 100);

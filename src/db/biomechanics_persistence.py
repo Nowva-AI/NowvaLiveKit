@@ -34,12 +34,16 @@ CHRONIC_MIN_SESSIONS = 3
 # The squat's once-per-rep verdicts (knee_valgus, hip_shoot, balance,
 # hip_shift, bar-tilt bilateral_asymmetry, ...) are judged when the rep
 # finishes, carry its own number and sit in its faults_detailed, so they are
-# not listed. lockout stays listed for the deadlift's lockout rule.
+# not listed. lockout stays listed for the deadlift's lockout rule. The RDL
+# judges a rep's lockout at the previous rep's finish, and a missed press is
+# emitted for a rejected rep, so neither belongs to the rep it is tagged with.
 END_OF_REP_FAULT_TYPES = frozenset({
     "depth",
     "lockout",
     "range_of_motion",
     "trunk_stability",
+    "rdl_lockout",
+    "press_missed",
 })
 
 Op = tuple[str, dict]
@@ -95,6 +99,16 @@ def mean_fault_severity(fault_type: str, reps_faults: list[list[dict]]) -> float
     if not severities:
         return 0.0
     return sum(severities) / len(severities)
+
+
+# A recorded-only verdict sat below its fault's cue start tier: it is stored,
+# flagged, in the rep's faults, but no count, trend or "most common fault" uses it.
+def _is_recorded_only(fault: dict) -> bool:
+    return bool((fault.get("details") or {}).get("recorded_only"))
+
+
+def _counted_faults(rep_faults: list[dict] | None) -> list[dict]:
+    return [fault for fault in rep_faults or [] if not _is_recorded_only(fault)]
 
 
 def _build_rep_row(message: dict) -> dict:
@@ -188,7 +202,7 @@ def build_baseline_summary(
         trunk_pitch = kinematics.get("trunk_pitch_at_bottom")
         if trunk_pitch is not None:
             trunk_values.append(trunk_pitch)
-        for fault in rep.faults or []:
+        for fault in _counted_faults(rep.faults):
             fault_type = fault.get("fault_type")
             if not fault_type:
                 continue
@@ -227,7 +241,7 @@ def build_baseline_summary(
     for set_row in sorted(set_rows, key=lambda s: s.set_number):
         set_faults: dict[str, int] = {}
         for rep in reps_by_set.get(set_row.set_number, []):
-            for fault in rep.faults or []:
+            for fault in _counted_faults(rep.faults):
                 ft = fault.get("fault_type")
                 if ft:
                     set_faults[ft] = set_faults.get(ft, 0) + 1
@@ -263,7 +277,7 @@ def _extract_fault_series(reps: list, fault_type: str) -> list[dict]:
     """Chronological per-rep severity series for one fault type."""
     out = []
     for rep in reps:
-        for fault in rep.faults or []:
+        for fault in _counted_faults(rep.faults):
             if fault.get("fault_type") == fault_type:
                 out.append({
                     "timestamp": rep.created_at,
@@ -974,7 +988,7 @@ def get_multi_session_fault_trends(
         s_idx = session_id_to_idx.get(rep.session_id)
         if s_idx is None:
             continue
-        for fault in rep.faults or []:
+        for fault in _counted_faults(rep.faults):
             ft = fault.get("fault_type")
             if not ft:
                 continue

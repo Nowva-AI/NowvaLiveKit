@@ -73,8 +73,9 @@ class TestAgentSideCues:
         ]
         assert agent_side
         for cue_key in agent_side:
-            assert cue_key in draft.cue_keys_to_draft(), cue_key
-            assert draft.scenario_for(cue_key), cue_key
+            exercise = draft.exercise_for_cue(cue_key)
+            assert exercise is not None, cue_key
+            assert draft.scenario_for(cue_key, exercise), cue_key
 
     def test_fix_confirmation_builds_on_its_fault(self):
         scenario = draft.scenario_for("knees_out_fixed")
@@ -239,3 +240,86 @@ class TestLoadCueLines:
         )
         assert "wav/drive_0.wav" in page
         assert page.count('<span class="missing">') == 2
+
+
+class TestExerciseDrafting:
+    def test_every_press_and_rdl_cue_text_key_is_drafted_by_its_exercise(self):
+        from agent.services.coaching_constants import CUE_TEXT_MAP
+
+        expected = {"press_": draft.OVERHEAD_PRESS, "rdl_": draft.ROMANIAN_DEADLIFT}
+        for cue_key in CUE_TEXT_MAP:
+            exercise = next((ex for prefix, ex in expected.items() if cue_key.startswith(prefix)), None)
+            if exercise is None:
+                continue
+            assert cue_key in draft.cue_keys_to_draft(exercise), cue_key
+            assert draft.scenario_for(cue_key, exercise), cue_key
+        assert "level_camera" in draft.cue_keys_to_draft(draft.ROMANIAN_DEADLIFT)
+
+    def test_squat_mode_drafts_only_squat_keys(self):
+        keys = draft.cue_keys_to_draft()
+        assert not [key for key in keys if key.startswith(("press_", "rdl_"))]
+
+    def test_exercise_keys_are_unique_and_disjoint_from_the_squat(self):
+        squat_keys = set(draft.cue_keys_to_draft())
+        for exercise in (draft.OVERHEAD_PRESS, draft.ROMANIAN_DEADLIFT):
+            keys = draft.cue_keys_to_draft(exercise)
+            assert len(keys) == len(set(keys))
+            assert not squat_keys & set(keys)
+
+    def test_press_side_scenario_names_the_side(self):
+        scenario = draft.scenario_for("press_uneven_right", draft.OVERHEAD_PRESS)
+        assert scenario.startswith(draft.EXERCISE_CUE_SCENARIOS[draft.OVERHEAD_PRESS]["press_uneven"])
+        assert "right hand" in scenario
+
+    def test_better_scenario_is_improved_not_fixed(self):
+        scenario = draft.scenario_for("rdl_hips_back_better", draft.ROMANIAN_DEADLIFT)
+        assert scenario.startswith(draft.EXERCISE_CUE_SCENARIOS[draft.ROMANIAN_DEADLIFT]["rdl_hips_back"])
+        assert "isn't fully right" in scenario
+        assert "never say it's fixed" in scenario
+
+    def test_exercise_lines_get_six_words_and_the_squat_keeps_four(self):
+        assert "at most 6 words" in draft.build_cue_prompt("press_lockout", draft.OVERHEAD_PRESS)
+        assert "at most 6 words" in draft.build_cue_prompt("rdl_bar_close", draft.ROMANIAN_DEADLIFT)
+        assert f"at most {draft.MAX_CUE_WORDS} words" in draft.build_cue_prompt("drive")
+        assert draft.over_length_lines("rdl_bar_close", ["Drag the bar down your legs"], draft.ROMANIAN_DEADLIFT) == []
+        assert draft.over_length_lines("drive", ["Drag the bar down your legs"]) != []
+
+    @pytest.mark.parametrize("cue_key,exercise", [
+        ("press_setup", "overhead_press"), ("rdl_setup", "romanian_deadlift"),
+        ("rdl_back_note", "romanian_deadlift"), ("level_camera", "romanian_deadlift"),
+    ])
+    def test_setup_lines_get_a_full_sentence(self, cue_key, exercise):
+        assert f"10 to {draft.MAX_EXPLAIN_WORDS} words" in draft.build_cue_prompt(cue_key, exercise)
+
+    def test_press_and_rdl_may_mention_the_bar_and_keep_the_jargon_ban(self):
+        for exercise in (draft.OVERHEAD_PRESS, draft.ROMANIAN_DEADLIFT):
+            prompt = draft.EXERCISE_SYSTEM_PROMPTS[exercise]
+            assert "never mention the bar" not in prompt
+            assert "'eccentric'" in prompt and "'valgus'" in prompt
+        assert "'hinge'" in draft.EXERCISE_SYSTEM_PROMPTS[draft.ROMANIAN_DEADLIFT]
+
+    def test_exercise_scenarios_avoid_jargon(self):
+        for exercise in (draft.OVERHEAD_PRESS, draft.ROMANIAN_DEADLIFT):
+            for cue_key, scenario in draft.EXERCISE_CUE_SCENARIOS[exercise].items():
+                for word in ("valgus", "hinge", "eccentric", "concentric"):
+                    assert word not in scenario.lower(), cue_key
+
+    def test_exercise_for_cue(self):
+        assert draft.exercise_for_cue("knees_out") == draft.SQUAT
+        assert draft.exercise_for_cue("press_uneven_better") == draft.OVERHEAD_PRESS
+        assert draft.exercise_for_cue("level_camera") == draft.ROMANIAN_DEADLIFT
+        assert draft.exercise_for_cue("hand_added") is None
+
+    def test_merge_orders_squat_then_press_then_rdl_then_extras(self):
+        merged = draft.merge_cue_lines(
+            {"custom_cue": ["x"] * 3, "rdl_lower": ["y"] * 3},
+            {"press_layback": ["z"] * 3, "drive": ["w"] * 3},
+        )
+        assert list(merged) == ["drive", "press_layback", "rdl_lower", "custom_cue"]
+
+    def test_review_page_shows_each_keys_own_scenario(self):
+        page = draft.build_review_page({
+            "press_uneven": ["Push evenly", "Both hands up", "Level it"],
+            "hand_added": ["a", "b", "c"],
+        })
+        assert "One hand lags" in page

@@ -176,6 +176,42 @@ class TestVelocityLossRule:
     def test_first_rep_has_no_loss(self):
         assert VelocityLossRule().judge_rep(_features(), SessionReference(), _angles()) is None
 
+    def test_the_squat_defaults_are_its_own_fault_and_phase(self):
+        rule = VelocityLossRule()
+        fault = rule.judge_rep(_features(velocity_loss_pct=33.0), SessionReference(), _angles())
+        assert rule.fault_type == FaultType.VELOCITY_LOSS
+        assert fault.details["phase"] == "ascent"
+
+    def test_another_lift_reuses_it_under_its_own_fault_and_phase(self):
+        rule = VelocityLossRule(fault_type=FaultType.PRESS_VELOCITY_LOSS, phase="press")
+        rule.set_frame_context(phase="descending")
+        fault = rule.judge_rep(_features(velocity_loss_pct=33.0), SessionReference(), _angles())
+        assert fault.fault_type == "press_velocity_loss"
+        assert fault.details["phase"] == "press"
+
+
+class TestRuleEngineSharedHooks:
+    def test_the_engine_builds_the_squat_reference_by_default(self):
+        engine = RuleEngine(config=BiomechanicsConfig(), rules=SquatProfile().create_fault_rules(BiomechanicsConfig()))
+        assert type(engine.reference) is SessionReference
+
+    def test_an_exercise_reference_replaces_it(self):
+        reference = SessionReference(depth_tolerance_ratio=0.0)
+        engine = RuleEngine(config=BiomechanicsConfig(), rules=[], reference=reference)
+        assert engine.reference is reference
+
+    def test_tag_observability_drops_what_the_camera_cannot_see(self):
+        engine = RuleEngine(config=BiomechanicsConfig(), rules=[], capture_mode=SINGLE_CAMERA)
+        hidden = VelocityLossRule(fault_type=FaultType.PRESS_LAYBACK).judge_rep(
+            _features(velocity_loss_pct=33.0), SessionReference(), _angles(),
+        )
+        seen = VelocityLossRule(fault_type=FaultType.PRESS_UNEVEN).judge_rep(
+            _features(velocity_loss_pct=33.0), SessionReference(), _angles(),
+        )
+        assert not engine.tag_observability(hidden)
+        assert engine.tag_observability(seen)
+        assert seen.details["observability"] == "observable"
+
 
 class TestFootPlacementRule:
     def test_staggered_foot_names_the_foot_to_move(self):

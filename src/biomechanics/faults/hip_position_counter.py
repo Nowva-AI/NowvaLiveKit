@@ -35,6 +35,8 @@ from biomechanics.utils.types import FaultEvent, JointAngles, RepData
 
 # Least-squares velocity window (samples). Five samples at 30 Hz is ~2 frames of lag.
 VELOCITY_WINDOW_FRAMES = 5
+# Bound on the samples a time-based velocity window (velocity_window_s) keeps.
+MAX_VELOCITY_WINDOW_SAMPLES = 64
 # Position used by the state machine = mean of the last N samples.
 POSITION_WINDOW_FRAMES = 2
 # A rep may only start once the signal has moved this fraction of min_depth
@@ -103,8 +105,11 @@ class SignalRepCounter:
         )
 
         # ---- signal window (raw samples) ----
-        self._signal_times: deque[float] = deque(maxlen=VELOCITY_WINDOW_FRAMES)
-        self._signal_values: deque[float] = deque(maxlen=VELOCITY_WINDOW_FRAMES)
+        window_samples = (
+            VELOCITY_WINDOW_FRAMES if self.config.velocity_window_s is None else MAX_VELOCITY_WINDOW_SAMPLES
+        )
+        self._signal_times: deque[float] = deque(maxlen=window_samples)
+        self._signal_values: deque[float] = deque(maxlen=window_samples)
 
         # ---- standing baseline ----
         self._standing_baseline: Optional[float] = None
@@ -179,6 +184,12 @@ class SignalRepCounter:
         self._standing_baseline = None
         self.rejected_rep_max_depth_angle = math.nan
         self.rep_started = False
+
+    def seed_baseline(self, value: float) -> None:
+        """Start the standing baseline at a known position (e.g. the press's rack
+        height) instead of the first frames; it keeps tracking while still."""
+        self._standing_baseline = value
+        self._baseline_ema.value = value
 
     def add_fault(self, fault: FaultEvent) -> None:
         self._current_faults.append(fault)
@@ -260,6 +271,7 @@ class SignalRepCounter:
         # ---- causal position & velocity from the raw sample window ----
         self._signal_times.append(timestamp)
         self._signal_values.append(signal_value)
+        self._trim_velocity_window(timestamp)
         position = self._window_position()
         velocity = self._window_velocity()
 
@@ -346,6 +358,18 @@ class SignalRepCounter:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _trim_velocity_window(self, timestamp: float) -> None:
+        window_s = self.config.velocity_window_s
+        if window_s is None:
+            return
+        # Keep the position window even when the time window is shorter.
+        while (
+            len(self._signal_times) > POSITION_WINDOW_FRAMES
+            and timestamp - self._signal_times[0] >= window_s - DURATION_TOLERANCE_S
+        ):
+            self._signal_times.popleft()
+            self._signal_values.popleft()
 
     def _window_position(self) -> float:
         recent = list(self._signal_values)[-POSITION_WINDOW_FRAMES:]

@@ -21,12 +21,14 @@ from biomechanics.utils.types import JointAngles, Skeleton3D
 logger = logging.getLogger(__name__)
 
 
-@register_profile("romanian_deadlift", "rdl", "stiff_leg_deadlift")
+@register_profile("romanian_deadlift", "rdl")
 class RomanianDeadliftProfile(ExerciseProfile):
     """Profile for Romanian deadlift / stiff-leg deadlift."""
 
     name = "romanian_deadlift"
     movement_pattern = "hip_hinge"
+    # Untracked until the RDL is validated (SHARED-PLUMBING.md §9).
+    gate_until_ready = True
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
         return [

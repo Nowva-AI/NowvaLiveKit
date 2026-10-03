@@ -34,6 +34,23 @@ class FaultType(str, Enum):
     DEPTH_DRIFT = "depth_drift"
     VELOCITY_LOSS = "velocity_loss"
     FOOT_PLACEMENT = "foot_placement"
+    # Standing barbell overhead press (docs/exercises/ohp.md §5)
+    PRESS_LAYBACK = "press_layback"
+    PRESS_BAR_FORWARD = "press_bar_forward"
+    PRESS_LOCKOUT = "press_lockout"
+    PRESS_LEG_DRIVE = "press_leg_drive"
+    PRESS_UNEVEN = "press_uneven"
+    PRESS_GRIP = "press_grip"
+    PRESS_VELOCITY_LOSS = "press_velocity_loss"
+    PRESS_MISSED = "press_missed"
+    # Barbell Romanian deadlift (docs/exercises/rdl.md §5)
+    RDL_HIP_SINK = "rdl_hip_sink"
+    RDL_BAR_DRIFT = "rdl_bar_drift"
+    RDL_LOCKOUT = "rdl_lockout"
+    RDL_BAR_TILT = "rdl_bar_tilt"
+    RDL_RANGE_DRIFT = "rdl_range_drift"
+    RDL_TEMPO = "rdl_tempo"
+    RDL_PARTIAL = "rdl_partial"
 
 
 # Default thresholds from config (degrees unless specified)
@@ -146,6 +163,81 @@ FAULT_MESSAGES: Dict[FaultType, Dict[str, str]] = {
         "mild": "Feet a little uneven — square them up",
         "moderate": "Feet uneven — line them up",
         "severe": "Feet set up crooked — reset your stance",
+    },
+    FaultType.PRESS_LAYBACK: {
+        "mild": "Leaning back a little under the bar — ribs down",
+        "moderate": "Leaning back under the bar — glutes tight, ribs down",
+        "severe": "Bending back hard under the bar — stack up, ribs down",
+    },
+    FaultType.PRESS_BAR_FORWARD: {
+        "mild": "Bar finishing a bit in front — head through at the top",
+        "moderate": "Bar finishing out in front — get your head through",
+        "severe": "Bar way out in front — head through, bar over your feet",
+    },
+    FaultType.PRESS_LOCKOUT: {
+        "mild": "Elbows not quite locked overhead — reach up",
+        "moderate": "Not locking out overhead — reach the bar to the ceiling",
+        "severe": "Arms well short of lockout — finish the press",
+    },
+    FaultType.PRESS_LEG_DRIVE: {
+        "mild": "Knees bending a little — keep them locked",
+        "moderate": "Using the legs to drive — knees locked",
+        "severe": "That's a push press — keep your knees locked",
+    },
+    FaultType.PRESS_UNEVEN: {
+        "mild": "One hand lagging a little — press evenly",
+        "moderate": "Bar tilting — push both hands up evenly",
+        "severe": "One hand well behind — drive both hands up together",
+    },
+    FaultType.PRESS_GRIP: {
+        "mild": "Grip slightly off — forearms a bit off vertical",
+        "moderate": "Grip width off — set the forearms vertical",
+        "severe": "Grip far off — reset your hands",
+    },
+    FaultType.PRESS_VELOCITY_LOSS: {
+        "mild": "Press slowing down — fast off the shoulders",
+        "moderate": "That one slowed a lot — drive it up",
+        "severe": "Big slowdown — that's close to your limit",
+    },
+    FaultType.PRESS_MISSED: {
+        "mild": "Press stalled before lockout — not counted",
+        "moderate": "Press stalled before lockout — not counted",
+        "severe": "Press stalled before lockout — not counted",
+    },
+    FaultType.RDL_HIP_SINK: {
+        "mild": "Hips sinking a bit — push them back",
+        "moderate": "Sitting down into it — hips back",
+        "severe": "That's a squat — hips back, shins still",
+    },
+    FaultType.RDL_BAR_DRIFT: {
+        "mild": "Bar drifting off the legs — keep it close",
+        "moderate": "Bar away from the legs — drag it down your thighs",
+        "severe": "Bar out over the toes — keep it on your legs",
+    },
+    FaultType.RDL_LOCKOUT: {
+        "mild": "Finish not quite tall — hips under shoulders",
+        "moderate": "Not finishing tall — stand up straight at the top",
+        "severe": "Finish well off vertical — stand tall, hips under shoulders",
+    },
+    FaultType.RDL_BAR_TILT: {
+        "mild": "Bar tipping slightly — keep it level",
+        "moderate": "Bar tilting — keep it level",
+        "severe": "Bar tilting a lot — even out both sides",
+    },
+    FaultType.RDL_RANGE_DRIFT: {
+        "mild": "Reps getting a little shorter — same depth every rep",
+        "moderate": "Cutting the range — same depth every rep",
+        "severe": "Much shorter than your range — go back to your depth",
+    },
+    FaultType.RDL_TEMPO: {
+        "mild": "Lowering a bit fast — two seconds down",
+        "moderate": "Dropping the bar — control the way down",
+        "severe": "Bar falling — slow the descent right down",
+    },
+    FaultType.RDL_PARTIAL: {
+        "mild": "Stopped just short — take the bar lower",
+        "moderate": "Stopped too high to count — take the bar lower",
+        "severe": "Well short of a rep — take the bar lower",
     },
 }
 

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from biomechanics.utils.standing_gate import StandingPoseGate, REQUIRED_KEYPOINTS
+from biomechanics.utils.standing_gate import PROFILE_CHECK_FAILURE, StandingPoseGate, REQUIRED_KEYPOINTS
 from biomechanics.utils.types import Skeleton3D, CocoKeypoints as CK
 
 
@@ -309,3 +309,40 @@ class TestStandingPoseGate:
 
         gate.reset()
         assert gate.last_failure is None
+
+
+class TestProfileReadinessCheck:
+    """An exercise's setup predicate is ANDed with the gate's own checks over its window."""
+
+    def test_a_failing_profile_check_blocks_the_latch(self):
+        gate = StandingPoseGate(required_consecutive_frames=3)
+        skeleton = _make_skeleton(_standing_skeleton())
+
+        for _ in range(10):
+            gate.check(skeleton, profile_check=False)
+
+        assert not gate.is_ready
+        assert gate.last_failure == PROFILE_CHECK_FAILURE
+
+    def test_the_profile_check_must_hold_over_the_whole_window(self):
+        gate = StandingPoseGate(required_consecutive_frames=3)
+        skeleton = _make_skeleton(_standing_skeleton())
+
+        for profile_check in (True, True, False, True, True):
+            gate.check(skeleton, profile_check=profile_check)
+        assert not gate.is_ready
+
+        gate.check(skeleton, profile_check=True)
+        assert gate.is_ready
+
+    def test_a_passing_profile_check_never_replaces_the_gates_checks(self):
+        gate = StandingPoseGate(required_consecutive_frames=3)
+        crouched = _standing_skeleton()
+        crouched[CK.LEFT_KNEE] = [0.40, 0.55, 0.0]
+        crouched[CK.RIGHT_KNEE] = [-0.40, 0.55, 0.0]
+
+        for _ in range(10):
+            gate.check(_make_skeleton(crouched), profile_check=True)
+
+        assert not gate.is_ready
+        assert gate.last_failure != PROFILE_CHECK_FAILURE

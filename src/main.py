@@ -562,6 +562,14 @@ class NowvaApp:
         if self.display_server:
             self.display_server.publish(event)
 
+    @staticmethod
+    def _profile_name(exercise_name: str | None) -> str:
+        """The biomechanics profile the pose process runs for an exercise (gating included),
+        so the display can pick that profile's score dimensions."""
+        from biomechanics.profiles import get_profile
+
+        return get_profile(exercise_name or DEFAULT_EXERCISE_NAME).name
+
     def _publish_workout_start(self) -> None:
         """Push the workout config to the display so the HUD knows targets."""
         exercise_name = self.state.get("workout.exercise_name") or DEFAULT_EXERCISE_NAME
@@ -578,6 +586,7 @@ class NowvaApp:
             "type": "workout",
             "action": "start",
             "exercise": exercise_name,
+            "profile": self._profile_name(exercise_name),
             "total_sets": total_sets,
             "target_reps": target_reps,
             "weight_lbs": weight,
@@ -633,6 +642,7 @@ class NowvaApp:
                     "type": "workout",
                     "action": "start",
                     "exercise": message.get("exercise_name"),
+                    "profile": self._profile_name(message.get("exercise_name")),
                     "total_sets": message.get("total_sets") or 0,
                     "target_reps": message.get("target_reps") or 0,
                     "weight_lbs": message.get("weight_lbs") or 0.0,

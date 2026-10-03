@@ -51,6 +51,7 @@ class RuleEngine:
         history_maxlen: int = 90,
         rules: Optional[List[FaultRule]] = None,
         capture_mode: Optional[str] = None,
+        reference: Optional[SessionReference] = None,
     ):
         """
         Initialize the rule engine.
@@ -63,6 +64,8 @@ class RuleEngine:
                    apply to each exercise.
             capture_mode: "single_camera" or "triangulated"; decides which
                    faults are observable. Defaults to NOWVA_MULTI_CAMERA.
+            reference: The exercise's session reference (profile hook
+                   create_session_reference); None builds the squat's.
         """
         self.config = config or get_config()
         self.history: deque = deque(maxlen=history_maxlen)
@@ -82,10 +85,12 @@ class RuleEngine:
         # The athlete's best rep this session (fatigue drift) and depth target.
         # Absolute thresholds never move from observed reps — a fault on the
         # first rep is still a fault.
-        depth_rule = self._depth_rule()
-        self.reference = SessionReference(
-            depth_tolerance_ratio=depth_rule.tolerance_ratio if depth_rule else 0.08,
-        )
+        if reference is None:
+            depth_rule = self._depth_rule()
+            reference = SessionReference(
+                depth_tolerance_ratio=depth_rule.tolerance_ratio if depth_rule else 0.08,
+            )
+        self.reference = reference
 
     def apply_body_proportion_scaling(self, proportions: BodyProportions) -> None:
         """Scale fault thresholds based on the user's body proportions.
@@ -165,7 +170,7 @@ class RuleEngine:
                 rep_number=rep_number,
             )
 
-            if fault is not None and self._tag_observability(fault):
+            if fault is not None and self.tag_observability(fault):
                 # Deduplicate same-fault reports within the dedup interval
                 if self._should_report_fault(fault, angles.timestamp):
                     faults.append(fault)
@@ -173,7 +178,7 @@ class RuleEngine:
 
         return faults
 
-    def _tag_observability(self, fault: FaultEvent) -> bool:
+    def tag_observability(self, fault: FaultEvent) -> bool:
         """Stamp how trustworthy the fault is; False when the camera setup cannot see it."""
         level = fault_observability(fault.fault_type, self.capture_mode)
         if level == NOT_OBSERVABLE:
@@ -219,7 +224,7 @@ class RuleEngine:
         fault = rule.judge_shallow_descent(
             depth_ratio, target, angles, rep_number, depth_cm_above_parallel,
         )
-        if fault is None or not self._tag_observability(fault):
+        if fault is None or not self.tag_observability(fault):
             return []
         return [fault]
 
@@ -243,7 +248,7 @@ class RuleEngine:
             else:
                 finish = getattr(rule, "finish_rep", None)
                 fault = finish(angles, rep_number) if finish is not None else None
-            if fault is None or not self._tag_observability(fault):
+            if fault is None or not self.tag_observability(fault):
                 continue
             if self._should_report_fault(fault, angles.timestamp):
                 faults.append(fault)

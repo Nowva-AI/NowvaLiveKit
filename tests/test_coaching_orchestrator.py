@@ -2051,3 +2051,422 @@ class TestIneffectiveCueFaults:
 
         rows = [{"fault_type": "hip_shift", "cue_key": None, "n_evaluated": 9, "n_effective": 0}]
         assert ineffective_cue_faults(rows) == set()
+
+
+# =============================================================================
+# OTHER EXERCISES: CUE MAP, RECORDED-ONLY VERDICTS, PRAISE, CONSTANT SETS, DEPTH
+# =============================================================================
+
+PRESS_FAULT_TO_CUE = {
+    fault_type: fault_type
+    for fault_type in (
+        "press_layback", "press_bar_forward", "press_lockout",
+        "press_leg_drive", "press_uneven", "press_velocity_loss",
+    )
+}
+RDL_FAULT_TO_CUE = {
+    "rdl_hip_sink": "rdl_hips_back",
+    "rdl_bar_drift": "rdl_bar_close",
+    "rdl_lockout": "rdl_finish_tall",
+    "rdl_bar_tilt": "rdl_level_bar",
+    "rdl_range_drift": "rdl_same_depth",
+    "rdl_tempo": "rdl_slow_down",
+    "rdl_partial": "rdl_lower",
+}
+DIAGNOSIS_WAIT_TOLERANCE_S = 0.1
+
+
+def _press_orchestrator(mock_callbacks, target_reps: int = 10) -> CoachingOrchestrator:
+    orch = _set_orchestrator(mock_callbacks, target_reps)
+    orch.set_exercise(
+        "Barbell Overhead Press", is_squat=False, fault_to_cue=PRESS_FAULT_TO_CUE,
+        reports_depth=False, profile_name="overhead_press",
+    )
+    return orch
+
+
+def _rdl_orchestrator(mock_callbacks, target_reps: int = 10) -> CoachingOrchestrator:
+    orch = _set_orchestrator(mock_callbacks, target_reps)
+    orch.set_exercise(
+        "Barbell Romanian Deadlift", is_squat=False, fault_to_cue=RDL_FAULT_TO_CUE,
+        reports_depth=False, profile_name="romanian_deadlift",
+    )
+    return orch
+
+
+def _verdict(
+    fault_type: str, severity: str, side: str | None = None,
+    observability: str = "observable", recorded_only: bool = False,
+) -> dict:
+    details = {"side": side, "observability": observability}
+    if recorded_only:
+        details["recorded_only"] = True
+    return {"fault_type": fault_type, "severity": severity, "details": details}
+
+
+async def _verdict_rep(orch, rep_number: int, *verdicts: dict, highlight_score=None) -> list:
+    """A rep whose verdicts arrive only in faults_detailed, as the bridge sends
+    them (recorded-only verdicts kept out of faults_in_rep); returns queued cues."""
+    faults_in_rep = list(dict.fromkeys(
+        v["fault_type"] for v in verdicts if not v["details"].get("recorded_only")
+    ))
+    features = {"exercise": "x", "highlight_score": highlight_score}
+    await orch.on_rep_complete(
+        rep_number, "", not faults_in_rep, faults_in_rep, max_depth_angle=None,
+        faults_detailed=list(verdicts), features=features,
+    )
+    return [e.cue_key for e in _drain_events(orch) if e.event_type == "cached_cue"]
+
+
+async def _heard(orch, cue_key: str, fault_type: str, after_rep: int, severity: str = "moderate") -> None:
+    await orch._dispatch_cached_cue(CoachingEvent(
+        CuePriority.FAULT_CUE, time.monotonic(), "cached_cue", cue_key,
+        data={"fault_type": fault_type, "severity": severity, "after_rep": after_rep},
+    ))
+
+
+async def _cued_uneven(orch) -> None:
+    """Rep 1: a moderate uneven press, cued and heard."""
+    assert await _verdict_rep(orch, 1, _verdict("press_uneven", "moderate", "left")) == ["press_uneven_left"]
+    await _heard(orch, "press_uneven_left", "press_uneven", 1)
+
+
+class TestExerciseCueMap:
+    def test_empty_cue_falls_back_to_the_exercise_map(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await orch.on_fault(None, "press_uneven", "moderate", observability="observable", side="left")
+            await orch.on_rep_complete(1, "", False, ["press_uneven"], max_depth_angle=None)
+            return [e.cue_key for e in _drain_events(orch) if e.event_type == "cached_cue"]
+
+        assert asyncio.run(_run()) == ["press_uneven_left"]
+
+    def test_squat_cue_never_fills_another_exercises_fault(self, mock_callbacks):
+        """The press has no "lockout" fault; the squat map would say "Stand tall"."""
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await orch.on_fault(None, "lockout", "moderate", observability="observable")
+            await orch.on_rep_complete(1, "", False, ["lockout"], max_depth_angle=None)
+            return [e.cue_key for e in _drain_events(orch) if e.event_type == "cached_cue"]
+
+        assert asyncio.run(_run()) == []
+
+    def test_without_a_map_the_squat_map_stays(self, mock_callbacks):
+        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
+
+        orch = CoachingOrchestrator(**mock_callbacks)
+        orch.set_exercise("Barbell Curl", is_squat=False)
+        assert orch.fault_to_cue == FAULT_TO_CUE_MAP
+
+    def test_press_cue_survives_suppressed_fault_message(self, mock_callbacks):
+        """Rep 2's fault message was dropped by the bridge cooldown; its verdict
+        still resolves through the profile map, and is cued again (2 per set)."""
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await orch.on_fault("press_uneven_left", "press_uneven", "moderate", observability="observable", side="left")
+            first = await _verdict_rep(orch, 1, _verdict("press_uneven", "moderate", "left"))
+            await _heard(orch, "press_uneven_left", "press_uneven", 1)
+            second = await _verdict_rep(orch, 2, _verdict("press_uneven", "moderate", "left"))
+            await _heard(orch, "press_uneven_left", "press_uneven", 2)
+            third = await _verdict_rep(orch, 3, _verdict("press_uneven", "moderate", "left"))
+            mild = await _verdict_rep(
+                orch, 4, _verdict("press_leg_drive", "mild", recorded_only=True),
+            )
+            return first, second, third, mild
+
+        assert asyncio.run(_run()) == (["press_uneven_left"], ["press_uneven_left"], [], [])
+
+
+class TestRecordedOnlyVerdicts:
+    def test_fault_message_with_no_cue_is_never_a_candidate(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await orch.on_fault(None, "press_uneven", "moderate", observability="observable", recorded_only=True)
+            candidates = dict(orch._rep_fault_candidates)
+            cues = await _verdict_rep(orch, 1, _verdict("press_uneven", "moderate", recorded_only=True))
+            return candidates, cues
+
+        assert asyncio.run(_run()) == ({}, [])
+        assert orch._recent_faults == []
+
+    def test_verdict_only_in_faults_detailed_is_never_cued(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        cues = asyncio.run(_verdict_rep(orch, 1, _verdict("press_uneven", "severe", recorded_only=True)))
+        assert cues == []
+
+    def test_three_mild_recorded_only_hip_sinks_are_never_cued(self, mock_callbacks):
+        orch = _rdl_orchestrator(mock_callbacks)
+
+        async def _run():
+            heard = []
+            for rep in (1, 2, 3):
+                await orch.on_fault(None, "rdl_hip_sink", "mild", observability="observable", recorded_only=True)
+                heard += await _verdict_rep(orch, rep, _verdict("rdl_hip_sink", "mild", recorded_only=True))
+            return heard
+
+        assert asyncio.run(_run()) == []
+
+    def test_never_counts_as_persists(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await _cued_uneven(orch)
+            await _verdict_rep(orch, 2, _verdict("press_uneven", "mild", "left", recorded_only=True))
+            return orch._pending_outcome
+
+        outcome = asyncio.run(_run())
+        assert outcome is not None and outcome.clean_reps == 1
+
+    def test_absent_from_set_counts_even_if_listed_in_faults_in_rep(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await orch.on_rep_complete(
+                1, "", True, ["press_uneven"], max_depth_angle=None,
+                faults_detailed=[_verdict("press_uneven", "mild", recorded_only=True)],
+            )
+
+        asyncio.run(_run())
+        summary = orch._build_set_summary()
+        assert summary["fault_summary"] == {}
+        assert summary["per_rep"][0]["faults"] == []
+
+    def test_recap_never_names_a_recorded_only_fault(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks, target_reps=2)
+        orch._diagnosis_wait_s = 0.0
+
+        async def _run():
+            for rep in (1, 2):
+                await _verdict_rep(orch, rep, _verdict("press_uneven", "mild", recorded_only=True))
+            await orch._speak_llm_set_recap(orch.last_set_data)
+
+        asyncio.run(_run())
+        prompt = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+        assert "one hand lagging" not in prompt
+        assert "Faults:" not in prompt
+
+
+class TestBetterPraise:
+    @pytest.mark.parametrize("hold", [("recorded", "clean"), ("clean", "recorded")])
+    def test_recorded_only_in_the_hold_window_plays_better_once(self, mock_callbacks, hold):
+        orch = _press_orchestrator(mock_callbacks)
+        recorded = _verdict("press_uneven", "mild", "left", recorded_only=True)
+
+        async def _run():
+            await _cued_uneven(orch)
+            heard = []
+            for rep, kind in zip((2, 3), hold):
+                heard.append(await _verdict_rep(orch, rep, *([recorded] if kind == "recorded" else [])))
+            heard.append(await _verdict_rep(orch, 4))
+            heard.append(await _verdict_rep(orch, 5))
+            return heard
+
+        assert asyncio.run(_run()) == [[], ["press_uneven_better"], [], []]
+        assert orch._pending_outcome is None
+
+    def test_clean_hold_window_plays_fixed(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await _cued_uneven(orch)
+            return [await _verdict_rep(orch, 2), await _verdict_rep(orch, 3)]
+
+        assert asyncio.run(_run()) == [[], ["press_uneven_fixed"]]
+
+    def test_missing_better_clip_plays_nothing_never_fixed(self, mock_callbacks):
+        mock_callbacks["get_cue_audio_fn"] = lambda key: bool(key) and not key.endswith("_better")
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await _cued_uneven(orch)
+            heard = await _verdict_rep(orch, 2, _verdict("press_uneven", "mild", recorded_only=True))
+            heard += await _verdict_rep(orch, 3)
+            heard += await _verdict_rep(orch, 4)
+            heard += await _verdict_rep(orch, 5)
+            return heard
+
+        heard = asyncio.run(_run())
+        assert heard == []
+        assert orch._pending_outcome is None
+
+    def test_rdl_hip_sink_better_then_a_new_cue_starts_a_new_outcome(self, mock_callbacks):
+        orch = _rdl_orchestrator(mock_callbacks)
+        recorded = _verdict("rdl_hip_sink", "mild", recorded_only=True)
+
+        async def _run():
+            heard = [await _verdict_rep(orch, 1, _verdict("rdl_hip_sink", "moderate"))]
+            await _heard(orch, "rdl_hips_back", "rdl_hip_sink", 1)
+            heard.append(await _verdict_rep(orch, 2, recorded))
+            heard.append(await _verdict_rep(orch, 3))
+            heard.append(await _verdict_rep(orch, 4, _verdict("rdl_hip_sink", "moderate")))
+            await _heard(orch, "rdl_hips_back", "rdl_hip_sink", 4)
+            heard.append(await _verdict_rep(orch, 5))
+            heard.append(await _verdict_rep(orch, 6))
+            return heard
+
+        assert asyncio.run(_run()) == [
+            ["rdl_hips_back"], [], ["rdl_hips_back_better"], ["rdl_hips_back"], [], ["rdl_hips_back_fixed"],
+        ]
+
+    def test_recap_says_better_not_gone(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks, target_reps=4)
+        orch._diagnosis_wait_s = 0.0
+
+        async def _run():
+            await _cued_uneven(orch)
+            await _verdict_rep(orch, 2, _verdict("press_uneven", "mild", recorded_only=True))
+            await _verdict_rep(orch, 3)
+            fragments = orch.state_fragments()
+            await _verdict_rep(orch, 4)
+            return fragments
+
+        fragments = asyncio.run(_run())
+        assert any("looking better" in part for part in fragments)
+        asyncio.run(orch._speak_llm_set_recap(orch.last_set_data))
+        prompt = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+        assert "isn't proven gone" in prompt
+        assert "it was gone" not in prompt
+
+
+class TestPerExerciseConstantSets:
+    def test_press_side_view_faults_are_silent_on_one_camera(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        orch._side_view_observable = False
+        assert asyncio.run(_verdict_rep(orch, 1, _verdict("press_layback", "severe"))) == []
+        assert asyncio.run(_verdict_rep(orch, 2, _verdict("press_uneven", "moderate"))) == ["press_uneven"]
+
+    def test_rdl_side_view_faults_are_silent_on_one_camera(self, mock_callbacks):
+        orch = _rdl_orchestrator(mock_callbacks)
+        orch._side_view_observable = False
+        cues = asyncio.run(_verdict_rep(
+            orch, 1, _verdict("rdl_bar_drift", "severe"), _verdict("rdl_lockout", "severe"),
+        ))
+        assert cues == []
+
+    def test_squat_side_view_set_does_not_silence_the_press(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        orch._side_view_observable = False
+        assert orch._is_unseen_side_view("press_bar_forward")
+        assert not orch._is_unseen_side_view("velocity_loss")
+
+    def test_severe_layback_is_cued_outside_the_focus(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        orch._side_view_observable = True
+
+        async def _run():
+            await _cued_uneven(orch)
+            layback = await _verdict_rep(orch, 2, _verdict("press_layback", "severe"))
+            leg_drive = await _verdict_rep(orch, 3, _verdict("press_leg_drive", "severe"))
+            return layback, leg_drive
+
+        layback, leg_drive = asyncio.run(_run())
+        assert layback == ["press_layback"]
+        assert "press_leg_drive" not in leg_drive
+
+    def test_knee_cave_is_not_the_press_safety_fault(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+
+        async def _run():
+            await _cued_uneven(orch)
+            await orch.on_fault("knees_out", "knee_valgus", "severe", observability="observable")
+            await orch.on_rep_complete(2, "", False, ["knee_valgus"], max_depth_angle=None)
+            return [e.cue_key for e in _drain_events(orch) if e.event_type == "cached_cue"]
+
+        assert asyncio.run(_run()) == []
+
+    def test_unknown_profile_keeps_the_squat_sets(self, mock_callbacks):
+        orch = _set_orchestrator(mock_callbacks)
+        orch.set_exercise("Barbell Curl", is_squat=False, profile_name="curl")
+        orch._side_view_observable = False
+        assert orch._is_unseen_side_view("velocity_loss")
+
+    def test_squat_symptoms_never_pick_a_press_focus(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        orch.carry_focus_from(_diagnosis_implicating("knee_not_tracking_toes"))
+        assert orch.set_focus_fault is None
+
+
+class TestDepthAndDiagnosisFlags:
+    def _recap_prompt(self, mock_callbacks, orch, reps: list) -> str:
+        orch._diagnosis_wait_s = 0.0
+
+        async def _run():
+            for rep_number, verdicts, score in reps:
+                await _verdict_rep(orch, rep_number, *verdicts, highlight_score=score)
+            await orch._speak_llm_set_recap(orch.last_set_data)
+
+        asyncio.run(_run())
+        return mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+
+    def test_rep_entries_carry_no_depth(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        asyncio.run(_verdict_rep(orch, 1, highlight_score=0.42))
+        summary = orch._build_set_summary()
+        assert summary["avg_depth"] is None and summary["depth_consistency"] is None
+        [entry] = summary["per_rep"]
+        assert set(entry) == {"rep", "clean", "faults", "duration_ms", "highlight_score"}
+        assert entry["highlight_score"] == pytest.approx(0.42, abs=1e-9)
+
+    def test_press_best_rep_is_named_by_highlight_score(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks, target_reps=3)
+        prompt = self._recap_prompt(mock_callbacks, orch, [
+            (1, [], 0.40), (2, [], 0.61), (3, [_verdict("press_uneven", "moderate")], 0.90),
+        ])
+        assert "Best rep: rep 2, their fastest clean press." in prompt
+        assert "deepest" not in prompt and "Depth" not in prompt
+
+    def test_rdl_best_rep_is_the_most_hips_back(self, mock_callbacks):
+        orch = _rdl_orchestrator(mock_callbacks, target_reps=2)
+        prompt = self._recap_prompt(mock_callbacks, orch, [(1, [], 0.7), (2, [], 0.5)])
+        assert "Best rep: rep 1, their most hips-back clean rep." in prompt
+        assert "deepest" not in prompt
+
+    def test_no_highlight_score_means_no_best_rep_line(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks, target_reps=2)
+        prompt = self._recap_prompt(mock_callbacks, orch, [(1, [], None), (2, [], float("nan"))])
+        assert "Best rep" not in prompt
+        assert "deepest" not in prompt
+
+    def test_squat_keeps_the_deepest_clean_rep_line(self, mock_callbacks):
+        orch = CoachingOrchestrator(**mock_callbacks)
+        lines = orch._build_rep_highlights([{"rep": 3, "depth_angle": 95.0, "clean": True, "faults": []}])
+        assert lines == ["Best rep: rep 3, their deepest clean rep."]
+
+    def test_motivation_context_has_no_depth(self, mock_callbacks):
+        orch = _press_orchestrator(mock_callbacks)
+        assert "last_depth" not in orch._build_motivation_context(3, "", True)
+
+    def test_waits_for_diagnosis_gates_the_recap_wait(self, mock_callbacks):
+        orch = CoachingOrchestrator(**mock_callbacks)
+        orch.set_exercise("Barbell Deadlift", is_squat=False, waits_for_diagnosis=True)
+        wait_s = 0.3
+        orch._diagnosis_wait_s = wait_s
+        data = {"set_number": 1, "diagnosis_set_number": 1, "total_reps": 1, "clean_reps": 1,
+                "fault_summary": {}, "per_rep": []}
+        started = time.monotonic()
+        asyncio.run(orch._speak_llm_set_recap(data))
+        assert time.monotonic() - started >= wait_s - DIAGNOSIS_WAIT_TOLERANCE_S
+
+    def test_exercise_recap_keeps_its_own_side_view_set(self, mock_callbacks):
+        """The press's cache_cues can land while the squat's exercise recap
+        waits for its diagnosis; the recap still filters as the squat."""
+        orch = _orchestrator_with_next_exercise(mock_callbacks)
+        orch._side_view_observable = False
+        orch._diagnosis_wait_s = 0.0
+
+        async def _run():
+            await orch.on_rep_complete(1, "parallel", False, ["hip_shoot"])
+            recap = [e for e in _drain_events(orch) if e.event_type == "llm_exercise_recap"][0]
+            orch.set_exercise(
+                "Barbell Overhead Press", is_squat=False, fault_to_cue=PRESS_FAULT_TO_CUE,
+                reports_depth=False, profile_name="overhead_press",
+            )
+            await orch._speak_llm_exercise_recap(recap.data)
+
+        asyncio.run(_run())
+        prompt = mock_callbacks["generate_llm_reply_fn"].call_args[0][0]
+        assert "hips rising" not in prompt

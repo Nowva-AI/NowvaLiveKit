@@ -99,6 +99,40 @@ class CocoKeypoints:
     RIGHT_HEEL = 20
 
 
+# Snake-case name of every keypoint index, as tracking messages report them.
+KEYPOINT_NAMES: Dict[int, str] = {
+    CocoKeypoints.NOSE: "nose",
+    CocoKeypoints.LEFT_EYE: "left_eye",
+    CocoKeypoints.RIGHT_EYE: "right_eye",
+    CocoKeypoints.LEFT_EAR: "left_ear",
+    CocoKeypoints.RIGHT_EAR: "right_ear",
+    CocoKeypoints.LEFT_SHOULDER: "left_shoulder",
+    CocoKeypoints.RIGHT_SHOULDER: "right_shoulder",
+    CocoKeypoints.LEFT_ELBOW: "left_elbow",
+    CocoKeypoints.RIGHT_ELBOW: "right_elbow",
+    CocoKeypoints.LEFT_WRIST: "left_wrist",
+    CocoKeypoints.RIGHT_WRIST: "right_wrist",
+    CocoKeypoints.LEFT_HIP: "left_hip",
+    CocoKeypoints.RIGHT_HIP: "right_hip",
+    CocoKeypoints.LEFT_KNEE: "left_knee",
+    CocoKeypoints.RIGHT_KNEE: "right_knee",
+    CocoKeypoints.LEFT_ANKLE: "left_ankle",
+    CocoKeypoints.RIGHT_ANKLE: "right_ankle",
+    CocoKeypoints.LEFT_FOOT_INDEX: "left_foot_index",
+    CocoKeypoints.RIGHT_FOOT_INDEX: "right_foot_index",
+    CocoKeypoints.LEFT_HEEL: "left_heel",
+    CocoKeypoints.RIGHT_HEEL: "right_heel",
+}
+
+# The whole lower body: what a squat must see measured to trust a frame, and
+# the default keypoints whose loss means tracking is lost.
+LEG_KEYPOINTS: Tuple[int, ...] = (
+    CocoKeypoints.LEFT_HIP, CocoKeypoints.RIGHT_HIP,
+    CocoKeypoints.LEFT_KNEE, CocoKeypoints.RIGHT_KNEE,
+    CocoKeypoints.LEFT_ANKLE, CocoKeypoints.RIGHT_ANKLE,
+)
+
+
 class MultiViewPose(BaseModel):
     """Pose data from multiple camera views for triangulation."""
     views: Dict[str, Skeleton2D]  # camera_id -> Skeleton2D
@@ -494,8 +528,9 @@ class RepData(BaseModel):
 
     @property
     def is_clean(self) -> bool:
-        """Return True if rep had no significant faults."""
-        return not any(f.is_significant for f in self.faults)
+        """True when the rep had no significant fault. A recorded-only verdict
+        (below its fault's start tier) is not trusted enough to make a rep unclean."""
+        return not any(f.is_significant and not f.details.get("recorded_only") for f in self.faults)
 
     @property
     def tempo_ratio(self) -> float:
@@ -584,6 +619,13 @@ class PipelineFrame(BaseModel):
     # Max depth class of a descent rejected for insufficient depth.
     # Set only on the frame the shallow rep completes.
     shallow_rep_class: Optional[int] = None
+    # An exercise analyser rejected a rep with a shallow_rep fault this frame:
+    # a shallow_rep message is due, with this cue (None = cue-less).
+    analyzer_shallow_rep: bool = False
+    shallow_rep_cue: Optional[str] = None
+    # Set on the frame the camera-pitch delta tripwire revokes the mount's
+    # certification for the session: the measured change in degrees.
+    pitch_certification_revoked_deg: Optional[float] = None
 
     # Tracking status. missing_keypoints: leg keypoints (hips, knees, ankles)
     # this capture did not measure; None when no new frame was captured.

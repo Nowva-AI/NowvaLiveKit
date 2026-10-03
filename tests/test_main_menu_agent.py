@@ -62,3 +62,51 @@ class TestShutdownConfirmation:
         _user_turn(main_menu)
         _shutdown(main_menu, confirmed=True)
         assert not main_menu.state.get("shutdown_requested")
+
+
+def _quick_exercise(agent: MainMenuAgent, exercise_name: str, monkeypatch: pytest.MonkeyPatch):
+    """Run start_quick_exercise; returns the carried task's kwargs, or the decline text."""
+    import agent.agents.main_menu_agent as main_menu_module
+
+    async def _carry(task):
+        return task
+
+    monkeypatch.setattr(main_menu_module, "CollectExerciseInfoTask", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent, "_carry_context_to", _carry)
+    monkeypatch.setattr(agent, "_publish_visual", lambda event: None)
+    return asyncio.run(agent.start_quick_exercise(exercise_name, None))
+
+
+class TestQuickExerciseCoachingGate:
+    def test_gated_press_is_declined(self, main_menu: MainMenuAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+        from biomechanics.profiles import find_profile_class
+
+        monkeypatch.setattr(find_profile_class("Barbell Overhead Press"), "coaching_ready", False)
+        result = _quick_exercise(main_menu, "ohp", monkeypatch)
+        assert "can't coach Barbell Overhead Press on camera yet" in result[1]
+
+    def test_ready_press_starts(self, main_menu: MainMenuAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+        from biomechanics.profiles import find_profile_class
+
+        monkeypatch.setattr(find_profile_class("Barbell Overhead Press"), "coaching_ready", True)
+        task = _quick_exercise(main_menu, "strict presses", monkeypatch)
+        assert task["exercise_name"] == "Barbell Overhead Press"
+
+    def test_ready_rdl_starts_from_a_casual_name(
+        self, main_menu: MainMenuAgent, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from biomechanics.profiles import find_profile_class
+
+        monkeypatch.setattr(find_profile_class("Romanian Deadlift"), "coaching_ready", True)
+        task = _quick_exercise(main_menu, "RDLs", monkeypatch)
+        assert task["exercise_name"] == "Romanian Deadlift"
+
+    def test_exercise_without_a_profile_is_declined(
+        self, main_menu: MainMenuAgent, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = _quick_exercise(main_menu, "bench press", monkeypatch)
+        assert "on camera yet" in result[1]
+
+    def test_squat_still_starts(self, main_menu: MainMenuAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+        task = _quick_exercise(main_menu, "back squat", monkeypatch)
+        assert task["exercise_name"] == "Barbell Back Squat"

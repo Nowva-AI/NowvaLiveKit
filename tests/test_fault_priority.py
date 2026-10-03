@@ -48,6 +48,15 @@ CONTRACT_CUE_KEYS = {
 
 SIDED_CUE_KEYS = ["knees_out", "heels_down", "even_it_out", "square_feet"]
 
+RDL_PRIORITY_ORDER = [
+    "rdl_hip_sink", "rdl_bar_drift", "rdl_lockout", "rdl_bar_tilt",
+    "rdl_range_drift", "rdl_tempo", "rdl_partial",
+]
+PRESS_PRIORITY_ORDER = [
+    "press_layback", "press_bar_forward", "press_lockout",
+    "press_leg_drive", "press_uneven", "press_velocity_loss",
+]
+
 
 def _orchestrator(get_cue_audio_fn=lambda key: bool(key)) -> CoachingOrchestrator:
     return CoachingOrchestrator(
@@ -78,6 +87,18 @@ class TestPriorityOrder:
     def test_unlisted_faults_rank_after_every_squat_fault(self):
         assert fault_cue_priority("forward_lean") == DEFAULT_FAULT_CUE_PRIORITY
         assert DEFAULT_FAULT_CUE_PRIORITY > fault_cue_priority("velocity_loss")
+
+    def test_rdl_ranks_follow_the_plan_from_40(self):
+        priorities = [fault_cue_priority(fault_type) for fault_type in RDL_PRIORITY_ORDER]
+        assert priorities == list(range(40, 40 + len(RDL_PRIORITY_ORDER)))
+
+    def test_press_ranks_follow_the_plan_from_50(self):
+        priorities = [fault_cue_priority(fault_type) for fault_type in PRESS_PRIORITY_ORDER]
+        assert priorities == list(range(50, 50 + len(PRESS_PRIORITY_ORDER)))
+
+    def test_press_events_without_a_cue_have_no_rank(self):
+        for fault_type in ("press_grip", "press_missed"):
+            assert fault_cue_priority(fault_type) == DEFAULT_FAULT_CUE_PRIORITY
 
 
 class TestFaultToCueMap:

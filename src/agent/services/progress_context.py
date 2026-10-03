@@ -32,7 +32,35 @@ FAULT_LABELS = {
     "depth_drift": "reps getting shallower",
     "velocity_loss": "reps slowing down",
     "forward_lean": "leaning forward",
+    # Overhead press
+    "press_layback": "leaning back too far under the bar",
+    "press_bar_forward": "finishing with the bar out in front",
+    "press_lockout": "not locking the elbows out overhead",
+    "press_leg_drive": "bending the knees to drive the bar up",
+    "press_uneven": "one hand lagging, bar tilting",
+    "press_velocity_loss": "reps slowing down",
+    "press_grip": "grip set too wide or too narrow",
+    "press_missed": "a press that stalled before lockout (not counted)",
+    # Romanian deadlift
+    "rdl_hip_sink": "letting the hips sink (squatting it) instead of pushing them back",
+    "rdl_bar_drift": "the bar drifting away from the legs",
+    "rdl_lockout": "not finishing straight and tall at the top",
+    "rdl_bar_tilt": "the bar tilting to one side at the bottom",
+    "rdl_range_drift": "reps getting shorter than their own range",
+    "rdl_tempo": "lowering the bar too fast",
+    "rdl_partial": "stopping too high for the rep to count",
 }
+
+# How progress lines name an exercise profile's sessions
+EXERCISE_PROGRESS_NAMES = {
+    "squat": "squat",
+    "overhead_press": "overhead press",
+    "romanian_deadlift": "Romanian deadlift",
+}
+
+
+def _exercise_phrase(exercise: str) -> str:
+    return EXERCISE_PROGRESS_NAMES.get(exercise, exercise.replace("_", " "))
 
 
 def _days_ago_phrase(days_ago: int) -> str:
@@ -54,12 +82,13 @@ def _weakest_dimension(per_dimension: dict) -> tuple[str, float] | None:
     return DIMENSION_LABELS.get(key, key), per_dimension[key]
 
 
-def build_greeting_progress_line(baseline: dict | None) -> str | None:
+def build_greeting_progress_line(baseline: dict | None, exercise: str = "squat") -> str | None:
     """One compact context block for the workout greeting."""
     if not baseline:
         return None
     parts = [
-        f"PROGRESS CONTEXT: last squat session was {_days_ago_phrase(baseline.get('days_ago', 0))}"
+        f"PROGRESS CONTEXT: last {_exercise_phrase(exercise)} session was "
+        f"{_days_ago_phrase(baseline.get('days_ago', 0))}"
     ]
     if baseline.get("mean_score") is not None:
         parts.append(f"form score {round(baseline['mean_score'] * 100)} out of 100")
@@ -160,15 +189,16 @@ def build_session_comparison_line(
 
 
 def build_progress_report(
-    score_rows: list[dict], baseline: dict | None
+    score_rows: list[dict], baseline: dict | None, exercise: str = "squat"
 ) -> str:
     """Text progress report for the main-menu view_progress tool."""
+    name = _exercise_phrase(exercise)
     if not score_rows:
         return (
-            "No squat sessions recorded yet. Their progress tracking starts "
+            f"No {name} sessions recorded yet. Their progress tracking starts "
             "with their first workout."
         )
-    lines = [f"{len(score_rows)} squat sets recorded."]
+    lines = [f"{len(score_rows)} {name} sets recorded."]
 
     if baseline:
         summary = f"Last session: {_days_ago_phrase(baseline.get('days_ago', 0))}"

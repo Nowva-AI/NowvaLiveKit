@@ -5,7 +5,7 @@ Loads configuration from YAML files and provides typed access to settings.
 """
 
 import os
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Set, Tuple
 from pathlib import Path
 
 import yaml
@@ -23,10 +23,19 @@ class PipelineConfig(BaseModel):
 
 
 class CaptureConfig(BaseModel):
-    """Camera capture configuration."""
+    """Camera capture configuration, and the single camera's physical mount.
+
+    The mount fields describe the installation, not an estimate: mount_source is
+    "rack" (the product's fixed bracket), "inclinometer" (measured at setup) or
+    "none". mount_pitch_deg is positive when the lens tilts up, the sign of the
+    pipeline's standing-pitch estimate. Env NOWVA_CAMERA_PITCH_DEG overrides it.
+    """
     source: str = "webcam"
     device_id: int = 0
     resolution: Tuple[int, int] = (1280, 720)
+    mount_source: Literal["rack", "inclinometer", "none"] = "none"
+    mount_pitch_deg: Optional[float] = None
+    mount_height_m: Optional[float] = None
 
 
 class PoseConfig(BaseModel):
@@ -182,6 +191,209 @@ class FootPlacementConfig(BaseModel):
     flare_severe_deg: float = 22.0
 
 
+class HipPositionCounterConfig(BaseModel):
+    """Hip-position-based rep counter thresholds.
+
+    Uses the same signal as the post-hoc rep segmenter (hip_mid_y - ankle_mid_y)
+    but in a causal 4-state machine suitable for real-time counting.
+    """
+    # Velocity thresholds (cm/s)
+    entry_vel_threshold: float = 3.0        # velocity > this → STANDING→DESCENDING
+    bottom_vel_threshold: float = 5.0       # abs(vel) < this → at bottom
+    ascending_vel_threshold: float = 3.0    # vel < -this → BOTTOM→ASCENDING
+
+    # Position thresholds (cm)
+    min_depth_cm: float = 10.0              # minimum displacement for valid rep (prominence)
+    standing_return_cm: float = 3.0         # must return within this of baseline
+
+    # Minimum time in each state (prevents noise flipping): 3, 2 and 3 frames
+    # at 30 fps. Seconds, not frames, so 12 fps capture keeps the same timing.
+    min_descending_s: float = 0.1
+    min_bottom_s: float = 0.067
+    min_ascending_s: float = 0.1
+
+    # Rep validation
+    min_rep_duration_s: float = 0.5         # 15 frames at 30 fps
+
+    # Velocity is the least-squares slope over the samples of the last this
+    # many seconds. None = the last 5 samples (the squat), whatever the rate.
+    velocity_window_s: Optional[float] = None
+
+
+class SeverityTiers(BaseModel):
+    """Mild / moderate / severe thresholds of one fault."""
+    mild: float
+    moderate: float
+    severe: float
+
+
+def _tiers(mild: float, moderate: float, severe: float):
+    return Field(default_factory=lambda: SeverityTiers(mild=mild, moderate=moderate, severe=severe))
+
+
+def _press_counter() -> HipPositionCounterConfig:
+    # docs/exercises/ohp.md §3.4: signal is the bar (wrists) above the shoulders, cm.
+    return HipPositionCounterConfig(
+        entry_vel_threshold=12.0,
+        bottom_vel_threshold=6.0,
+        ascending_vel_threshold=10.0,
+        min_depth_cm=20.0,
+        standing_return_cm=6.0,
+        min_descending_s=0.25,
+        min_bottom_s=0.08,
+        min_ascending_s=0.25,
+        min_rep_duration_s=0.8,
+        velocity_window_s=0.40,
+    )
+
+
+class PressRackConfig(BaseModel):
+    """Front-rack readiness predicate (ohp.md §3.2). Ratios are of the arm-length estimate."""
+    min_arm_confidence: float = 0.3
+    bar_height_min_ratio: float = -0.25
+    bar_height_max_ratio: float = 0.30
+    min_forearm_rise_m: float = 0.10
+    max_hand_level_ratio: float = 0.08
+    min_grip_to_shoulder_width_ratio: float = 0.9
+    reference_frames: int = 5
+    reference_window_s: float = 2.0
+    # Rep signal: NaN below this fraction of the torso under the shoulders
+    # (hands at the sides), or when a wrist or shoulder is below this confidence.
+    rack_floor_torso_ratio: float = 0.35
+    min_signal_confidence: float = 0.1
+    # Signal lost this long mid-set is a re-rack: the pooled rack tilt restarts.
+    re_rack_reset_s: float = 2.0
+
+
+class PressAcceptanceConfig(BaseModel):
+    """When a press counts (ohp.md §3.5)."""
+    setup_min_samples: int = 3
+    setup_window_s: float = 0.5
+    top_height_min_ratio: float = 0.80
+    clipped_wrists_min_ratio: float = 0.60
+    missed_min_travel_cm: float = 20.0
+
+
+class PressCameraConfig(BaseModel):
+    """Single-camera mount bands and the certification delta tripwire (ohp.md §4.1)."""
+    tripwire_deg: float = 3.0
+    level_band_deg: float = 3.0
+    tilted_band_deg: float = 10.0
+
+
+class PressConfig(BaseModel):
+    """Standing barbell overhead press (docs/exercises/ohp.md): counter, rack readiness,
+    ROM acceptance, camera bands and fault tiers. Angles in degrees; bar_forward is a
+    fraction of the arm length, leg_drive of the leg length."""
+    counter: HipPositionCounterConfig = Field(default_factory=_press_counter)
+    arm_to_torso_ratio: float = 1.15
+    rack: PressRackConfig = Field(default_factory=PressRackConfig)
+    acceptance: PressAcceptanceConfig = Field(default_factory=PressAcceptanceConfig)
+    camera: PressCameraConfig = Field(default_factory=PressCameraConfig)
+    # cos 20°: shoulder width at or above this fraction of the reference = facing the camera.
+    facing_min_width_ratio: float = 0.94
+    lockout_side_min_difference_deg: float = 8.0
+    layback: SeverityTiers = _tiers(12.0, 18.0, 25.0)
+    bar_forward: SeverityTiers = _tiers(0.10, 0.17, 0.25)
+    lockout: SeverityTiers = _tiers(15.0, 25.0, 35.0)
+    leg_drive: SeverityTiers = _tiers(0.035, 0.06, 0.10)
+    uneven: SeverityTiers = _tiers(4.0, 6.0, 9.0)
+    grip: SeverityTiers = _tiers(10.0, 15.0, 22.0)
+    velocity_loss_pct: SeverityTiers = _tiers(20.0, 30.0, 40.0)
+    # Recorded-only fault types the recap may mention, hedged (filled from validation).
+    hedged_recap_faults: Set[str] = Field(default_factory=set)
+    tilted_band_validated: bool = False
+    uneven_promoted: bool = False
+
+
+def _rdl_counter() -> HipPositionCounterConfig:
+    # docs/exercises/rdl.md §3.5: signal is the shoulders above the ankles, cm.
+    return HipPositionCounterConfig(
+        entry_vel_threshold=4.0,
+        bottom_vel_threshold=5.0,
+        ascending_vel_threshold=4.0,
+        min_depth_cm=8.0,
+        standing_return_cm=4.0,
+        min_descending_s=0.25,
+        min_bottom_s=0.08,
+        min_ascending_s=0.25,
+        min_rep_duration_s=0.8,
+    )
+
+
+class RdlRomConfig(BaseModel):
+    """When an RDL counts and when a partial is cued (rdl.md §3.6)."""
+    count_floor_travel: float = 0.45
+    partial_min_travel: float = 0.25
+    fallback_floor_deg: float = 50.0
+    partial_min_duration_s: float = 1.0
+    partial_cue_streak: int = 2
+    max_partial_cues_per_set: int = 2
+    highlight_range_tolerance_deg: float = 8.0
+    reference_cap_deg: float = 95.0
+
+
+class RdlCameraConfig(BaseModel):
+    """Single-camera pitch guard and mount certification (rdl.md §3.2)."""
+    # Gross tripwire on uncertified installs: |camera_pitch - posture_offset| beyond this.
+    tripwire_deg: float = 8.0
+    posture_offset_deg: float = 4.0
+    correct_by_mount_angle: bool = False
+    # Certified mounts: delta tripwire on the set-averaged ankle->hip tilt.
+    delta_tripwire_deg: float = 2.5
+    delta_min_frames: int = 36
+    reference_sets: int = 3
+    certified_max_pitch_deg: float = 2.0
+    lens_min_height_m: float = 0.8
+    lens_max_height_m: float = 1.1
+    lens_max_below_hip_m: float = 0.10
+    ankle_height_m: float = 0.075
+
+
+class RdlLockoutConfig(BaseModel):
+    """Finish pitch (deg) hips-not-through (forward) and leaning back (back)."""
+    forward_mild: float = 10.0
+    forward_moderate: float = 15.0
+    forward_severe: float = 22.0
+    back_mild: float = 8.0
+    back_moderate: float = 12.0
+    back_severe: float = 18.0
+
+
+class RdlPartialConfig(BaseModel):
+    """Bar travel short of the count floor; any shortfall is mild."""
+    moderate: float = 0.07
+    severe: float = 0.14
+
+
+class RdlTempoConfig(BaseModel):
+    """5-95% descent times (s) below these are too fast."""
+    mild_seconds: float = 0.67
+    moderate_seconds: float = 0.50
+    severe_seconds: float = 0.33
+
+
+class RdlConfig(BaseModel):
+    """Barbell Romanian deadlift from the rack (docs/exercises/rdl.md): counter, ROM
+    acceptance, camera certification and fault tiers. hip_sink is a fraction of hip
+    height, bar_drift of the ankle-to-toe length ahead of midfoot, angles in degrees."""
+    counter: HipPositionCounterConfig = Field(default_factory=_rdl_counter)
+    rom: RdlRomConfig = Field(default_factory=RdlRomConfig)
+    camera: RdlCameraConfig = Field(default_factory=RdlCameraConfig)
+    # Readiness: both wrists this far below the hip midpoint.
+    readiness_wrist_below_hip_m: float = 0.05
+    # Start tier of the rig-only faults until measured gravity is installed.
+    rig_min_cue_severity: Literal["mild", "moderate", "severe"] = "moderate"
+    hip_sink: SeverityTiers = _tiers(0.12, 0.15, 0.19)
+    bar_drift: SeverityTiers = _tiers(0.25, 0.40, 0.60)
+    lockout: RdlLockoutConfig = Field(default_factory=RdlLockoutConfig)
+    bar_tilt: SeverityTiers = _tiers(4.0, 7.0, 10.0)
+    range_drift: SeverityTiers = _tiers(8.0, 15.0, 25.0)
+    partial: RdlPartialConfig = Field(default_factory=RdlPartialConfig)
+    tempo: RdlTempoConfig = Field(default_factory=RdlTempoConfig)
+    hedged_recap_faults: Set[str] = Field(default_factory=set)
+
+
 class FaultsConfig(BaseModel):
     """Fault detection configuration."""
     depth: DepthFaultConfig = Field(default_factory=DepthFaultConfig)
@@ -197,6 +409,8 @@ class FaultsConfig(BaseModel):
     descent_control: DescentControlConfig = Field(default_factory=DescentControlConfig)
     velocity_loss: VelocityLossConfig = Field(default_factory=VelocityLossConfig)
     foot_placement: FootPlacementConfig = Field(default_factory=FootPlacementConfig)
+    press: PressConfig = Field(default_factory=PressConfig)
+    rdl: RdlConfig = Field(default_factory=RdlConfig)
 
 
 class BiLSTMConfig(BaseModel):
@@ -244,31 +458,6 @@ class BarbellTrackingConfig(BaseModel):
     tilt_asym_mild_cm: float = 3.0
     tilt_asym_moderate_cm: float = 6.0
     tilt_asym_severe_cm: float = 10.0
-
-
-class HipPositionCounterConfig(BaseModel):
-    """Hip-position-based rep counter thresholds.
-
-    Uses the same signal as the post-hoc rep segmenter (hip_mid_y - ankle_mid_y)
-    but in a causal 4-state machine suitable for real-time counting.
-    """
-    # Velocity thresholds (cm/s)
-    entry_vel_threshold: float = 3.0        # velocity > this → STANDING→DESCENDING
-    bottom_vel_threshold: float = 5.0       # abs(vel) < this → at bottom
-    ascending_vel_threshold: float = 3.0    # vel < -this → BOTTOM→ASCENDING
-
-    # Position thresholds (cm)
-    min_depth_cm: float = 10.0              # minimum displacement for valid rep (prominence)
-    standing_return_cm: float = 3.0         # must return within this of baseline
-
-    # Minimum time in each state (prevents noise flipping): 3, 2 and 3 frames
-    # at 30 fps. Seconds, not frames, so 12 fps capture keeps the same timing.
-    min_descending_s: float = 0.1
-    min_bottom_s: float = 0.067
-    min_ascending_s: float = 0.1
-
-    # Rep validation
-    min_rep_duration_s: float = 0.5         # 15 frames at 30 fps
 
 
 class CoachingConfig(BaseModel):

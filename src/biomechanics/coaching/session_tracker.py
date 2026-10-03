@@ -6,6 +6,7 @@ Monitors the timing gap between reps to detect when a set ends
 statistics and triggers set-complete messages through the IPCBridge.
 """
 
+import math
 import statistics
 import time
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,7 @@ from biomechanics.diagnosis.types import (
     SetFeatures,
 )
 from biomechanics.faults.observability import capture_mode_from_env
+from biomechanics.utils.frame_context import HIGHLIGHT_SCORE_FEATURE
 from biomechanics.utils.types import RepData
 
 
@@ -76,12 +78,21 @@ class SessionTracker:
         self._baseline: dict | None = None
         # The diagnosis engine models squats only; off for any other exercise.
         self.diagnosis_enabled: bool = True
+        # The active exercise speaks about depth; when False the summaries
+        # carry no depth (None), and no depth highlight is given.
+        self.reports_depth: bool = True
+        # The active profile's set-level diagnosis (create_set_diagnosis), or None.
+        self.set_diagnosis = None
+        # Session metadata for the active exercise (grip, plates...), from the agent.
+        self.exercise_meta: dict = {}
 
         # Assessment mode: per-rep rolling-window diagnosis
         self._assessment_mode: bool = False
 
         # Best composite rep score this set, for "best rep so far" highlights.
         self._set_best_score: float = -1.0
+        # Best highlight_score this set (exercises the diagnosis engine does not score).
+        self._set_best_highlight: float = -math.inf
         self.capture_mode: str = capture_mode_from_env()
 
         # Last-rep snapshot for on-demand replay
@@ -103,7 +114,7 @@ class SessionTracker:
     def _diagnosing(self) -> bool:
         return self.diagnosis_enabled and self._athlete_params is not None
 
-    def on_exercise_changed(self, diagnosis_enabled: bool) -> None:
+    def on_exercise_changed(self, diagnosis_enabled: bool, reports_depth: bool = True) -> None:
         """A new exercise starts: nothing from the previous one may be replayed
         or diagnosed, diagnosis runs only if the engine models the new one, and
         set numbers restart at 1 as they do in the workout plan."""
@@ -111,6 +122,7 @@ class SessionTracker:
             # Skipped mid-set: the partial set belongs to the old exercise.
             self._end_current_set()
         self.diagnosis_enabled = diagnosis_enabled
+        self.reports_depth = reports_depth
         self.reset_rep_buffers()
         self._last_set_diagnosis = None
         self.current_set_number = 0
@@ -143,6 +155,7 @@ class SessionTracker:
             self.current_set_reps = []
             self.set_active = True
             self._set_best_score = -1.0
+            self._set_best_highlight = -math.inf
 
         self.current_set_reps.append(rep)
 
@@ -204,7 +217,7 @@ class SessionTracker:
     ) -> list[str]:
         """What went right this rep, for positive reinforcement."""
         highlights: list[str] = []
-        if rep.depth_target_met:
+        if rep.depth_target_met and self.reports_depth:
             highlights.append("depth_target_met")
         if rep.is_clean:
             highlights.append("clean")
@@ -216,6 +229,13 @@ class SessionTracker:
                 if len(self.current_set_reps) > 1:
                     highlights.append("best_rep_so_far")
                 self._set_best_score = score
+        elif not self._diagnosing and rep.is_clean:
+            # An exercise the diagnosis engine does not score names its own best rep.
+            highlight = rep.features.get(HIGHLIGHT_SCORE_FEATURE)
+            if isinstance(highlight, (int, float)) and math.isfinite(highlight) and highlight > self._set_best_highlight:
+                if math.isfinite(self._set_best_highlight):
+                    highlights.append("best_rep_so_far")
+                self._set_best_highlight = highlight
         return highlights
 
     def _run_assessment_diagnosis(self, rep_number: int) -> None:
@@ -404,13 +424,18 @@ class SessionTracker:
         self, set_number: int, reps: List[RepData]
     ) -> Dict[str, Any]:
         """Compute summary stats for a completed set."""
-        depths = [r.max_depth_angle for r in reps]
-        avg_depth = statistics.mean(depths) if depths else 0.0
-        depth_consistency = statistics.stdev(depths) if len(depths) > 1 else 0.0
+        avg_depth: float | None = None
+        depth_consistency: float | None = None
+        if self.reports_depth:
+            depths = [r.max_depth_angle for r in reps]
+            avg_depth = round(statistics.mean(depths) if depths else 0.0, 1)
+            depth_consistency = round(statistics.stdev(depths) if len(depths) > 1 else 0.0, 1)
 
         fault_summary: Dict[str, Dict[str, Any]] = {}
         for rep in reps:
             for fault in rep.faults:
+                if fault.details.get("recorded_only"):
+                    continue
                 key = fault.fault_type
                 if key not in fault_summary:
                     fault_summary[key] = {"count": 0, "total_severity": 0.0}
@@ -423,8 +448,8 @@ class SessionTracker:
             "set_number": set_number,
             "total_reps": len(reps),
             "clean_reps": sum(1 for r in reps if r.is_clean),
-            "avg_depth": round(avg_depth, 1),
-            "depth_consistency": round(depth_consistency, 1),
+            "avg_depth": avg_depth,
+            "depth_consistency": depth_consistency,
             "fault_summary": fault_summary,
         }
 
@@ -439,14 +464,17 @@ class SessionTracker:
     @property
     def session_stats(self) -> Dict:
         """Aggregate statistics for the entire session."""
-        return {
-            "total_reps": self.total_reps,
-            "total_sets": self.total_sets,
-            "avg_depth": (
+        avg_depth: float | None = None
+        if self.reports_depth:
+            avg_depth = (
                 sum(r.max_depth_angle for r in self.all_reps) / len(self.all_reps)
                 if self.all_reps
                 else 0.0
-            ),
+            )
+        return {
+            "total_reps": self.total_reps,
+            "total_sets": self.total_sets,
+            "avg_depth": avg_depth,
             "clean_rep_percentage": (
                 sum(1 for r in self.all_reps if r.is_clean) / len(self.all_reps) * 100
                 if self.all_reps

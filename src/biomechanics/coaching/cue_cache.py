@@ -102,7 +102,9 @@ POSITIVE_CUE_KEYS = frozenset({"good_rep", "great_depth", "strong", "clean", "pe
 # Which fault wins when several compete for the same cue slot — lower first.
 # Knee cave and hip shoot lead: they are what a coach watching the squat
 # corrects first. Foot and balance faults follow, then depth and setup,
-# then the fatigue signals. Faults not listed rank after all of these.
+# then the fatigue signals. Faults not listed rank after every squat fault.
+# Each other exercise has its own block; faults of different exercises never
+# compete for a slot.
 FAULT_CUE_PRIORITY: Dict[str, int] = {
     "knee_valgus": 0,
     "hip_shoot": 1,
@@ -116,6 +118,22 @@ FAULT_CUE_PRIORITY: Dict[str, int] = {
     "tempo": 9,
     "depth_drift": 10,
     "velocity_loss": 11,
+    # Romanian deadlift (40-49): hips sinking into a squat first, then the
+    # rig-only bar path and finish, then bar tilt, range, tempo and partials.
+    "rdl_hip_sink": 40,
+    "rdl_bar_drift": 41,
+    "rdl_lockout": 42,
+    "rdl_bar_tilt": 43,
+    "rdl_range_drift": 44,
+    "rdl_tempo": 45,
+    "rdl_partial": 46,
+    # Overhead press (50-59): leaning back under the bar (safety) first.
+    "press_layback": 50,
+    "press_bar_forward": 51,
+    "press_lockout": 52,
+    "press_leg_drive": 53,
+    "press_uneven": 54,
+    "press_velocity_loss": 55,
 }
 DEFAULT_FAULT_CUE_PRIORITY = 12
 

@@ -254,3 +254,151 @@ def squat_depth_profile(
     up_frames = int(up_s * SYNTHETIC_FPS)
     frames += [0.5 + 0.5 * math.cos(math.pi * i / up_frames) for i in range(up_frames)]
     return frames
+
+
+# =============================================================================
+# SYNTHETIC PIPELINE DRIVERS (fake clock, triangulated provider, mono pose)
+# =============================================================================
+
+SYNTHETIC_CLOCK_START_S = 1.7e9
+SYNTHETIC_CONFIDENCE = 0.9
+SYNTHETIC_PIXELS_PER_M = 600.0
+SYNTHETIC_IMAGE_CENTRE_PX = (640.0, 300.0)
+SYNTHETIC_CAPTURE_FRAME = np.zeros((72, 128, 3), dtype=np.uint8)
+# A perfectly collinear synthetic leg reads exactly 0 deg; real lifters keep a small bend.
+SYNTHETIC_MIN_DEPTH_RATIO = 0.02
+
+
+class SyntheticClock:
+    """One clock for capture timestamps, time.time() and perf_counter()."""
+
+    def __init__(self, start_s: float = SYNTHETIC_CLOCK_START_S) -> None:
+        self.now_s = start_s
+
+    def advance(self, seconds: float) -> None:
+        self.now_s += seconds
+
+    def time(self) -> float:
+        return self.now_s
+
+    def perf_counter(self) -> float:
+        return self.now_s
+
+
+class SyntheticProvider:
+    """MultiCameraPoseProvider stand-in: world-frame skeletons on the fake clock (None = dropout)."""
+
+    def __init__(self, clock: SyntheticClock) -> None:
+        self._clock = clock
+        self._queue: list[tuple[np.ndarray | None, np.ndarray | None]] = []
+        self.sequence = 0
+        self.swap_count = 0
+        self.frame = np.zeros((72, 128, 3), dtype=np.uint8)
+        self.last_capture_timestamp = float("nan")
+
+    def push(self, points: np.ndarray | None, confidences: np.ndarray | None = None) -> None:
+        self._queue.append((points, confidences))
+
+    def get_pose(self):
+        points, confidences = self._queue.pop(0)
+        self.sequence += 1
+        self.last_capture_timestamp = self._clock.time()
+        if points is None:
+            return self.frame, None, None
+        if confidences is None:
+            confidences = np.full(len(points), SYNTHETIC_CONFIDENCE)
+        skeleton = Skeleton3D.from_numpy(
+            points, confidences=confidences, timestamp=self._clock.time(), frame_index=self.sequence,
+        )
+        return self.frame, None, skeleton
+
+    def reset_temporal_state(self) -> None:
+        pass
+
+    def lost_cameras(self) -> list[str]:
+        return []
+
+    def release(self) -> None:
+        pass
+
+
+class SyntheticMonoPose:
+    """MediaPipe stand-in: hip-centred Y-down 3D plus a pinhole 2D view of it."""
+
+    def __init__(self) -> None:
+        self._queue: list[tuple[np.ndarray | None, np.ndarray | None]] = []
+
+    def push(self, points: np.ndarray | None, confidences: np.ndarray | None = None) -> None:
+        self._queue.append((points, confidences))
+
+    def estimate_both(self, frame: np.ndarray):
+        from biomechanics.utils.types import CocoKeypoints as CK
+
+        points, confidences = self._queue.pop(0)
+        if points is None:
+            return None, None
+        if confidences is None:
+            confidences = np.full(len(points), SYNTHETIC_CONFIDENCE)
+        centred = points - (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
+        skeleton_3d = Skeleton3D.from_numpy(centred, confidences=confidences)
+        keypoints_2d = [
+            Keypoint2D(
+                x=SYNTHETIC_IMAGE_CENTRE_PX[0] + SYNTHETIC_PIXELS_PER_M * point[0],
+                y=SYNTHETIC_IMAGE_CENTRE_PX[1] + SYNTHETIC_PIXELS_PER_M * point[1],
+                confidence=float(confidence),
+            )
+            for point, confidence in zip(centred, confidences)
+        ]
+        return Skeleton2D(keypoints=keypoints_2d), skeleton_3d
+
+    def reset_tracking(self) -> None:
+        pass
+
+    def release(self) -> None:
+        pass
+
+
+class SyntheticSession:
+    """A real BiomechanicsPipeline fed synthetic world-frame squat poses on a fake clock."""
+
+    def __init__(self, monkeypatch, multi_camera: bool = True, config=None, exercise_name: str = "Barbell Back Squat"):
+        import types as _types
+
+        from biomechanics import pipeline as pipeline_module
+        from biomechanics.config import BiomechanicsConfig
+
+        monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true" if multi_camera else "false")
+        self.multi_camera = multi_camera
+        self.clock = SyntheticClock()
+        monkeypatch.setattr(
+            pipeline_module, "time",
+            _types.SimpleNamespace(time=self.clock.time, perf_counter=self.clock.perf_counter),
+        )
+        self.pipeline = pipeline_module.BiomechanicsPipeline(
+            config or BiomechanicsConfig(), exercise_name=exercise_name, defer_capture=True,
+        )
+        self.provider = SyntheticProvider(self.clock)
+        self.pose = SyntheticMonoPose()
+        if multi_camera:
+            self.pipeline._multi_camera_provider = self.provider
+        else:
+            self.pipeline._pose_estimator = self.pose
+
+    def step(self, points: np.ndarray | None, confidences: np.ndarray | None = None, fps: float = SYNTHETIC_FPS):
+        if self.multi_camera:
+            self.provider.push(points, confidences)
+        else:
+            self.pose.push(points, confidences)
+            self.pipeline._publish_frame(SYNTHETIC_CAPTURE_FRAME, self.clock.time())
+        result = self.pipeline.process_frame()
+        self.clock.advance(1.0 / fps)
+        return result
+
+    def run(self, depths: list[float], fps: float = SYNTHETIC_FPS, dropped: frozenset[int] = frozenset(), **pose):
+        return [
+            self.step(
+                None if index in dropped else world_squat_points(max(depth, SYNTHETIC_MIN_DEPTH_RATIO), **pose),
+                fps=fps,
+            )
+            for index, depth in enumerate(depths)
+        ]

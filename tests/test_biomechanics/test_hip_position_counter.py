@@ -354,3 +354,59 @@ class TestFrameRate:
         phases, reps = _run_at(counter, _moves(*segments, fps=fps), fps)
         assert reps == QUICK_REPS
         assert phases[-1] == SignalRepState.IDLE.value
+
+
+SEEDED_BASELINE = -40.0
+VELOCITY_WINDOW_S = 0.40
+SLOW_FPS = 12.0
+FAST_FPS = 30.0
+SAMPLES_AT_SLOW_FPS = 5
+SAMPLES_AT_FAST_FPS = 12
+STEADY_FRAMES = 40
+
+
+class TestSeededBaseline:
+    def test_a_seeded_baseline_replaces_the_first_frames(self):
+        from biomechanics.faults.hip_position_counter import BASELINE_EMA_ALPHA
+
+        offset_cm = 5.0
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        counter.seed_baseline(SEEDED_BASELINE)
+        counter.update(signal_value=SEEDED_BASELINE + offset_cm, timestamp=0.0)
+
+        # Still tracking while still, but from the seed, not from the first frame.
+        assert counter._standing_baseline == pytest.approx(SEEDED_BASELINE + BASELINE_EMA_ALPHA * offset_cm)
+
+    def test_reset_forgets_the_seed(self):
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        counter.seed_baseline(SEEDED_BASELINE)
+        counter.reset()
+
+        assert counter._standing_baseline is None
+
+
+class TestVelocityWindow:
+    @pytest.mark.parametrize(
+        ("fps", "samples"), [(SLOW_FPS, SAMPLES_AT_SLOW_FPS), (FAST_FPS, SAMPLES_AT_FAST_FPS)],
+    )
+    def test_time_window_keeps_the_samples_of_the_last_window(self, fps: float, samples: int):
+        counter = SignalRepCounter(HipPositionCounterConfig(velocity_window_s=VELOCITY_WINDOW_S))
+        for index in range(STEADY_FRAMES):
+            counter.update(signal_value=0.0, timestamp=index / fps)
+
+        assert len(counter._signal_times) == samples
+
+    def test_default_window_is_five_samples_at_any_rate(self):
+        counter = SignalRepCounter(HipPositionCounterConfig())
+        for index in range(STEADY_FRAMES):
+            counter.update(signal_value=0.0, timestamp=index / FAST_FPS)
+
+        assert len(counter._signal_times) == SAMPLES_AT_SLOW_FPS
+
+    def test_time_window_still_measures_a_steady_slope(self):
+        speed_cm_s = 15.0
+        counter = SignalRepCounter(HipPositionCounterConfig(velocity_window_s=VELOCITY_WINDOW_S))
+        for index in range(STEADY_FRAMES):
+            counter.update(signal_value=speed_cm_s * index / FAST_FPS, timestamp=index / FAST_FPS)
+
+        assert counter._window_velocity() == pytest.approx(speed_cm_s)

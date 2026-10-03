@@ -925,6 +925,9 @@ class TestExerciseProfiles:
         assert _pipeline_for(monkeypatch, "Barbell Overhead Press", bilstm_enabled=True)._bilstm is None
 
     def test_set_exercise_rebuilds_rules_and_counting(self, monkeypatch):
+        from biomechanics.profiles.overhead_press import OverheadPressProfile
+
+        monkeypatch.setattr(OverheadPressProfile, "coaching_ready", True)
         pipe = _pipeline_for(monkeypatch, "Barbell Back Squat", bilstm_enabled=True)
         pipe.set_exercise("Barbell Overhead Press")
 

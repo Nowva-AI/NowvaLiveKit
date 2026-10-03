@@ -23,13 +23,15 @@ logger = logging.getLogger(__name__)
 
 @register_profile(
     "overhead_press", "ohp", "barbell_press", "military_press",
-    "standing_press", "shoulder_press",
+    "standing_press",
 )
 class OverheadPressProfile(ExerciseProfile):
     """Profile for overhead / military press."""
 
     name = "overhead_press"
     movement_pattern = "press"
+    # Untracked until the press is validated (SHARED-PLUMBING.md §9).
+    gate_until_ready = True
 
     def get_feature_extractor(self):
         from biomechanics.ml.upper_body_feature_extractor import UpperBodyFeatureExtractor

@@ -27,6 +27,8 @@ import biomechanics.profiles.barbell_row  # noqa: F401
 import biomechanics.profiles.barbell_curl  # noqa: F401
 import biomechanics.profiles.overhead_tricep_extension  # noqa: F401
 import biomechanics.profiles.skull_crusher  # noqa: F401
+# Last: the variants' names must win over any profile name they contain.
+import biomechanics.profiles.untracked_variant  # noqa: F401
 
 __all__ = [
     "ExerciseProfile",
