@@ -15,7 +15,7 @@ Without that variable:
 | Plan | Status | Where |
 |---|---|---|
 | **J0** squat net | Done. Every golden passes on this branch: squat output is byte-identical fresh, after RDL / untracked / **conventional deadlift** sessions, and through the voice-agent delivery path | `tests/test_biomechanics/test_squat_golden.py` (+ fixtures), `test_squat_invariants.py`, `tests/test_squat_delivery_golden.py`, `tests/test_squat_agent_invariants.py`, `tests/test_squat_session_pins.py` |
-| **J1** software parts | Done: deadlift sagittal frame, measured gravity (tool + runtime mapping), setup model (two solves) | `deadlift/frame.py`, `deadlift/gravity.py`, `scripts/tools/measure_gravity.py`, `deadlift/setup_model.py` |
+| **J1** software parts | Done: deadlift sagittal frame, measured gravity (tool + runtime mapping), setup model (two solves, shin-to-bar contact measured per lifter), raw rig recorder and replay through the real pipeline (`NOWVA_REPLAY_DIR`) | `deadlift/frame.py`, `deadlift/gravity.py`, `scripts/tools/measure_gravity.py`, `deadlift/setup_model.py`, `triangulation/rig_recording.py`, `scripts/tools/record_rig.py` |
 | **J2** simulator | Done. Synthetic sets with ground truth: dead stop, touch-and-go, quick re-pull, failed rep, dropped bar with bumper bounce, every v1 fault, keypoint and bar noise, wrist proxy, tilted world | `deadlift/simulator.py`, `tests/test_biomechanics/test_deadlift_analyzer.py` |
 | **J3** profile on the platform | Done: profile and gate; registry variants; squat-default hooks; `process_frame` fork; analyser and counter; D1–D10; deadlift session reference; config; `_activate_profile`; refine and view-buffer gates; foot-contact reset; body-measurement flag; after-switch golden | `profiles/deadlift.py`, `deadlift/analyzer.py`, `deadlift/rep_counter.py`, `deadlift/rule_base.py`, `faults/rules/deadlift_*.py`, `pipeline.py`, `pipeline_process.py`, `config.py` |
 | **J4** 3D bar, software | Done: batched multi-view detector wrapper, cross-view association with racked-bar rejection, single-view hub fallback, 3D Kalman with predicted states, capture-time buffer | `deadlift/bar_detector_multi.py`, `deadlift/bar_tracker_3d.py`, `deadlift/bar_buffer.py` |
@@ -35,6 +35,8 @@ Without that variable:
   - the Jetson numbers are still to be measured (J1).
 
 ## Findings that changed the plan
+
+0. **The shin-to-bar contact distance must be measured, not assumed.** A fixed 5 cm moved the setup model's hip band ~7 cm and its trunk prediction ~7° per 2 cm of real difference, faking D4 and D2 on clean setups. It is now measured on each lifter's setup frames (§2.7 already said "learned"); clean sets stay fault-free across four body types × three shin contacts.
 
 1. **D2 thresholds 10/15/20° are mostly unreachable.** With the bar at the knees, straight legs cap the hips-shoot excess at about 8–12° for typical bodies, as the simulator showed across three body types. The initial thresholds are now 5/8/11°, min tier still moderate. The rise-ratio cross-check is now 1.0 instead of 1.4: a normal pull reads 0.5–0.75 and a full hips shoot about 0.8–1.1. Both are re-set at J6.
 2. **D7 ranks before D4** (priorities 21 and 22). The §2.6 table had them the other way round, which contradicted §2.7 ("if D4 and D7 co-fire, D7 is cued first").
@@ -56,7 +58,6 @@ Without that variable:
 | Gravity on the rig | Run `scripts/tools/measure_gravity.py` with the board flat. Without the files, the deadlift runs on the body vertical, with D2/D3/D5 raised to moderate |
 | Real validation (J6), thresholds and min tiers from data, `VALIDATION.md` | Needs round-2 data |
 | Cue audio clips | Needs the TTS key: `generate_cue_audio.py` covers every new key. Until clips exist, the cache falls back to cloud TTS (O3) |
-| Recorder / replay provider (§8.2) | Not built yet; the simulator stands in for offline tests |
 | Jetson timing (§9) | Needs the device |
 | J8 ship | `coaching_ready=True` plus the two intentional pin changes listed in PLAN §5.1 |
 

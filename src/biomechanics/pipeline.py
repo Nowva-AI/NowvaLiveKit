@@ -204,6 +204,8 @@ class BiomechanicsPipeline:
                 calibration_buffer_frames=camera_calibration.calibration_buffer_frames,
                 bar_detection_stride=camera_calibration.bar_detection_stride,
                 bar_detector=bar_detector,
+                # Offline: run a rig recording through the real pipeline (PLAN §8.2).
+                replay_dir=os.getenv("NOWVA_REPLAY_DIR") or None,
             )
             # The session flow loads calibrations (and writes this path when it
             # does not exist yet); loading here serves standalone tools only.

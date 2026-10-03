@@ -80,8 +80,11 @@ class MultiCameraPoseProvider:
         calibration_buffer_frames: int = DEFAULT_CALIBRATION_BUFFER_FRAMES,
         bar_detection_stride: int = DEFAULT_BAR_DETECTION_STRIDE,
         bar_detector: BarEndDetector | None = None,
+        replay_dir: str | None = None,
     ):
         self._device_ids = device_ids
+        # A rig recording (triangulation.rig_recording) replayed instead of the cameras.
+        self._replay_dir = replay_dir
         # device id -> name of its ~/.nowva/intrinsics_<camera_key>.json (default: the device id).
         self._camera_keys = {
             str(dev_id): (camera_keys or {}).get(dev_id, str(dev_id)) for dev_id in device_ids
@@ -161,14 +164,22 @@ class MultiCameraPoseProvider:
         if not self._initialized:
             self.initialize()
 
-        self._capture = MultiCameraCapture(
+        self._capture = self._open_capture()
+        self._capture.start()
+
+    def _open_capture(self):
+        if self._replay_dir:
+            from biomechanics.triangulation.rig_recording import RecordedCapture
+
+            logger.info("Replaying rig recording %s instead of the cameras", self._replay_dir)
+            return RecordedCapture(self._replay_dir)
+        return MultiCameraCapture(
             device_ids=self._device_ids,
             resolution=self._resolution,
             max_sync_delta_ms=self._max_sync_delta_ms,
             min_views=self._min_views,
             primary_device_id=self._primary_camera,
         )
-        self._capture.start()
 
     def load_calibration(self, path: str) -> None:
         """Load a saved calibration and build the triangulator."""
