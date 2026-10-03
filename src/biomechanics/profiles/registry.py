@@ -11,7 +11,7 @@ import re
 from typing import Dict, List, Optional, Type
 
 from biomechanics.profiles.base import ExerciseProfile
-from biomechanics.profiles.untracked import UntrackedProfile
+from biomechanics.profiles.untracked import UntrackedProfile, UntrackedVariantProfile
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,9 @@ def find_profile_class(exercise_name: str) -> Optional[Type[ExerciseProfile]]:
     An exact registered name wins. Otherwise the longest registered name
     that appears in the exercise name as whole words, so
     "Barbell Romanian Deadlift" is a Romanian deadlift rather than a deadlift
-    and "Barbell Bench Press" matches nothing.
+    and "Barbell Bench Press" matches nothing. A profile with name_qualifiers
+    takes only names whose other words are among them ("Band Deadlift" is an
+    untracked variant, not the conventional deadlift).
     """
     normalized = _normalize(exercise_name)
     if normalized in PROFILE_REGISTRY:
@@ -52,7 +54,12 @@ def find_profile_class(exercise_name: str) -> Optional[Type[ExerciseProfile]]:
     matches = [key for key in PROFILE_REGISTRY if f"_{key}_" in padded]
     if not matches:
         return None
-    return PROFILE_REGISTRY[max(matches, key=len)]
+    best = max(matches, key=len)
+    profile_class = PROFILE_REGISTRY[best]
+    qualifiers = profile_class.name_qualifiers
+    if qualifiers is not None and set(normalized.split("_")) - set(best.split("_")) - qualifiers:
+        return UntrackedVariantProfile
+    return profile_class
 
 
 def get_profile(exercise_name: str) -> ExerciseProfile:

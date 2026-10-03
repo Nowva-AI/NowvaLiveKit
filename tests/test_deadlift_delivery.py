@@ -735,6 +735,16 @@ class TestClosedLoopGuidance:
         orch = _guided_orchestrator()
         assert asyncio.run(_stand_at_bar(orch, 1.0, -1.0)) == []
 
+    def test_arms_only_past_the_mild_threshold(self):
+        orch = _guided_orchestrator()
+        assert asyncio.run(_stand_at_bar(orch, 2.5, -2.8, 3.0)) == []
+        assert not orch._bar_guidance_armed
+
+    def test_once_armed_it_guides_down_to_the_tolerance(self):
+        orch = _guided_orchestrator()
+        played = asyncio.run(_stand_at_bar(orch, 4.0, 2.5, 1.5))
+        assert played == ["deadlift_closer", "deadlift_closer", "adjust_good"]
+
     def test_unmeasured_offset_is_ignored(self):
         orch = _guided_orchestrator()
         assert asyncio.run(_stand_at_bar(orch, None)) == []

@@ -33,9 +33,10 @@ class UntrackedProfile(ExerciseProfile):
 
 class UntrackedVariantProfile(UntrackedProfile):
     """A deadlift variant the conventional deadlift's rules do not model (sumo,
-    trap bar, deficit, snatch grip, single leg, rack pulls). Untracked, with the
-    deadlift's safety flags: hinged frames with plates hiding the feet never feed
-    the squat's camera refines or body measurements."""
+    trap bar, deficit, banded, paused, rack pulls: any name the deadlift's
+    name_qualifiers do not cover). Untracked, with the deadlift's safety flags:
+    hinged frames with plates hiding the feet never feed the squat's camera
+    refines or body measurements."""
 
     allows_camera_refine = False
     feeds_body_calibration = False

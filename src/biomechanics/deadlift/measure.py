@@ -104,11 +104,11 @@ def _strict_midpoint(first: np.ndarray | None, second: np.ndarray | None) -> np.
     return (first + second) / 2.0
 
 
+# Elbow bend seen from the side. In 3D the angle also changes with grip width
+# (hands out on the bar vs hanging), which is not a bent arm.
 def _elbow_flexion_deg(
     frame: SagittalFrame, shoulder: np.ndarray | None, elbow: np.ndarray | None, wrist: np.ndarray | None,
 ) -> float:
-    """Elbow bend seen from the side. In 3D the angle also changes with grip width
-    (hands out on the bar vs hanging), which is not a bent arm."""
     if shoulder is None or elbow is None or wrist is None:
         return NAN
     upper_deg = segment_angle_deg(frame, elbow, shoulder)

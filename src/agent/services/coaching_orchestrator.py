@@ -189,6 +189,9 @@ DEADLIFT_SPEAKING_PHASES = frozenset({"floor", "stance", "setup", "approach"})
 BAR_GUIDANCE_PHASE = "stance"
 BAR_GUIDANCE_DISARM_PHASES = frozenset({"setup", "pull"})
 BAR_MIDFOOT_TOLERANCE_CM = 2.0
+# It arms only past D1's mild threshold (hysteresis): a bar placed right must not
+# start it on keypoint noise, and once armed it guides down to the tolerance.
+BAR_MIDFOOT_ARM_CM = 3.0
 # frame_data bar_source of the tracked bar; anything else (the wrist proxy) gets no foot guidance.
 BAR_SOURCE_TRACKED = "bar"
 BAR_MIDFOOT_STEP_CLOSER_CM = 15.0
@@ -1158,7 +1161,7 @@ class CoachingOrchestrator:
             self._bar_guidance_armed = False
             return
         if not self._bar_guidance_armed:
-            if abs(offset_cm) <= BAR_MIDFOOT_TOLERANCE_CM:
+            if abs(offset_cm) <= BAR_MIDFOOT_ARM_CM:
                 return
             self._bar_guidance_armed = True
             self._bar_guidance_corrected = False

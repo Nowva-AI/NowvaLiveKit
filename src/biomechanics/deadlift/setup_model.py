@@ -82,11 +82,11 @@ def _knee_flexion_deg(knee: tuple[float, float], hip: tuple[float, float]) -> fl
     return math.degrees(math.acos(max(-1.0, min(1.0, dot / norms))))
 
 
+# Shin angles (rad, forward of vertical) whose line through the ankle passes
+# shin_bar_m behind the bar centre.
 def _shin_angles_for_contact(
     bar_forward_m: float, bar_height_m: float, shin_bar_m: float,
 ) -> list[float]:
-    """Shin angles (rad, forward of vertical) whose line through the ankle passes
-    shin_bar_m behind the bar centre."""
     reach = math.hypot(bar_forward_m, bar_height_m)
     if reach < shin_bar_m or reach < 1e-9:
         return []

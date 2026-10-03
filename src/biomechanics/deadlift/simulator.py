@@ -13,7 +13,11 @@ setup model (setup_model.py), so a clean set is clean by that model's standard.
 RepScript.setup_trunk_deg / knee_pass_trunk_deg script them instead: the poses
 then owe nothing to the model, and RepTruth carries the kinematic ground truth
 (trunk angles, setup hip height, knee flexion at the knee pass) read off the
-emitted poses, for tests that must not grade the model against itself.
+emitted poses, for tests that must not grade the model against itself. Hips
+shooting (D2) is injected that way: a knee-pass trunk well forward of the setup's.
+
+Each rep is lowered into the next rep's setup, so consecutive reps with
+different scripts change the lifter's shape over the lowering, never in a frame.
 """
 
 from __future__ import annotations
@@ -73,7 +77,6 @@ class SimAthlete(BaseModel):
 class RepScript(BaseModel):
     """One rep. Fault sizes are the injected truth (cm / deg / m)."""
     shoulder_ahead_m: float = 0.03
-    hips_shoot_deg: float = 0.0
     bar_drift_m: float = 0.0
     lockout_deficit_deg: float = 0.0
     lean_back_deg: float = 0.0
@@ -178,9 +181,9 @@ def _smooth(fraction: float) -> float:
     return 0.5 - 0.5 * math.cos(math.pi * fraction)
 
 
+# Two-link leg from the ankle to the hip, knee in front. Returns (knee, hip),
+# pulling an out-of-reach hip back along the ankle-hip line.
 def _knee_for(hip: tuple[float, float], athlete: SimAthlete) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Two-link leg from the ankle to the hip, knee in front. Returns (knee, hip),
-    pulling an out-of-reach hip back along the ankle-hip line."""
     reach = math.hypot(*hip)
     max_reach = (athlete.tibia_m + athlete.femur_m) * LOCKOUT_REACH_FRACTION
     if reach > max_reach:
@@ -196,18 +199,19 @@ def _knee_for(hip: tuple[float, float], athlete: SimAthlete) -> tuple[tuple[floa
     return knee, hip
 
 
+# The elbow on the shoulder-wrist line, pushed back by the bend.
 def _elbow_between(
     shoulder: tuple[float, float], wrist: tuple[float, float], bend_deg: float, athlete: SimAthlete,
 ) -> tuple[float, float]:
-    """The elbow on the shoulder-wrist line, pushed back by the bend."""
     fraction = athlete.upper_arm_m / (athlete.upper_arm_m + athlete.forearm_m)
     along = (shoulder[0] + (wrist[0] - shoulder[0]) * fraction, shoulder[1] + (wrist[1] - shoulder[1]) * fraction)
     back = athlete.upper_arm_m * math.sin(math.radians(bend_deg) / 2.0)
     return (along[0] - back, along[1])
 
 
+# The trunk angle closest to trunk_deg (never more forward) whose hip the legs
+# reach.
 def _reachable_trunk_deg(shoulder: tuple[float, float], trunk_deg: float, athlete: SimAthlete) -> float:
-    """The trunk angle closest to trunk_deg (never more forward) whose hip the legs reach."""
     reach = (athlete.tibia_m + athlete.femur_m) * LOCKOUT_REACH_FRACTION
 
     def hip_reach(angle_deg: float) -> float:
@@ -230,6 +234,7 @@ def _reachable_trunk_deg(shoulder: tuple[float, float], trunk_deg: float, athlet
     return reachable
 
 
+# Hands on the bar, straight-ish arms angled from the shoulder to the grip.
 def _pose_from_bar(
     bar: tuple[float, float],
     trunk_deg: float,
@@ -239,7 +244,6 @@ def _pose_from_bar(
     bar_tilt_m: float,
     athlete: SimAthlete,
 ) -> _Pose:
-    """Hands on the bar, straight-ish arms angled from the shoulder to the grip."""
     half = math.radians(elbow_bend_deg) / 2.0
     arm_span = (athlete.upper_arm_m + athlete.forearm_m) * math.cos(half)
     wrist = (bar[0], bar[1] + athlete.grip_offset_m)
@@ -426,8 +430,8 @@ class _Builder:
             self.bar_rest, self._setup_trunk_deg(script), script.shoulder_ahead_m, 0.0, 0.0, 0.0, self.athlete,
         )
 
+    # Bar height at the top and the trunk angle there.
     def _top_geometry(self, script: RepScript) -> tuple[float, float]:
-        """Bar height at the top and the trunk angle there."""
         athlete = self.athlete
         trunk_top = script.lockout_deficit_deg - script.lean_back_deg
         reach = (athlete.tibia_m + athlete.femur_m) * LOCKOUT_REACH_FRACTION
@@ -438,6 +442,20 @@ class _Builder:
         bar_up = shoulder_up - athlete.grip_offset_m - athlete.arm_m
         return bar_up, trunk_top
 
+    # The trunk angle when the bar reaches the knees, and that bar height.
+    def _knee_pass_geometry(self, script: RepScript) -> tuple[float, float]:
+        athlete = self.athlete
+        if script.knee_pass_trunk_deg is not None:
+            # Model-free: the trunk reaches its scripted angle with the bar at the
+            # height of a vertical shin's knee.
+            return script.knee_pass_trunk_deg, athlete.tibia_m
+        knee_pass = solve_knee_pass(
+            athlete.segments(), self.bar_rest[0], script.shoulder_ahead_m, self.scenario.shin_bar_m,
+        )
+        if knee_pass is None:
+            return 45.0, athlete.tibia_m
+        return knee_pass.trunk_deg, knee_pass.knee_height_m
+
     def _pull_pose(self, script: RepScript, fraction: float, top_up: float, trunk_top: float,
                    trunk_setup: float, trunk_knee: float, knee_up: float) -> _Pose:
         rest_forward, rest_up = self.bar_rest
@@ -445,10 +463,10 @@ class _Builder:
         drift = script.bar_drift_m * math.sin(math.pi * min(1.0, fraction / 0.8)) if fraction < 0.8 else 0.0
         if bar_up <= knee_up:
             share = (bar_up - rest_up) / max(1e-6, knee_up - rest_up)
-            trunk = trunk_setup + (trunk_knee + script.hips_shoot_deg - trunk_setup) * share
+            trunk = trunk_setup + (trunk_knee - trunk_setup) * share
         else:
             share = (bar_up - knee_up) / max(1e-6, top_up - knee_up)
-            trunk = (trunk_knee + script.hips_shoot_deg) + (trunk_top - trunk_knee - script.hips_shoot_deg) * _smooth(share)
+            trunk = trunk_knee + (trunk_top - trunk_knee) * _smooth(share)
         shoulder_ahead = script.shoulder_ahead_m * (1.0 - fraction)
         bend = script.elbow_bend_deg * math.sin(math.pi * fraction)
         shift = script.hip_shift_m * min(1.0, fraction / 0.5)
@@ -457,20 +475,12 @@ class _Builder:
             (rest_forward + drift, bar_up), trunk, shoulder_ahead, bend, shift, tilt, self.athlete,
         )
 
-    def _rep(self, script: RepScript, touch_and_go_in: bool, next_is_touch_and_go: bool) -> None:
+    # end: the rep whose setup this one is lowered into (the next rep's, or its
+    # own when the lifter then stands up or the set ends).
+    def _rep(self, script: RepScript, touch_and_go_in: bool, next_is_touch_and_go: bool, end: RepScript) -> None:
         athlete = self.athlete
         trunk_setup = self._setup_trunk_deg(script)
-        if script.knee_pass_trunk_deg is not None:
-            # Model-free: the trunk reaches its scripted angle with the bar at the
-            # height of a vertical shin's knee.
-            trunk_knee = script.knee_pass_trunk_deg
-            knee_up = athlete.tibia_m
-        else:
-            knee_pass = solve_knee_pass(
-                athlete.segments(), self.bar_rest[0], script.shoulder_ahead_m, self.scenario.shin_bar_m,
-            )
-            trunk_knee = knee_pass.trunk_deg if knee_pass is not None else 45.0
-            knee_up = knee_pass.knee_height_m if knee_pass is not None else athlete.tibia_m
+        trunk_knee, knee_up = self._knee_pass_geometry(script)
         top_up, trunk_top = self._top_geometry(script)
 
         # The bar leaves its rest (or its touch-and-go low point) on the last frame
@@ -486,7 +496,8 @@ class _Builder:
             for step in range(1, steps + 1):
                 self._emit(self._pull_pose(script, top_fraction * (1.0 - _smooth(step / steps)), top_up,
                                            trunk_top, trunk_setup, trunk_knee, knee_up))
-            self._hold(self._setup_pose(script), script.floor_hold_s)
+            if script.floor_hold_s > 0.0:
+                self._blend(self._setup_pose(script), self._setup_pose(end), script.floor_hold_s)
             self.reps.append(RepTruth(liftoff_time, math.nan, math.nan, math.nan, False, touch_and_go_in))
             return
 
@@ -522,12 +533,17 @@ class _Builder:
             floor_time = self._drop(top_pose, top_up)
         else:
             lower_steps = int(round(script.lower_s * self.scenario.fps))
-            clean = script.model_copy(update={
-                "hips_shoot_deg": 0.0, "bar_drift_m": 0.0, "elbow_bend_deg": 0.0,
+            # Down from this rep's top into the end rep's setup.
+            lowering = script.model_copy(update={
+                "bar_drift_m": 0.0, "elbow_bend_deg": 0.0, "shoulder_ahead_m": end.shoulder_ahead_m,
             })
+            end_trunk_knee, end_knee_up = self._knee_pass_geometry(end)
+            end_trunk_setup = self._setup_trunk_deg(end)
             for step in range(1, lower_steps + 1):
                 fraction = 1.0 - _smooth(step / lower_steps)
-                self._emit(self._pull_pose(clean, fraction, top_up, trunk_top, trunk_setup, trunk_knee, knee_up))
+                self._emit(self._pull_pose(
+                    lowering, fraction, top_up, trunk_top, end_trunk_setup, end_trunk_knee, end_knee_up,
+                ))
             floor_time = self.t - self.dt
         self.reps.append(RepTruth(
             liftoff_time, knee_pass_time, top_time, floor_time, True, touch_and_go_in,
@@ -539,11 +555,11 @@ class _Builder:
             # The lifter let go at the top and stays standing over the dropped bar.
             self._hold(_standing_pose(athlete, self.bar_rest, 0.0), script.floor_hold_s)
         elif not next_is_touch_and_go:
-            self._hold(self._setup_pose(script), script.floor_hold_s)
+            self._hold(self._setup_pose(end), script.floor_hold_s)
 
+    # The bar's share of the way up on each pull frame: one eased move, or two
+    # either side of a sticking point the bar holds at.
     def _pull_fractions(self, script: RepScript) -> list[float]:
-        """The bar's share of the way up on each pull frame: one eased move, or two
-        either side of a sticking point the bar holds at."""
         fps = self.scenario.fps
         if script.stall_fraction is None:
             steps = int(round(script.pull_s * fps))
@@ -557,9 +573,9 @@ class _Builder:
             + [stall + (1.0 - stall) * _smooth(step / after) for step in range(1, after + 1)]
         )
 
+    # Hands open at the top: the bar falls, bounces on bumpers, settles. The
+    # lifter stays standing.
     def _drop(self, top_pose: _Pose, top_up: float) -> float:
-        """Hands open at the top: the bar falls, bounces on bumpers, settles. The
-        lifter stays standing."""
         athlete = self.athlete
         rest_up = self.bar_rest[1]
         standing = _standing_pose(athlete, self.bar_rest, 0.0)
@@ -596,7 +612,8 @@ class _Builder:
         touch_and_go_in = False
         for index, script in enumerate(reps):
             next_tng = script.floor_hold_s <= 0.0 and index + 1 < len(reps) and not script.drop_bar
-            self._rep(script, touch_and_go_in, next_tng)
+            stays_at_bar = index + 1 < len(reps) and (next_tng or scenario.stand_between_reps_s is None)
+            self._rep(script, touch_and_go_in, next_tng, reps[index + 1] if stays_at_bar else script)
             if script.drop_bar and index + 1 < len(reps):
                 # Back down to the bar for the next rep.
                 self._blend(standing, self._setup_pose(reps[index + 1]), scenario.hinge_s)

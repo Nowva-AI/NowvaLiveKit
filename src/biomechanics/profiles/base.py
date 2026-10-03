@@ -67,6 +67,10 @@ class ExerciseProfile:
     closed_loop_cue: str = ""
     # Keypoints whose loss mutes cues mid-set; None = the legs (hips, knees, ankles).
     tracking_keypoints: Optional[tuple] = None
+    # Words that may stand beside a registered name and still name this exercise
+    # ("barbell conventional deadlift"); a name with any other word is a variant
+    # this profile does not model. None: any name containing one is this exercise.
+    name_qualifiers: Optional[frozenset] = None
 
     def create_rep_analyzer(self, config: BiomechanicsConfig) -> Optional["DeadliftRepAnalyzer"]:
         """An object owning this exercise's per-frame state, or None for the

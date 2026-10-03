@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from biomechanics.config import BiomechanicsConfig
-from biomechanics.deadlift.analyzer import DeadliftFrameInput, DeadliftRepAnalyzer
+from biomechanics.deadlift.analyzer import LIVE_OFFSET_MIN_FRAMES, DeadliftFrameInput, DeadliftRepAnalyzer
 from biomechanics.deadlift.rule_base import TIER_RANK
 from biomechanics.deadlift.setup_model import MAX_SETUP_KNEE_FLEXION_DEG, MIN_SETUP_KNEE_FLEXION_DEG
 from biomechanics.deadlift.session_reference import DeadliftSessionReference
@@ -43,13 +43,22 @@ TILT_FAKE_DRIFT_MIN_CM = 2.0
 # (utils/segment_lengths.py: 1.6-2.4 cm), and a tracked bar's.
 PLATFORM_KEYPOINT_NOISE_M = 0.02
 TRACKED_BAR_NOISE_M = 0.003
-# The agent arms closed-loop foot guidance beyond this offset (CONTRACT.md §5.5).
+# The agent arms closed-loop foot guidance beyond this offset (CONTRACT.md §5.5:
+# D1's mild threshold), then guides down to the tolerance.
+BAR_MIDFOOT_GUIDANCE_ARM_CM = 3.0
 BAR_MIDFOOT_GUIDANCE_TOLERANCE_CM = 2.0
+# A re-setup at the floor: the lifter shuffles the feet this far toward the bar.
+FEET_MOVED_AT_THE_FLOOR_M = 0.05
+# Keypoints of a stance turned off square to the bar (the hands stay on it).
+LOWER_BODY = (
+    CK.LEFT_HIP, CK.RIGHT_HIP, CK.LEFT_KNEE, CK.RIGHT_KNEE, CK.LEFT_ANKLE, CK.RIGHT_ANKLE,
+    CK.LEFT_HEEL, CK.RIGHT_HEEL, CK.LEFT_FOOT_INDEX, CK.RIGHT_FOOT_INDEX,
+)
 FAULTS = BiomechanicsConfig().faults
 # Kinematic truth vs measurement on noise-free model-free poses.
 # One frame (the first after the bar passes the knees) of trunk motion.
 TRUNK_CHANGE_TOLERANCE_DEG = 2.0
-RISE_RATIO_TOLERANCE = 0.05
+RISE_RATIO_TOLERANCE = 0.04
 HIP_HEIGHT_TOLERANCE_CM = 1.0
 
 
@@ -75,6 +84,38 @@ def _bar_dropout(probability: float, seed: int) -> FrameMutation:
 
     def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
         return frame.points, frame.confidences, None if rng.random() < probability else frame.bar
+
+    return mutate
+
+
+# The whole lifter moves toward the bar (-Z) over 0.8 s, starting 0.8 s after
+# touchdown, still hinged over it.
+def _stepped_closer_at_the_floor(floor_time: float, forward_m: float) -> FrameMutation:
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        fraction = min(1.0, max(0.0, (frame.timestamp - floor_time - 0.8) / 0.8))
+        points = frame.points.copy()
+        points[:, 2] -= forward_m * fraction
+        return points, frame.confidences, frame.bar
+
+    return mutate
+
+
+# Keypoints turned about the vertical through the ankles, then the noise (if any).
+def _turned(
+    sim: SimulatedSet, degrees: float, keypoints: tuple[int, ...], noise: FrameMutation | None = None,
+) -> FrameMutation:
+    pivot = (sim.frames[0].points[CK.LEFT_ANKLE] + sim.frames[0].points[CK.RIGHT_ANKLE]) / 2.0
+    angle = math.radians(degrees)
+    rotation = np.array([
+        [math.cos(angle), 0.0, math.sin(angle)], [0.0, 1.0, 0.0], [-math.sin(angle), 0.0, math.cos(angle)],
+    ])
+    indices = list(keypoints)
+
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        points = frame.points.copy()
+        points[indices] = (points[indices] - pivot) @ rotation.T + pivot
+        turned = frame._replace(points=points)
+        return (turned.points, turned.confidences, turned.bar) if noise is None else noise(index, turned)
 
     return mutate
 
@@ -223,9 +264,11 @@ class TestPhases:
             live_by_phase.setdefault(analyzer.status.phase, []).append(analyzer.status.bar_midfoot_live_cm)
             if analyzer.status.phase == DeadliftPhase.STANCE and frame.timestamp < sim.reps[0].liftoff_time:
                 before_the_pull.append(analyzer.status.bar_midfoot_live_cm)
-        # Standing at the bar it reads; hinging down to it (moving) it does not.
+        # Standing at the bar it reads, once a median of settled frames is in;
+        # hinging down to it (moving) it does not.
         measured = [value for value in before_the_pull if math.isfinite(value)]
-        assert len(measured) >= len(before_the_pull) // 2
+        assert all(math.isnan(value) for value in before_the_pull[:LIVE_OFFSET_MIN_FRAMES - 1])
+        assert len(measured) >= len(before_the_pull) // 3
         assert np.median(measured) == pytest.approx(8.0, abs=0.5)
         assert all(math.isnan(value) for value in live_by_phase[DeadliftPhase.PULL])
 
@@ -515,6 +558,28 @@ class TestModelFreeKinematics:
             assert rep.hip_shoulder_rise_ratio == pytest.approx(truth.hip_rise_m / truth.shoulder_rise_m, abs=RISE_RATIO_TOLERANCE)
             assert rep.setup_hip_height_cm == pytest.approx(truth.setup_hip_height_m * 100.0, abs=HIP_HEIGHT_TOLERANCE_CM)
 
+    @pytest.mark.parametrize("pull_s", [0.6, 1.2, 3.0])
+    @pytest.mark.parametrize(
+        "athlete",
+        [SimAthlete(), SimAthlete(tibia_m=0.38, femur_m=0.40, torso_m=0.47, upper_arm_m=0.27, forearm_m=0.26)],
+        ids=["average", "short"],
+    )
+    @pytest.mark.parametrize(
+        ("setup_deg", "knee_pass_deg"),
+        [(65.0, 50.0), (60.0, 60.0), (55.0, 65.0), (45.0, 55.0)],
+        ids=["chest_rises", "back_angle_held", "tips_forward", "hips_first"],
+    )
+    def test_rise_ratio_matches_the_poses_at_any_tempo(
+        self, athlete: SimAthlete, setup_deg: float, knee_pass_deg: float, pull_s: float,
+    ):
+        """A fast pull accelerates through the frames before the knee pass: the
+        ratio comes from a curve through them, not a line."""
+        script = RepScript(setup_trunk_deg=setup_deg, knee_pass_trunk_deg=knee_pass_deg, pull_s=pull_s)
+        sim, features, _, _ = _analyse(Scenario(athlete=athlete, reps=[script] * 2))
+        assert len(features) == len(sim.reps)
+        for truth, rep in zip(sim.reps, features):
+            assert rep.hip_shoulder_rise_ratio == pytest.approx(truth.hip_rise_m / truth.shoulder_rise_m, abs=RISE_RATIO_TOLERANCE)
+
     def test_a_hips_first_pull_is_cued_once_the_set_confirms_it(self):
         """Hips out-rising the chest by ~1.24: within one rep's noise of a held back
         angle, so the first rep waits and the set's second confirms it."""
@@ -564,6 +629,28 @@ class TestModelFreeKinematics:
             reps += len(features)
             cued += sum("deadlift_hips_shoot" in rep_cues for rep_cues in _cued(features))
         assert cued >= reps // 2
+
+    @pytest.mark.parametrize(
+        ("first", "then"),
+        [((60.0, 60.0), (45.0, 55.0)), ((40.0, 55.0), (65.0, 50.0))],
+        ids=["starts_shooting_the_hips", "fixes_the_hips"],
+    )
+    def test_a_pull_that_changes_mid_set_is_measured_rep_by_rep(
+        self, first: tuple[float, float], then: tuple[float, float],
+    ):
+        reps = [RepScript(setup_trunk_deg=first[0], knee_pass_trunk_deg=first[1])] * 2
+        reps += [RepScript(setup_trunk_deg=then[0], knee_pass_trunk_deg=then[1])] * 3
+        sim, features, _, _ = _analyse(Scenario(reps=reps))
+        assert len(features) == len(sim.reps)
+        for truth, rep in zip(sim.reps, features):
+            assert rep.hip_shoulder_rise_ratio == pytest.approx(truth.hip_rise_m / truth.shoulder_rise_m, abs=RISE_RATIO_TOLERANCE)
+
+    def test_the_rep_after_the_fix_is_not_cued(self):
+        """The demo loop: hips first, the cue, then a pull with the chest rising."""
+        reps = [RepScript(setup_trunk_deg=40.0, knee_pass_trunk_deg=55.0)] * 2
+        reps += [RepScript(setup_trunk_deg=65.0, knee_pass_trunk_deg=50.0)] * 3
+        _, features, _, _ = _analyse(Scenario(reps=reps))
+        assert ["deadlift_hips_shoot" in cued for cued in _cued(features)] == [True, True, False, False, False]
 
     def test_a_pull_whose_chest_rises_is_fault_free(self):
         script = RepScript(setup_trunk_deg=65.0, knee_pass_trunk_deg=50.0)
@@ -633,6 +720,22 @@ class TestTouchAndGoUnderNoise:
         sim, features, _, _ = _analyse(Scenario(track_bar=False, reps=reps, keypoint_noise_m=keypoint_noise_m))
         assert len(features) == len(sim.reps)
 
+    @pytest.mark.parametrize("pull_s", [0.5, 0.6])
+    @pytest.mark.parametrize("seed", range(4))
+    def test_fast_touch_and_go_on_the_wrist_proxy_under_correlated_noise(self, pull_s: float, seed: int):
+        """The wrists leave the knees' height within a few frames of a fast low
+        point, and the noise widens the velocity window into the descent."""
+        reps = [RepScript(floor_hold_s=0.0, pull_s=pull_s, lower_s=0.4, top_hold_s=0.2)] * 5 + [RepScript(pull_s=pull_s, lower_s=0.4)]
+        scenario = Scenario(track_bar=False, reps=reps, seed=seed)
+        sim, features, _, _ = _analyse(scenario, mutate=_correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, seed))
+        assert len(features) == len(sim.reps)
+
+    @pytest.mark.parametrize("seed", range(4))
+    def test_fast_touch_and_go_on_the_wrist_proxy_under_independent_noise(self, seed: int):
+        reps = [RepScript(floor_hold_s=0.0, pull_s=0.5, lower_s=0.4, top_hold_s=0.2)] * 5 + [RepScript(pull_s=0.5, lower_s=0.4)]
+        sim, features, _, _ = _analyse(Scenario(track_bar=False, reps=reps, keypoint_noise_m=0.015, seed=seed))
+        assert len(features) == len(sim.reps)
+
 
 class TestWristProxyAtPlatformNoise:
     """The wrist proxy has no bar axis: its left-right is locked per set, and its
@@ -651,6 +754,74 @@ class TestWristProxyAtPlatformNoise:
         scenario = Scenario(track_bar=False, seed=3)
         _, features, _, _ = _analyse(scenario, mutate=_correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, 3))
         assert all(abs(f.hip_shift_ratio) < FAULTS.deadlift_hip_shift.moderate for f in features)
+
+
+class TestHipShiftAlongTheLifter:
+    """D8 is measured along the lifter's own left-right (hips and ankles, locked
+    for the set), not the bar's axis: the hips travel ~45 cm forward in a pull,
+    which a stance a few degrees off square to the bar would read as sideways."""
+
+    @pytest.mark.parametrize("track_bar", [True, False], ids=["tracked", "proxy"])
+    @pytest.mark.parametrize("degrees", [5.0, 8.0])
+    def test_a_stance_off_square_to_the_bar_is_no_hip_shift(self, degrees: float, track_bar: bool):
+        scenario = Scenario(track_bar=track_bar)
+        sim = simulate(scenario)
+        _, features, _, _ = _analyse(scenario, mutate=_turned(sim, degrees, LOWER_BODY))
+        assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
+
+    @pytest.mark.parametrize("seed", range(4))
+    def test_an_off_square_stance_cues_nothing_under_correlated_noise(self, seed: int):
+        scenario = Scenario(seed=seed, bar_noise_m=TRACKED_BAR_NOISE_M)
+        sim = simulate(scenario)
+        noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, seed)
+        _, features, _, _ = _analyse(scenario, mutate=_turned(sim, 8.0, LOWER_BODY, noise))
+        assert len(features) == len(sim.reps)
+        assert all("deadlift_hip_shift" not in cued for cued in _cued(features))
+
+    def test_a_whole_lifter_turned_off_square_to_the_bar_is_no_hip_shift(self):
+        scenario = Scenario()
+        sim = simulate(scenario)
+        _, features, _, _ = _analyse(scenario, mutate=_turned(sim, 10.0, tuple(range(len(sim.frames[0].points)))))
+        assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
+
+    def test_a_real_shift_is_still_seen_off_square(self):
+        scenario = Scenario(reps=[RepScript(hip_shift_m=0.05)] * 2)
+        sim = simulate(scenario)
+        _, features, _, _ = _analyse(scenario, mutate=_turned(sim, 8.0, LOWER_BODY))
+        assert all(verdict.get("deadlift_hip_shift") in ("moderate", "severe") for verdict in _judge(features))
+
+
+class TestReSetupAtTheFloor:
+    """A lifter who re-sets at the floor may move the feet: the next rep is judged
+    against where they now stand."""
+
+    @pytest.mark.parametrize("keypoint_noise_m", [0.0, PLATFORM_KEYPOINT_NOISE_M])
+    def test_feet_moved_at_the_floor_are_judged_where_they_now_stand(self, keypoint_noise_m: float):
+        scenario = Scenario(
+            bar_midfoot_offset_m=0.06, reps=[RepScript(floor_hold_s=3.0), RepScript(), RepScript()],
+            keypoint_noise_m=keypoint_noise_m, bar_noise_m=TRACKED_BAR_NOISE_M,
+        )
+        sim = simulate(scenario)
+        mutate = _stepped_closer_at_the_floor(sim.reps[0].floor_time, FEET_MOVED_AT_THE_FLOOR_M)
+        _, features, _, _ = _analyse(scenario, mutate=mutate)
+        assert len(features) == len(sim.reps)
+        assert features[0].bar_midfoot_setup_cm == pytest.approx(6.0, abs=1.0)
+        assert "deadlift_bar_position" in _cued(features)[0]
+        for later in features[1:]:
+            assert later.bar_midfoot_setup_cm == pytest.approx(1.0, abs=1.0)
+        assert all("deadlift_bar_position" not in cued for cued in _cued(features)[1:])
+
+    def test_feet_hidden_at_the_floor_keep_the_stance_lock(self):
+        def hide_feet_after_the_first_rep(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+            confidences = frame.confidences.copy()
+            if frame.timestamp >= floor_time:
+                confidences[[CK.LEFT_ANKLE, CK.RIGHT_ANKLE, CK.LEFT_FOOT_INDEX, CK.RIGHT_FOOT_INDEX]] = 0.0
+            return frame.points, confidences, frame.bar
+
+        scenario = Scenario(bar_midfoot_offset_m=0.06, reps=[RepScript()] * 3)
+        floor_time = simulate(scenario).reps[0].floor_time
+        _, features, _, _ = _analyse(scenario, mutate=hide_feet_after_the_first_rep)
+        assert all(f.bar_midfoot_setup_cm == pytest.approx(6.0, abs=1.0) for f in features)
 
 
 class TestSetBehaviour:
@@ -676,6 +847,28 @@ class TestSetBehaviour:
         assert len(features) == 2
         assert analyzer.failed_reps == 1
 
+    @pytest.mark.parametrize("stance_s", [0.5, 1.5], ids=["no_standing_reference", "standing_reference"])
+    @pytest.mark.parametrize("seed", range(3))
+    def test_a_hitch_near_the_top_is_not_the_top(self, seed: int, stance_s: float):
+        """A still bar with the trunk upright enough, a few cm short of the top
+        (or anywhere, with no standing height to expect the top at), reads as a
+        top until the bar rises on past it."""
+        reps = [RepScript(pull_s=3.0, stall_fraction=0.9, stall_s=0.8)] * 3
+        scenario = Scenario(reps=reps, approach_s=stance_s, stance_s=stance_s, keypoint_noise_m=0.01,
+                            bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+        sim, features, analyzer, _ = _analyse(scenario)
+        assert len(features) == len(sim.reps)
+        assert analyzer.failed_reps == 0
+        for expected, measured in zip(sim.reps, features):
+            assert measured.top_time == pytest.approx(expected.top_time, abs=MAX_EVENT_ERROR_S)
+
+    def test_a_failed_pull_leaning_back_from_mid_thigh_is_a_failed_rep(self):
+        """Leaning back with the knees still bent ~60 deg is no lockout."""
+        scenario = Scenario(reps=[RepScript(), RepScript(fail_rise_m=0.35, lean_back_deg=40.0), RepScript()])
+        _, features, analyzer, _ = _analyse(scenario)
+        assert len(features) == 2
+        assert analyzer.failed_reps == 1
+
     @pytest.mark.parametrize("lean_back_deg", [25.0, 40.0])
     def test_an_over_extended_lockout_is_counted_and_judged(self, lean_back_deg: float):
         _, features, analyzer, _ = _analyse(Scenario(reps=[RepScript(lean_back_deg=lean_back_deg)] * 2))
@@ -695,7 +888,7 @@ class TestSetBehaviour:
         _, features, _, _ = _analyse(scenario, mutate=hide_feet_from_the_setup)
         assert all(f.bar_midfoot_setup_cm == pytest.approx(6.0, abs=1.0) for f in features)
 
-    def test_the_live_offset_is_a_half_second_median(self):
+    def test_the_live_offset_is_a_one_second_median(self):
         """One noisy frame must not arm the foot guidance."""
         sim = simulate(Scenario(keypoint_noise_m=PLATFORM_KEYPOINT_NOISE_M, bar_noise_m=TRACKED_BAR_NOISE_M))
         analyzer = DeadliftRepAnalyzer()
@@ -709,6 +902,42 @@ class TestSetBehaviour:
                 live.append(analyzer.status.bar_midfoot_live_cm)
         assert live
         assert max(abs(value) for value in live) <= BAR_MIDFOOT_GUIDANCE_TOLERANCE_CM
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_a_bar_over_midfoot_never_arms_the_guidance_under_correlated_noise(self, seed: int):
+        sim = simulate(Scenario(reps=[RepScript()], bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed, stance_s=3.0))
+        noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, seed)
+        analyzer = DeadliftRepAnalyzer()
+        analyzer.set_gravity(sim.gravity_up_world, GRAVITY_SOURCE_MEASURED)
+        live = []
+        for index, frame in enumerate(sim.frames):
+            points, confidences, bar = noise(index, frame)
+            analyzer.observe(DeadliftFrameInput(frame.timestamp, frame.frame_index, points, confidences, bar))
+            if math.isfinite(analyzer.status.bar_midfoot_live_cm):
+                live.append(analyzer.status.bar_midfoot_live_cm)
+        assert live
+        assert max(abs(value) for value in live) <= BAR_MIDFOOT_GUIDANCE_ARM_CM
+
+    def test_each_set_guides_its_own_stance(self):
+        """The live offset speaks before each set's first rep, whatever the
+        session's rep count."""
+        sim = simulate(Scenario(bar_midfoot_offset_m=0.06, reps=[RepScript()]))
+        analyzer = DeadliftRepAnalyzer()
+        analyzer.set_gravity(sim.gravity_up_world, GRAVITY_SOURCE_MEASURED)
+        live_by_set: list[list[float]] = []
+        for set_index in range(2):
+            analyzer.reset_set()
+            offset_s = set_index * (sim.frames[-1].timestamp - sim.frames[0].timestamp + 1.0)
+            live = []
+            for frame in sim.frames:
+                analyzer.observe(DeadliftFrameInput(
+                    frame.timestamp + offset_s, frame.frame_index, frame.points, frame.confidences, frame.bar,
+                ))
+                if math.isfinite(analyzer.status.bar_midfoot_live_cm):
+                    live.append(analyzer.status.bar_midfoot_live_cm)
+            live_by_set.append(live)
+        assert analyzer.rep_count == 2
+        assert all(live and np.median(live) == pytest.approx(6.0, abs=0.5) for live in live_by_set)
 
     @pytest.mark.parametrize("seed", range(4))
     def test_standing_references_survive_platform_noise(self, seed: int):

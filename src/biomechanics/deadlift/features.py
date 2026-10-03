@@ -35,10 +35,13 @@ PROXY_HUB_SPAN_M = 1.70
 MIN_GRIP_WIDTH_M = 0.25
 # Tilt is read on a running median over this many frames.
 TILT_SMOOTHING_FRAMES = 5
-# D2's poses: the median over this long before liftoff, a line fitted over this
-# long up to the knee pass (needs this many frames, else a median).
+# D2's poses: the median over this long before liftoff, a curve fitted over this
+# long up to the knee pass: a parabola with this many frames (a fast pull
+# accelerates through the window, which a line evaluated at its end reads ~0.1
+# low in rise ratio), a line with fewer, a median below that.
 COORDINATION_WINDOW_S = 0.2
 COORDINATION_FIT_FRAMES = 4
+COORDINATION_CURVE_FRAMES = 6
 # Hip/shoulder rise ratio needs this much shoulder rise to be a ratio at all.
 MIN_SHOULDER_RISE_M = 0.01
 # Plausible segment lengths for the setup model (m); outside them the keypoints are wrong.
@@ -103,13 +106,13 @@ def _percentile(values: list[float], percentile: float) -> float:
     return float(np.percentile(finite, percentile)) if finite else NAN
 
 
+# When the bar left (leaving) or reached level_up, between earliest and latest:
+# the change point of a parabola that is flat on the level's side. NaN when too
+# few frames clear of the band show the motion (a fast bar crosses it in one or
+# two frames, and the detecting frame is then already the event).
 def _event_time(
     frames: list[FrameMeasure], level_up: float, band_m: float, earliest: float, latest: float, leaving: bool,
 ) -> float:
-    """When the bar left (leaving) or reached level_up, between earliest and latest:
-    the change point of a parabola that is flat on the level's side. NaN when too
-    few frames clear of the band show the motion (a fast bar crosses it in one or
-    two frames, and the detecting frame is then already the event)."""
     times = []
     distances = []
     for frame in frames:
@@ -197,14 +200,13 @@ def _segment_lengths(
     )
 
 
+# How far in front of this lifter's shin line the bar sits at setup.
+#
+# Shin thickness and how hard the shins press the bar vary by person; with an
+# assumed distance, 2 cm of difference moved the model's hip band ~7 cm and its
+# trunk prediction ~7 deg (simulator), faking D4 and D2 on a clean setup. Measured
+# on the setup frames and clipped to what a shin allows.
 def _shin_bar_distance_m(frames: list[FrameMeasure], config: DeadliftConfig) -> float:
-    """How far in front of this lifter's shin line the bar sits at setup.
-
-    Shin thickness and how hard the shins press the bar vary by person; with
-    an assumed distance, 2 cm of difference moved the model's hip band ~7 cm
-    and its trunk prediction ~7 deg (simulator), faking D4 and D2 on a clean
-    setup. Measured on the setup frames and clipped to what a shin allows.
-    """
     distances = []
     for frame in frames:
         if frame.knee_mid is None or frame.bar_centre is None:
@@ -298,10 +300,10 @@ def measure_setup(
     return setup
 
 
+# (trunk deg, hip height, shoulder height) at time t, from a curve fitted through
+# the frames leading to it (their median when too few): a single frame carries
+# the whole keypoint noise into D2.
 def _pose_at(frames: list[FrameMeasure], t: float, up: np.ndarray) -> tuple[float, float, float]:
-    """(trunk deg, hip height, shoulder height) at time t, from a straight line
-    fitted through the frames around it (their median when too few): a single
-    frame carries the whole keypoint noise into D2."""
     times = np.array([frame.t for frame in frames]) - t
     values = np.array([
         (frame.trunk_deg, float(np.dot(frame.hip_mid, up)), float(np.dot(frame.shoulder_mid, up)))
@@ -309,8 +311,8 @@ def _pose_at(frames: list[FrameMeasure], t: float, up: np.ndarray) -> tuple[floa
     ])
     if len(frames) < COORDINATION_FIT_FRAMES or np.ptp(times) <= 0.0:
         return tuple(float(value) for value in np.median(values, axis=0))
-    _, intercept = np.polyfit(times, values, 1)
-    return tuple(float(value) for value in intercept)
+    degree = 2 if len(frames) >= COORDINATION_CURVE_FRAMES else 1
+    return tuple(float(value) for value in np.polyfit(times, values, degree)[-1])
 
 
 def _coordination_features(rep: RepTrack, features: DeadliftRepFeatures) -> None:
@@ -345,9 +347,9 @@ def _running_median(values: list[float], frames: int) -> list[float]:
     return [float(np.median(values[max(0, i - half):i + half + 1])) for i in range(len(values))]
 
 
+# Left end above the right end (cm) at the plate hubs: measured there on the
+# tracked bar; without it, the hands' height difference carried out to the hubs.
 def _tilt_cm(frame: FrameMeasure) -> float:
-    """Left end above the right end (cm) at the plate hubs: measured there on the
-    tracked bar; without it, the hands' height difference carried out to the hubs."""
     if frame.bar_left is not None and frame.bar_right is not None:
         return height_m(frame.frame, frame.bar_left, frame.bar_right) * 100.0
     if frame.bar_source == BAR_SOURCE_WRIST_PROXY and frame.l_wrist is not None and frame.r_wrist is not None:
@@ -393,21 +395,26 @@ def _top_features(rep: RepTrack, refs: dict[str, float], features: DeadliftRepFe
     features.lean_back_deg = refs.get("trunk_deg", NAN) - _median([f.trunk_deg for f in top])
 
 
+# The hips' sideways position over the second half of the pull against where
+# they started, as a fraction of ankle separation, along the lifter's own
+# left-right (PLAN.md §2.5: the ankle axis; the bar's axis leaks forward travel
+# into sideways on a stance a few degrees off square). Medians over many frames:
+# a hip keypoint jitters by more than a real shift's first centimetres.
 def _hip_shift_feature(
-    pull: list[FrameMeasure], locked_midfoot: np.ndarray | None, features: DeadliftRepFeatures,
+    pull: list[FrameMeasure],
+    locked_midfoot: np.ndarray | None,
+    body_lateral: np.ndarray,
+    features: DeadliftRepFeatures,
 ) -> None:
-    """The hips' sideways position over the second half of the pull against where
-    they started, as a fraction of ankle separation. Medians over many frames: a
-    hip keypoint jitters by more than a real shift's first centimetres."""
     ratios: list[float] = []
     for frame in pull:
         if frame.l_ankle is None or frame.r_ankle is None:
             continue
-        separation = abs(lateral_m(frame.frame, frame.r_ankle, frame.l_ankle))
+        separation = abs(float(np.dot(frame.r_ankle - frame.l_ankle, body_lateral)))
         if separation < MIN_ANKLE_SEPARATION_M:
             continue
         reference = locked_midfoot if locked_midfoot is not None else frame.ankle_mid
-        ratios.append(lateral_m(frame.frame, frame.hip_mid, reference) / separation)
+        ratios.append(float(np.dot(frame.hip_mid - reference, body_lateral)) / separation)
     if len(ratios) < 2 * SHIFT_START_FRAMES:
         return
     start_frames = max(SHIFT_START_FRAMES, int(len(ratios) * SHIFT_START_FRACTION))
@@ -421,10 +428,13 @@ def rep_features(
     rest_up: float,
     event_band_m: float,
     locked_midfoot: np.ndarray | None,
+    body_lateral: np.ndarray,
     athlete: AthleteState,
     gravity_source: str,
     grip: str,
 ) -> DeadliftRepFeatures:
+    """body_lateral: the lifter's horizontal left-to-right unit vector, locked for
+    the set (hips and ankles), that sideways hip shift is measured along."""
     pull = [frame for frame in rep.frames if frame.t <= rep.top_time]
     liftoff = rep.liftoff
     setup = rep.setup
@@ -465,7 +475,7 @@ def rep_features(
     _coordination_features(rep, features)
     _bar_path_features(pull, rep.top_frames, features)
     _top_features(rep, refs, features)
-    _hip_shift_feature(pull, locked_midfoot, features)
+    _hip_shift_feature(pull, locked_midfoot, body_lateral, features)
     if refs and math.isfinite(refs.get("elbow_flex_deg", NAN)):
         features.elbow_flexion_deg = _percentile(
             [f.elbow_flex_deg - refs["elbow_flex_deg"] for f in pull], WORST_PERCENTILE,

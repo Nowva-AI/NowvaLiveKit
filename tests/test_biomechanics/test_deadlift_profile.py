@@ -28,12 +28,19 @@ from biomechanics.profiles.deadlift import (
 from biomechanics.profiles.squat import SquatProfile
 from biomechanics.profiles.untracked import UntrackedVariantProfile
 
-DEADLIFT_NAMES = ["deadlift", "deadlifts", "Barbell Deadlift", "conventional deadlift", "Barbell Conventional Deadlift"]
+DEADLIFT_NAMES = [
+    "deadlift", "deadlifts", "Barbell Deadlift", "conventional deadlift", "Barbell Conventional Deadlift",
+    "Touch and Go Deadlift", "Barbell Deadlifts",
+]
 VARIANT_NAMES = [
     "Barbell Sumo Deadlift", "Trap Bar Deadlift", "Hex Bar Deadlift", "Deficit Deadlift",
-    "Snatch Grip Deadlift", "Single Leg Deadlift", "Rack Pull", "Dumbbell Deadlift", "Kettlebell Deadlift",
-    "Jefferson Deadlift", "Landmine Deadlift", "Smith Machine Deadlift", "Banded Deadlift", "Tempo Deadlift",
-    "Paused Deadlift",
+    "Snatch Grip Deadlift", "Single Leg Deadlift", "Rack Pull", "Rack Pulls", "Dumbbell Deadlift",
+    "Kettlebell Deadlift", "Jefferson Deadlift", "Landmine Deadlift", "Smith Machine Deadlift", "Banded Deadlift",
+    "Tempo Deadlift", "Paused Deadlift",
+    # Names a deny-list of variants missed; any word beside "deadlift" outside
+    # the allow-list makes a variant.
+    "Band Deadlift", "Suitcase Deadlift", "Elevated Deadlift", "Deadlift with Chains", "Paused Deadlifts",
+    "Block Deadlift",
 ]
 SQUAT_NAMES = ["squat", "back squat", "front squat", "goblet squat", "bodyweight squat",
                "Barbell Back Squat", "Barbell Front Squat"]

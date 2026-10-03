@@ -115,6 +115,10 @@ class DeadliftProfile(ExerciseProfile):
     waits_for_diagnosis = True
     closed_loop_cue = DEADLIFT_CLOSED_LOOP_CUE
     tracking_keypoints = DEADLIFT_TRACKING_KEYPOINTS
+    # Only these words may stand beside "deadlift": every other word names a
+    # variant the conventional rules do not model (sumo, band, suitcase,
+    # deficit, paused, ...), which resolves to UntrackedVariantProfile.
+    name_qualifiers = frozenset({"barbell", "conventional", "touch", "and", "go"})
 
     @classmethod
     def gated_profile(cls) -> ExerciseProfile:
@@ -200,25 +204,6 @@ class DeadliftProfile(ExerciseProfile):
         }
 
 
-# Variants the conventional rules do not model: untracked, never DeadliftProfile.
-register_profile(
-    "sumo_deadlift",
-    "trap_bar_deadlift",
-    "hex_bar_deadlift",
-    "deficit_deadlift",
-    "snatch_grip_deadlift",
-    "single_leg_deadlift",
-    "dumbbell_deadlift",
-    "kettlebell_deadlift",
-    "jefferson_deadlift",
-    "landmine_deadlift",
-    "smith_machine_deadlift",
-    "banded_deadlift",
-    "band_resisted_deadlift",
-    "chain_deadlift",
-    # The conventional lift, but paced so D10 and the event model misread it.
-    "tempo_deadlift",
-    "paused_deadlift",
-    "pause_deadlift",
-    "rack_pull",
-)(UntrackedVariantProfile)
+# A partial deadlift without "deadlift" in its name: untracked, never DeadliftProfile.
+# Names with "deadlift" and a word outside name_qualifiers are variants already.
+register_profile("rack_pull", "rack_pulls")(UntrackedVariantProfile)
