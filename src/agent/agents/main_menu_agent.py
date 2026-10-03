@@ -11,10 +11,11 @@ from typing import Literal
 from livekit.agents import RunContext
 from livekit.agents.llm import function_tool
 
-from agent.agents.quickExerciseAgent import CollectExerciseInfoTask
+from agent.agents.quickExerciseAgent import CollectDeadliftInfoTask, CollectExerciseInfoTask
 from agent.agents.prompts import get_main_menu_prompt
 from agent.agents.prompts.main_menu_prompt import coachable_exercises_text
 from agent.agents.shared.base_agent import BaseNovaAgent
+from agent.agents.shared.deadlift_session import EXERCISE_META_STATE_KEY, is_coached_deadlift
 from agent.agents.shared.helpers import (
     calibration_exercise,
     check_calibration,
@@ -114,8 +115,9 @@ class MainMenuAgent(BaseNovaAgent):
                 workout_data=workout
             )
 
-            # Store session in state
+            # Store session in state; a deadlift's setup is asked afresh by the WorkoutAgent
             self.state.set("workout.current_session", session.to_dict())
+            self.state.set(EXERCISE_META_STATE_KEY, None)
 
             # Set exercise name for main.py to pass to pose estimation
             first_exercise = session.get_current_exercise()
@@ -219,7 +221,8 @@ class MainMenuAgent(BaseNovaAgent):
                 f"what you can: {coachable_exercises_text()}. One or two sentences."
             )
         self._publish_visual({"type": "menu", "action": "select", "choice": "quick_exercise"})
-        return await self._carry_context_to(CollectExerciseInfoTask(
+        task_class = CollectDeadliftInfoTask if is_coached_deadlift(exercise_name) else CollectExerciseInfoTask
+        return await self._carry_context_to(task_class(
             exercise_name=exercise_name,
             user_id=self.user_id,
             state=self.state,

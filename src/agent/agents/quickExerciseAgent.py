@@ -9,6 +9,14 @@ from typing import Literal
 from livekit.agents import function_tool, AgentTask
 
 from agent.agents.shared.base_agent import build_agent_instructions
+from agent.agents.shared.deadlift_session import (
+    DEFAULT_PLATE_DIAMETER_CM,
+    SETUP_QUESTION,
+    DeadliftSessionMeta,
+    GripType,
+    ShoeType,
+    store_exercise_meta,
+)
 from agent.agents.shared.helpers import calibration_exercise, check_calibration, start_calibration_mode
 from agent.agents.teaching_agent import TeachingAgent
 from agent.agents.workout_agent import WorkoutAgent
@@ -49,8 +57,11 @@ def build_task_instructions(
     weight: float | None,
     rest_seconds: int | None,
     weight_unit: str | None = None,
+    setup_question: str | None = None,
 ) -> str:
-    """Collection instructions: sets and reps, plus the weight only for a loaded lift; never rest."""
+    """Collection instructions: sets and reps, plus the weight only for a loaded lift; never rest.
+    setup_question (the deadlift's grip, belt and shoes) is asked as well, even when every
+    set parameter is already known."""
     loaded = _is_loaded(exercise_name, weight)
     known = []
     if sets is not None:
@@ -74,28 +85,34 @@ def build_task_instructions(
         missing.append("how many sets and reps")
     if weight is None and loaded:
         missing.append("the weight on the bar, in kilograms or pounds as they prefer")
-    if not missing:
+    if not missing and setup_question is None:
         lines.append(
             "Every parameter needed is known. Call the start_workout tool IMMEDIATELY "
             "with the values above. Do not ask the user anything."
         )
         return "\n".join(lines)
 
-    lines.append(
-        f"Ask ONLY for {' and '.join(missing)}, in one short question. If they're unsure, "
-        f"suggest three sets of eight. Never ask about rest: it defaults to "
-        f"{default_rest_seconds(exercise_name, weight)} seconds unless they bring it up."
-    )
-    if not loaded:
+    if missing:
         lines.append(
-            "It's bodyweight unless they mention a bar or a weight. If they give a weight, "
-            "pass it with its unit, and ask the unit if they only give a number."
+            f"Ask ONLY for {' and '.join(missing)}, in one short question. If they're unsure, "
+            f"suggest three sets of eight. Never ask about rest: it defaults to "
+            f"{default_rest_seconds(exercise_name, weight)} seconds unless they bring it up."
         )
+        if not loaded:
+            lines.append(
+                "It's bodyweight unless they mention a bar or a weight. If they give a weight, "
+                "pass it with its unit, and ask the unit if they only give a number."
+            )
+    if setup_question is not None:
+        lines.append(setup_question)
     lines.append("Once you have them, call start_workout.")
     return "\n".join(lines)
 
 
 class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
+    # Extra session question an exercise asks before starting (the deadlift's setup).
+    setup_question: str | None = None
+
     def __init__(
         self,
         exercise_name: str,
@@ -110,7 +127,7 @@ class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
         weight_unit: str | None = None,
     ):
         task_instructions = build_task_instructions(
-            exercise_name, sets, reps, weight, rest_seconds, weight_unit
+            exercise_name, sets, reps, weight, rest_seconds, weight_unit, self.setup_question
         )
         super().__init__(
             instructions=build_agent_instructions(state, task_instructions),
@@ -132,6 +149,7 @@ class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
             sets is not None
             and reps is not None
             and (weight is not None or not _is_loaded(exercise_name, weight))
+            and self.setup_question is None
         )
 
         self.calibration_task = asyncio.create_task(
@@ -266,3 +284,48 @@ class CollectExerciseInfoTask(AffectNodesMixin, AgentTask):
         )
         await main_menu.update_chat_ctx(self.chat_ctx.copy())
         return main_menu
+
+
+class CollectDeadliftInfoTask(CollectExerciseInfoTask):
+    """The quick deadlift: the same collection plus the session setup (grip, plates, belt,
+    shoes), stored for the pipeline before the workout starts."""
+
+    setup_question = SETUP_QUESTION
+
+    @function_tool
+    async def start_workout(
+        self,
+        sets: int,
+        reps: int,
+        weight: float | None = None,
+        weight_unit: Literal["kg", "lb"] | None = None,
+        rest_seconds: int | None = None,
+        grip: GripType | None = None,
+        belt: bool | None = None,
+        shoes: ShoeType | None = None,
+        plate_diameter_cm: float | None = None,
+    ):
+        """
+        Call this once you know the sets and reps and the weight, and they have told you their
+        setup or skipped it. Leave out any setup detail they didn't say.
+
+        Args:
+            sets: Number of sets to perform
+            reps: Target reps per set
+            weight: Load in the unit the user said. 0 for bodyweight.
+            weight_unit: "kg" or "lb", as the user said it
+            rest_seconds: Rest between sets in seconds, only if the user asked for one
+            grip: "double" for double overhand, "mixed" for one hand over and one under, "hook" for hook grip
+            belt: True if they wear a lifting belt, False if not
+            shoes: "flat" for flat thin soles, "barefoot" for socks or barefoot, "heeled" for raised-heel lifting shoes, "cushioned" for running shoes or trainers
+            plate_diameter_cm: Only if they use plates smaller than standard 45 centimetre plates
+        """
+        store_exercise_meta(self.state, DeadliftSessionMeta(
+            grip=grip,
+            belt=belt,
+            shoes=shoes,
+            plate_diameter_cm=plate_diameter_cm or DEFAULT_PLATE_DIAMETER_CM,
+        ))
+        return await super().start_workout(
+            sets=sets, reps=reps, weight=weight, weight_unit=weight_unit, rest_seconds=rest_seconds,
+        )

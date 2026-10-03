@@ -51,6 +51,8 @@ DEFAULT_EXERCISE_NAME = "Barbell Back Squat"
 # The display HUD's workout weight is in pounds.
 LB_PER_KG = 2.20462
 COACHING_SOCKET_PATH = "/tmp/nowva_coaching.sock"
+# Pipeline profiles that count reps without a depth (the display hides its depth tiles).
+DEPTHLESS_PROFILES = frozenset({"deadlift"})
 
 # Played via afplay when the display window opens (browser autoplay policies
 # block page-side audio without a user gesture). Any afplay-supported format
@@ -70,6 +72,56 @@ TEST_ASSESS_REST_SECONDS = 120
 
 def _weight_in_lbs(weight: float, weight_unit: str | None) -> float:
     return weight * LB_PER_KG if weight_unit == "kg" else weight
+
+
+def _start_capture_message(exercise_meta: dict | None) -> dict:
+    """Tells the preloaded pipeline to open the cameras. exercise_meta (the deadlift's grip,
+    plates, belt and shoes, possibly empty) goes only with an exercise that has session
+    metadata, so the squat's message is unchanged."""
+    message = {"type": "start_capture"}
+    if exercise_meta is not None:
+        message["exercise_meta"] = exercise_meta
+    return message
+
+
+def _with_switch_meta(message: dict, exercise_meta: dict | None) -> dict:
+    """set_exercise as relayed to the pipeline: the target exercise's session metadata goes
+    in meta. A meta the voice agent already sent is relayed as is."""
+    if exercise_meta is None or "meta" in message:
+        return message
+    return {**message, "meta": exercise_meta}
+
+
+def _with_display_profile(event: dict, is_deadlift: bool) -> dict:
+    """A workout-start display event; the deadlift names its profile so the page shows the
+    deadlift's score dimensions."""
+    return {**event, "profile": "deadlift"} if is_deadlift else event
+
+
+def _rep_display_event(message: dict, has_depth: bool) -> dict:
+    """The display's rep receipt. A lift without depth (the deadlift) shows no depth class."""
+    depth_class_name = message.get("depth_class_name") or message.get("depth_category", "")
+    return {
+        "type": "rep",
+        "rep_number": message.get("rep_number"),
+        "set_number": message.get("set_number"),
+        "depth_class_name": depth_class_name if has_depth else "",
+        "is_clean": message.get("is_clean", True),
+        "faults": message.get("faults_in_rep", []),
+    }
+
+
+def _set_summary_display_event(message: dict, has_depth: bool) -> dict:
+    """The display's set report. A lift without depth (the deadlift) sends null depth tiles."""
+    return {
+        "type": "set_summary",
+        "set_number": message.get("set_number"),
+        "total_reps": message.get("total_reps"),
+        "clean_reps": message.get("clean_reps"),
+        "avg_depth": message.get("avg_depth") if has_depth else None,
+        "depth_consistency": message.get("depth_consistency") if has_depth else None,
+        "fault_summary": message.get("fault_summary", {}),
+    }
 
 
 class _TeeStream:
@@ -134,6 +186,9 @@ class NowvaApp:
         self._cal_file: str | None = None
         self.test_assess_mode = False
         self.display_server = None
+        # The profile the pipeline announced in its last cache_cues: rep and set events
+        # that follow on the same stream belong to it.
+        self._pipeline_profile: str | None = None
         self._boot_progress = 0.0
         self._boot_sound_last_played = float("-inf")
 
@@ -562,6 +617,16 @@ class NowvaApp:
         if self.display_server:
             self.display_server.publish(event)
 
+    def _is_deadlift(self, exercise_name: str | None) -> bool:
+        from agent.agents.shared.deadlift_session import is_coached_deadlift
+
+        return is_coached_deadlift(exercise_name)
+
+    def _exercise_meta(self, exercise_name: str | None) -> dict | None:
+        from agent.agents.shared.deadlift_session import exercise_meta_for
+
+        return exercise_meta_for(self.state, exercise_name)
+
     def _publish_workout_start(self) -> None:
         """Push the workout config to the display so the HUD knows targets."""
         exercise_name = self.state.get("workout.exercise_name") or DEFAULT_EXERCISE_NAME
@@ -574,14 +639,14 @@ class NowvaApp:
             if sets:
                 target_reps = sets[0].get("target_reps") or 0
                 weight = _weight_in_lbs(sets[0].get("target_weight") or 0.0, sets[0].get("weight_unit"))
-        self._publish_display({
+        self._publish_display(_with_display_profile({
             "type": "workout",
             "action": "start",
             "exercise": exercise_name,
             "total_sets": total_sets,
             "target_reps": target_reps,
             "weight_lbs": weight,
-        })
+        }, self._is_deadlift(exercise_name)))
 
     # Markers in the voice agent's stdout mapped to boot milestones.
     # Matched by substring in _pump_agent_output as the agent initializes.
@@ -628,15 +693,17 @@ class NowvaApp:
                 print("[COACHING IPC] Received workout_complete from voice agent")
                 self._publish_display({"type": "workout", "action": "complete"})
             elif msg_type == "set_exercise":
-                print(f"[COACHING IPC] Received set_exercise ({message.get('exercise_name')}) from voice agent")
-                self._publish_display({
+                exercise_name = message.get("exercise_name")
+                print(f"[COACHING IPC] Received set_exercise ({exercise_name}) from voice agent")
+                self._publish_display(_with_display_profile({
                     "type": "workout",
                     "action": "start",
-                    "exercise": message.get("exercise_name"),
+                    "exercise": exercise_name,
                     "total_sets": message.get("total_sets") or 0,
                     "target_reps": message.get("target_reps") or 0,
                     "weight_lbs": message.get("weight_lbs") or 0.0,
-                })
+                }, self._is_deadlift(exercise_name)))
+                message = _with_switch_meta(message, self._exercise_meta(exercise_name))
             # Snapshot the reference — this runs on the coaching IPC thread
             # while the main loop can nil self.ipc_server during shutdown
             pose_ipc = self.ipc_server
@@ -974,6 +1041,7 @@ class NowvaApp:
                             elif msg_type == 'cache_cues':
                                 cues = message.get('cues', {})
                                 print(f"[BIOMECH] Caching {len(cues)} audio cues for {message.get('exercise_name')}")
+                                self._pipeline_profile = message.get("profile")
                             elif msg_type == 'play_cue':
                                 print(f"[BIOMECH] Play cue: {message.get('cue')}")
                             elif msg_type == 'rest_complete':
@@ -1014,30 +1082,16 @@ class NowvaApp:
 
                             # --- Display page events (best-effort) ---
                             if msg_type == 'rep_complete':
-                                self._publish_display({
-                                    "type": "rep",
-                                    "rep_number": message.get("rep_number"),
-                                    "set_number": message.get("set_number"),
-                                    "depth_class_name": message.get("depth_class_name")
-                                        or message.get("depth_category", ""),
-                                    "is_clean": message.get("is_clean", True),
-                                    "faults": message.get("faults_in_rep", []),
-                                })
+                                has_depth = self._pipeline_profile not in DEPTHLESS_PROFILES
+                                self._publish_display(_rep_display_event(message, has_depth))
                             elif msg_type == 'shallow_rep':
                                 self._publish_display({
                                     "type": "shallow_rep",
                                     "depth_class_name": message.get("depth_class_name", ""),
                                 })
                             elif msg_type == 'set_complete':
-                                self._publish_display({
-                                    "type": "set_summary",
-                                    "set_number": message.get("set_number"),
-                                    "total_reps": message.get("total_reps"),
-                                    "clean_reps": message.get("clean_reps"),
-                                    "avg_depth": message.get("avg_depth"),
-                                    "depth_consistency": message.get("depth_consistency"),
-                                    "fault_summary": message.get("fault_summary", {}),
-                                })
+                                has_depth = self._pipeline_profile not in DEPTHLESS_PROFILES
+                                self._publish_display(_set_summary_display_event(message, has_depth))
                             elif msg_type == 'diagnosis_complete':
                                 scoring = message.get("scoring") or {}
                                 self._publish_display({
@@ -1149,7 +1203,10 @@ class NowvaApp:
                         # Signal the preloaded subprocess to open camera
                         if self.ipc_server and self.ipc_server.client_socket:
                             try:
-                                self.ipc_server.send_message({"type": "start_capture"})
+                                exercise_meta = self._exercise_meta(
+                                    self.state.get("workout.exercise_name") or DEFAULT_EXERCISE_NAME
+                                )
+                                self.ipc_server.send_message(_start_capture_message(exercise_meta))
                                 print("[PRELOAD] Sent start_capture — camera opening")
                             except Exception as e:
                                 print(f"[PRELOAD] Failed to send start_capture: {e}")

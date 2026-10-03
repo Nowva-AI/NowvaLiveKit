@@ -7,6 +7,7 @@ thread so cloud DB latency never blocks the coaching event loop.
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
 import uuid
@@ -34,7 +35,9 @@ CHRONIC_MIN_SESSIONS = 3
 # The squat's once-per-rep verdicts (knee_valgus, hip_shoot, balance,
 # hip_shift, bar-tilt bilateral_asymmetry, ...) are judged when the rep
 # finishes, carry its own number and sit in its faults_detailed, so they are
-# not listed. lockout stays listed for the deadlift's lockout rule.
+# not listed. lockout stays listed for the deadlift's lockout rule. The conventional
+# deadlift's deadlift_* faults are judged when their rep is counted, with its number,
+# so they are never listed either.
 END_OF_REP_FAULT_TYPES = frozenset({
     "depth",
     "lockout",
@@ -97,6 +100,26 @@ def mean_fault_severity(fault_type: str, reps_faults: list[list[dict]]) -> float
     return sum(severities) / len(severities)
 
 
+def _without_nan(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _without_nan(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_nan(item) for item in value]
+    return value
+
+
+def _rep_kinematics(message: dict) -> dict | None:
+    """The squat's kinematic summary, or a deadlift rep's own features, versioned by
+    dl_schema, which take that column: the deadlift has no squat summary. NaN ("not
+    measured") is stored as null, since JSONB has no NaN."""
+    features = message.get("features") or {}
+    if "dl_schema" in features:
+        return _without_nan(features)
+    return message.get("rep_kinematic_summary")
+
+
 def _build_rep_row(message: dict) -> dict:
     return {
         "rep_number": message.get("rep_number", 0),
@@ -104,7 +127,7 @@ def _build_rep_row(message: dict) -> dict:
         "is_clean": bool(message.get("is_clean", False)),
         "depth_class": message.get("depth_class_int"),
         "max_depth_angle": message.get("max_depth_angle"),
-        "kinematics": message.get("rep_kinematic_summary"),
+        "kinematics": _rep_kinematics(message),
         "faults": message.get("faults_detailed") or [],
         "timing": {
             "rep_duration_ms": message.get("rep_duration_ms"),

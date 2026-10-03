@@ -41,11 +41,12 @@ class BaseNovaAgent(AffectNodesMixin, Agent):
     llm_node (athlete-state injection).
     """
 
-    def __init__(self, state: AgentState, userdata, instructions: str) -> None:
+    def __init__(self, state: AgentState, userdata, instructions: str, tools: list | None = None) -> None:
         self.state = state
         self.userdata = userdata
         self._agent_instructions = instructions
-        super().__init__(instructions=build_agent_instructions(state, instructions))
+        # tools: extra tools beyond the class's own (e.g. explain_deadlift in a deadlift session).
+        super().__init__(instructions=build_agent_instructions(state, instructions), tools=tools)
 
     @property
     def user_id(self) -> str:
