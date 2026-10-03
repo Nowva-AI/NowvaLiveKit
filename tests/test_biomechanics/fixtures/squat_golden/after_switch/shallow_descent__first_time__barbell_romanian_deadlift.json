@@ -1,0 +1,587 @@
+{
+ "carries": ["body_measurements", "standing_reference"],
+ "edits": [
+  {
+   "path": ["faults", 0, "details", "depth_cm_above_parallel"],
+   "value": 28.310796
+  },
+  {
+   "path": ["faults", 0, "details", "depth_ratio"],
+   "value": 0.629446
+  },
+  {
+   "path": ["faults", 0, "details", "value"],
+   "value": 0.429446
+  },
+  {
+   "path": ["faults", 0, "severity_score"],
+   "value": 2.217784
+  },
+  {
+   "path": ["ipc", 1, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 1, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 1, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 1, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 1, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 2, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 2, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 2, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 2, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 2, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 3, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 3, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 3, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 3, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 3, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 4, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 4, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 4, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 4, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 4, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 5, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 5, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 5, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 5, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 5, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 6, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 6, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 6, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 6, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 6, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 7, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 7, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 7, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 7, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 7, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 8, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 8, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 8, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 8, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 8, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 9, "message", "features", "depth_cm_above_parallel"],
+   "value": 3.921996
+  },
+  {
+   "path": ["ipc", 9, "message", "features", "depth_ratio"],
+   "value": 0.087199
+  },
+  {
+   "path": ["ipc", 9, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["ipc", 9, "message", "rep_kinematic_summary"],
+   "value": {
+    "ankle_df_l_max": 35.783315,
+    "ankle_df_r_max": 35.783315,
+    "ascent_time_s": 0.9,
+    "balance_ratio": -0.235984,
+    "bar_detected": false,
+    "concentric_velocity_mps": 0.629814,
+    "depth_class_int": 2,
+    "depth_cm_above_parallel": 3.921996,
+    "depth_ratio": 0.087199,
+    "descent_time_s": 0.8,
+    "expected_pitch_athlete": 34.495796,
+    "expected_pitch_reference": 32.587229,
+    "expected_pitch_with_ankles": 29.79679,
+    "foot_direction_angle_l": 9.462322,
+    "foot_direction_angle_r": 9.462322,
+    "heel_rise_max_cm": 0.0,
+    "hip_flexion_l_max": 125.54746,
+    "hip_flexion_r_max": 125.54746,
+    "hip_shift_ratio": 0.0,
+    "hip_shoot_deg": -10.005415,
+    "hip_y_l_at_bottom": 39.122929,
+    "hip_y_l_at_top": 86.423302,
+    "hip_y_r_at_bottom": 39.122929,
+    "hip_y_r_at_top": 86.423302,
+    "initiation_ratio": 1.016121,
+    "knee_valgus_l": 1.407746,
+    "knee_valgus_r": 1.407746,
+    "knee_y_l_at_bottom": 35.219366,
+    "knee_y_l_at_top": 42.779361,
+    "knee_y_r_at_bottom": 35.219366,
+    "knee_y_r_at_top": 42.779361,
+    "lockout_deficit_ratio": 0.000248,
+    "neck_flexion_deg": -45.073363,
+    "rep_number": 1,
+    "stagger_ratio": 0.0,
+    "stance_width_ratio": 0.504599,
+    "trunk_pitch_at_bottom": 39.878934,
+    "velocity_loss_pct": null
+   }
+  },
+  {
+   "path": ["ipc", 11, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 11, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 11, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 11, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 11, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 12, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 12, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 12, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 12, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 12, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 13, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 13, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 13, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 13, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 13, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 14, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 14, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 14, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 14, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 14, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 15, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 15, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 15, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 15, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 15, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 16, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 16, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 16, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 16, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 16, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 17, "message", "foot_direction_angle_l"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 17, "message", "foot_direction_angle_r"],
+   "value": 9.462322
+  },
+  {
+   "path": ["ipc", 17, "message", "stance_width_ratio"],
+   "value": 0.504599
+  },
+  {
+   "path": ["ipc", 17, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 17, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 18, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 18, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 19, "message", "depth_cm_above_parallel"],
+   "value": 28.310796
+  },
+  {
+   "path": ["ipc", 19, "message", "depth_ratio"],
+   "value": 0.629446
+  },
+  {
+   "path": ["ipc", 19, "message", "severity_score"],
+   "value": 2.22
+  },
+  {
+   "path": ["ipc", 20, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 20, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 21, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 21, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 22, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 22, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 23, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 23, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 24, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 24, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 25, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 25, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 26, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 26, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 27, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 27, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 28, "message", "features", "depth_ratio"],
+   "value": 0.087199
+  },
+  {
+   "path": ["ipc", 28, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000224
+  },
+  {
+   "path": ["ipc", 28, "message", "highlights"],
+   "value": ["depth_target_met", "clean"]
+  },
+  {
+   "path": ["ipc", 28, "message", "rep_kinematic_summary", "depth_ratio"],
+   "value": 0.087199
+  },
+  {
+   "path": ["ipc", 28, "message", "rep_kinematic_summary", "expected_pitch_athlete"],
+   "value": 34.495796
+  },
+  {
+   "path": ["ipc", 28, "message", "rep_kinematic_summary", "expected_pitch_reference"],
+   "value": 32.587229
+  },
+  {
+   "path": ["ipc", 28, "message", "rep_kinematic_summary", "expected_pitch_with_ankles"],
+   "value": 29.79679
+  },
+  {
+   "path": ["ipc", 28, "message", "rep_kinematic_summary", "lockout_deficit_ratio"],
+   "value": 0.000224
+  },
+  {
+   "path": ["ipc", 30, "message", "target_stance_ratio"],
+   "value": 1.625557
+  },
+  {
+   "path": ["ipc", 30, "message", "target_toe_out_deg"],
+   "value": 24.501102
+  },
+  {
+   "path": ["ipc", 32, "message", "diagnosis", "confidence"],
+   "value": 0.667
+  },
+  {
+   "path": ["ipc", 32, "message", "diagnosis", "detected_symptoms", 0, "contributing_reps"],
+   "value": [1, 2]
+  },
+  {
+   "path": ["ipc", 32, "message", "diagnosis", "detected_symptoms", 0, "severity"],
+   "value": 0.107642
+  },
+  {
+   "path": ["ipc", 32, "message", "diagnosis", "detected_symptoms", 1, "contributing_reps"],
+   "value": [1, 2]
+  },
+  {
+   "path": ["ipc", 32, "message", "diagnosis", "detected_symptoms", 1, "severity"],
+   "value": 0.044996
+  },
+  {
+   "path": ["ipc", 32, "message", "diagnosis", "detected_symptoms", 2, "contributing_reps"],
+   "value": [1, 2]
+  },
+  {
+   "path": ["ipc", 32, "message", "scoring", "best_rep"],
+   "value": 1
+  },
+  {
+   "path": ["ipc", 32, "message", "scoring", "mean_score"],
+   "value": 0.888
+  },
+  {
+   "path": ["ipc", 32, "message", "scoring", "per_dimension", "depth"],
+   "value": 0.99
+  },
+  {
+   "path": ["ipc", 32, "message", "scoring", "per_dimension", "trunk_control"],
+   "value": 0.64
+  },
+  {
+   "path": ["ipc", 32, "message", "scoring", "per_rep_scores"],
+   "value": [
+    {
+     "composite_score": 0.888,
+     "depth_score": 0.99,
+     "knee_tracking_score": 1.0,
+     "rep_number": 1,
+     "symmetry_score": 1.0,
+     "tempo_score": 0.867,
+     "trunk_control_score": 0.64
+    },
+    {
+     "composite_score": 0.888,
+     "depth_score": 0.99,
+     "knee_tracking_score": 1.0,
+     "rep_number": 2,
+     "symmetry_score": 1.0,
+     "tempo_score": 0.867,
+     "trunk_control_score": 0.64
+    }
+   ]
+  },
+  {
+   "path": ["ipc", 32, "message", "scoring", "worst_rep"],
+   "value": 1
+  },
+  {
+   "path": ["reps", 0, "features", "depth_cm_above_parallel"],
+   "value": 3.921996
+  },
+  {
+   "path": ["reps", 0, "features", "depth_ratio"],
+   "value": 0.087199
+  },
+  {
+   "path": ["reps", 0, "features", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["reps", 1, "features", "depth_ratio"],
+   "value": 0.087199
+  },
+  {
+   "path": ["reps", 1, "features", "lockout_deficit_ratio"],
+   "value": 0.000224
+  }
+ ]
+}

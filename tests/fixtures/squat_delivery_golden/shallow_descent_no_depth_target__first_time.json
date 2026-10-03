@@ -1,0 +1,163 @@
+{
+ "chat_context": ["You are Nova.", "[LAST SET] Set 1: 2 of 3 reps clean; load bodyweight; focus weight drifting off the middle of the foot; cue 'Whole foot' at rep 2, gone after; adjustment: each foot about 21 centimeters wider. You told them: \"Solid set, keep it up.\""],
+ "cues_played": [
+  {
+   "cue": "rep_1",
+   "t_s": 2.866667
+  },
+  {
+   "cue": "rep_2",
+   "t_s": 5.5
+  },
+  {
+   "cue": "whole_foot",
+   "t_s": 5.5
+  },
+  {
+   "cue": "rep_3",
+   "t_s": 8.266667
+  }
+ ],
+ "dropped_messages": [],
+ "last_set": {
+  "avg_depth": 104.6,
+  "avg_duration_ms": 1656,
+  "clean_reps": 2,
+  "cue_outcomes": [
+   {
+    "after_rep": 2,
+    "cue_key": "whole_foot",
+    "fault_type": "balance",
+    "faulted_after": [],
+    "reps_after": [3]
+   }
+  ],
+  "depth_consistency": 27.8,
+  "diagnosis_set_number": 1,
+  "effort": "fresh",
+  "exercise_name": "Barbell Back Squat",
+  "fault_summary": {
+   "balance": {
+    "count": 1,
+    "pct": 33
+   },
+   "depth_drift": {
+    "count": 1,
+    "pct": 33
+   },
+   "velocity_loss": {
+    "count": 1,
+    "pct": 33
+   }
+  },
+  "focus_fault": "balance",
+  "is_squat": true,
+  "load": "bodyweight",
+  "per_rep": [
+   {
+    "clean": true,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": [],
+    "rep": 1
+   },
+   {
+    "clean": false,
+    "depth": "quarter",
+    "depth_angle": 72.5,
+    "duration_ms": 1567,
+    "faults": ["balance", "depth_drift", "velocity_loss"],
+    "rep": 2
+   },
+   {
+    "clean": true,
+    "depth": "half",
+    "depth_angle": 120.6,
+    "duration_ms": 1700,
+    "faults": [],
+    "rep": 3
+   }
+  ],
+  "set_number": 1,
+  "shallow_depths": [],
+  "shallow_reps": 0,
+  "target_reps": 3,
+  "total_reps": 3,
+  "trigger": "rep_count"
+ },
+ "llm_prompts": [
+  {
+   "persona": true,
+   "t_s": 8.633333,
+   "user_input": "Your athlete just finished a set. Here's their biomechanics analysis and rep data. Give three beats in 2-3 short sentences, in whatever order feels natural: one takeaway about the set, the ONE adjustment for the next set (in body units when the ADJUSTMENT gives them), and one specific thing that went well \u2014 a CUE OUTCOME where the fix held is the best one. Plain qualitative words: whole numbers only where they help (a rep number, a cm adjustment, a score change), never decimals, degrees or seconds. Open differently than you did after the last set. A light touch of dry humor is welcome if it comes naturally \u2014 never forced. Here is the data: Set 1 of 2 just finished: 2 of 3 reps clean. Next up is set 2 of 2. Load: bodyweight. Depth was varied from rep to rep. Faults: weight drifting off the middle of the foot on 1 of 3 reps; reps getting shallower on 1 of 3 reps; reps slowing down on 1 of 3 reps. This set's focus was weight drifting off the middle of the foot. CUE OUTCOME: after your cue on weight drifting off the middle of the foot at rep 2, it was gone on rep 3 \u2014 name that improvement. Best rep: rep 1, their deepest clean rep. Roughest rep: rep 2 \u2014 weight drifting off the middle of the foot, reps getting shallower, reps slowing down. \nFORM SCORE: 86 out of 100 (depth: 63, trunk: 82, knee: 100, symmetry: 100, tempo: 84) TREND: improving over the set TOP ISSUE: Your stance is about 0.5 times shoulder width \u2014 try each foot about 21 cm wider. ADJUSTMENT: each foot about 21 centimeters wider Never say or imply anything about lower-back tucking (butt wink), upper-back rounding, bracing, or foot arch \u2014 the cameras can't see those.\n\nThe athlete can't answer right now \u2014 they'd have to say the wake word first \u2014 so don't ask them anything."
+  }
+ ],
+ "recorder_ops": [
+  {
+   "faults_in_rep": [],
+   "is_clean": true,
+   "op": "record_rep",
+   "rep_number": 1,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "cue": "whole_foot",
+   "fault_type": "balance",
+   "op": "record_fault",
+   "rep_number": 2,
+   "severity": "severe",
+   "type": "fault"
+  },
+  {
+   "cue": null,
+   "fault_type": "depth_drift",
+   "op": "record_fault",
+   "rep_number": 2,
+   "severity": "severe",
+   "type": "fault"
+  },
+  {
+   "cue": null,
+   "fault_type": "velocity_loss",
+   "op": "record_fault",
+   "rep_number": 2,
+   "severity": "severe",
+   "type": "fault"
+  },
+  {
+   "faults_in_rep": ["balance", "depth_drift", "velocity_loss"],
+   "is_clean": false,
+   "op": "record_rep",
+   "rep_number": 2,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "cue_key": "whole_foot",
+   "fault_type": "balance",
+   "op": "record_cue_delivered"
+  },
+  {
+   "faults_in_rep": [],
+   "is_clean": true,
+   "op": "record_rep",
+   "rep_number": 3,
+   "set_number": 1,
+   "type": "rep_complete"
+  },
+  {
+   "op": "record_set",
+   "set_number": 1,
+   "type": "diagnosis_complete"
+  }
+ ],
+ "to_pipeline": [
+  {
+   "rest_seconds": 90,
+   "type": "rest_start"
+  }
+ ],
+ "workout_state_line": "WORKOUT: resting before set 2/2, about 75s left | last set 2/3 clean | focus not reaching their depth target | last cue 'Whole foot' after rep 2: looking better | load bodyweight"
+}

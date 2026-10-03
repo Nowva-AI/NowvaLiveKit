@@ -1,0 +1,29 @@
+{
+ "carries": ["standing_reference"],
+ "edits": [
+  {
+   "path": ["ipc", 9, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["ipc", 9, "message", "rep_kinematic_summary", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["ipc", 28, "message", "features", "lockout_deficit_ratio"],
+   "value": 0.000224
+  },
+  {
+   "path": ["ipc", 28, "message", "rep_kinematic_summary", "lockout_deficit_ratio"],
+   "value": 0.000224
+  },
+  {
+   "path": ["reps", 0, "features", "lockout_deficit_ratio"],
+   "value": 0.000248
+  },
+  {
+   "path": ["reps", 1, "features", "lockout_deficit_ratio"],
+   "value": 0.000224
+  }
+ ]
+}
