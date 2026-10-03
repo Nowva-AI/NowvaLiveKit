@@ -338,6 +338,11 @@ class DeadliftRepAnalyzer:
 
     def observe(self, frame_input: DeadliftFrameInput) -> None:
         self.rep_started = False
+        if self._rest_source is not None and self.phase == DeadliftPhase.APPROACH:
+            if (frame_input.bar is not None) != (self._rest_source == BAR_SOURCE_BAR):
+                # Away from the bar the other source (bar found or lost) may
+                # define the rest afresh.
+                self._clear_rest()
         measure = self._measure(frame_input)
         if measure is None:
             return
@@ -434,10 +439,6 @@ class DeadliftRepAnalyzer:
         ])
 
         cfg = self.config
-        if self._rest_source is not None and self.phase == DeadliftPhase.APPROACH:
-            if (bar is not None) != (self._rest_source == BAR_SOURCE_BAR):
-                # Away from the bar the other source may define the rest afresh.
-                self._clear_rest()
         # Heights are only comparable with a rest measured from the same source:
         # once a set runs on the wrists it stays on them, and a set on the tracked
         # bar has no bar on a frame the bar is lost rather than a jump to the wrists.
