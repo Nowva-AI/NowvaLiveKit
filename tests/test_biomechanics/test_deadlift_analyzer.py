@@ -53,6 +53,19 @@ KNEES_HIDDEN_ABOVE_M = 0.15
 FEET_MOVED_AT_THE_FLOOR_M = 0.05
 # Hip shift a stance leaks into D8 beyond the same seed's square stance.
 STANCE_LEAK_MAX_RATIO = 0.03
+# A 0.20-separation hip shift reads this noise-free (the first fifth's median
+# takes ~0.015 off it), and within this of it whatever the pelvis does.
+SQUARE_PELVIS_SHIFT_RATIO = 0.185
+SHIFT_SIZE_TOLERANCE_RATIO = 0.03
+# A 2.5 cm shrug at the top moves the top event no more than this.
+SHRUG_TOP_SHIFT_MAX_S = 0.15
+# The wrist proxy's top event: bound by the wrists' noise, not the 100 ms gate.
+MAX_PROXY_TOP_ERROR_S = 0.3
+# Keypoints a shrug at the top lifts with the bar.
+UPPER_BODY = (
+    CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER, CK.LEFT_ELBOW, CK.RIGHT_ELBOW, CK.LEFT_WRIST, CK.RIGHT_WRIST,
+    CK.NOSE, CK.LEFT_EYE, CK.RIGHT_EYE, CK.LEFT_EAR, CK.RIGHT_EAR,
+)
 # A staggered stance: the left foot this far ahead of the right, hips square.
 STAGGER_M = 0.06
 LEFT_FOOT = (CK.LEFT_ANKLE, CK.LEFT_HEEL, CK.LEFT_FOOT_INDEX)
@@ -152,6 +165,77 @@ def _turned_then_squared(
             [math.cos(angle), 0.0, math.sin(angle)], [0.0, 1.0, 0.0], [-math.sin(angle), 0.0, math.cos(angle)],
         ])
         return noise(index, frame._replace(points=(frame.points - pivot) @ rotation.T + pivot))
+
+    return mutate
+
+
+def _yaw(degrees: float) -> np.ndarray:
+    angle = math.radians(degrees)
+    return np.array([[math.cos(angle), 0.0, math.sin(angle)], [0.0, 1.0, 0.0], [-math.sin(angle), 0.0, math.cos(angle)]])
+
+
+# The two hip keypoints turned about their midpoint (the midpoint stays put).
+def _hips_yawed(points: np.ndarray, degrees: float) -> np.ndarray:
+    points = points.copy()
+    middle = (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
+    for index in (CK.LEFT_HIP, CK.RIGHT_HIP):
+        points[index] = (points[index] - middle) @ _yaw(degrees).T + middle
+    return points
+
+
+# The hip line turned against legs and travel that stay square to the bar, by a
+# fixed angle (pelvic rotation, or a front-back asymmetry of the hip keypoints)
+# or, with shift_m, in proportion to how far the hips have moved sideways.
+def _hip_line_turned(degrees: float, shift_m: float | None = None) -> FrameMutation:
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        share = 1.0
+        if shift_m is not None:
+            share = -(frame.points[CK.LEFT_HIP][0] + frame.points[CK.RIGHT_HIP][0]) / 2.0 / shift_m
+        return _hips_yawed(frame.points, degrees * share), frame.confidences, frame.bar
+
+    return mutate
+
+
+# A pelvis twist with no sideways travel: in over the first half of each pull,
+# held through the top, out over the lowering.
+def _pelvis_twisting(sim: SimulatedSet, degrees: float) -> FrameMutation:
+    windows = [(rep.liftoff_time, rep.top_time, rep.floor_time) for rep in sim.reps if rep.counted]
+
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        share = 0.0
+        for liftoff, top, floor in windows:
+            if liftoff <= frame.timestamp <= top:
+                share = min(1.0, (frame.timestamp - liftoff) / (0.5 * (top - liftoff)))
+            elif top < frame.timestamp <= floor:
+                share = 1.0 - (frame.timestamp - top) / (floor - top)
+        return _hips_yawed(frame.points, degrees * share), frame.confidences, frame.bar
+
+    return mutate
+
+
+# A shrug of rise_m at the top of one rep: shoulders, arms and bar up, then down.
+def _shrugged(sim: SimulatedSet, rise_m: float, rep_index: int) -> FrameMutation:
+    start = sim.reps[rep_index].top_time + 0.25
+    up_end, hold_end, down_end = start + 0.25, start + 0.55, start + 0.8
+
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        t = frame.timestamp
+        lift = 0.0
+        if start <= t < up_end:
+            lift = rise_m * (t - start) / (up_end - start)
+        elif up_end <= t < hold_end:
+            lift = rise_m
+        elif hold_end <= t < down_end:
+            lift = rise_m * (1.0 - (t - hold_end) / (down_end - hold_end))
+        if lift <= 0.0:
+            return frame.points, frame.confidences, frame.bar
+        points = frame.points.copy()
+        points[list(UPPER_BODY), 1] -= lift
+        left, right = list(frame.bar.left_end_m), list(frame.bar.right_end_m)
+        left[1] -= lift
+        right[1] -= lift
+        bar = frame.bar.model_copy(update={"left_end_m": tuple(left), "right_end_m": tuple(right)})
+        return points, frame.confidences, bar
 
     return mutate
 
@@ -810,18 +894,19 @@ class TestHipShiftAlongTheLifter:
         _, features, _, _ = _analyse(scenario, mutate=_turned(sim, degrees, LOWER_BODY))
         assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
 
-    @pytest.mark.parametrize("seed", range(4))
-    def test_an_off_square_stance_reads_as_square_under_correlated_noise(self, seed: int):
-        """The same noise on a square stance and one 8 deg off: the same hip shift
-        (the noise floor itself is the clean-set tests')."""
-        scenario = Scenario(seed=seed, bar_noise_m=TRACKED_BAR_NOISE_M)
-        sim = simulate(scenario)
-        _, square, _, _ = _analyse(scenario, mutate=_correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, seed))
-        noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, seed)
-        _, turned, _, _ = _analyse(scenario, mutate=_turned(sim, 8.0, LOWER_BODY, noise))
-        assert len(turned) == len(square) == len(sim.reps)
-        for square_rep, turned_rep in zip(square, turned):
-            assert turned_rep.hip_shift_ratio == pytest.approx(square_rep.hip_shift_ratio, abs=STANCE_LEAK_MAX_RATIO)
+    def test_an_off_square_stance_rarely_cues_hip_shift_under_correlated_noise(self):
+        """8 deg off square: the bar's axis leaks the hips' travel into sideways,
+        the hip line does not, and D8 needs both to agree."""
+        cued = reps = 0
+        for seed in range(8):
+            scenario = Scenario(seed=seed, bar_noise_m=TRACKED_BAR_NOISE_M)
+            sim = simulate(scenario)
+            noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, 0.8, seed)
+            _, features, _, _ = _analyse(scenario, mutate=_turned(sim, 8.0, LOWER_BODY, noise))
+            reps += len(features)
+            cued += sum("deadlift_hip_shift" in rep_cues for rep_cues in _cued(features))
+        assert reps == 24
+        assert cued <= reps // 10
 
     def test_a_whole_lifter_turned_off_square_to_the_bar_is_no_hip_shift(self):
         scenario = Scenario()
@@ -870,6 +955,30 @@ class TestHipShiftAlongTheLifter:
         _, features, _, _ = _analyse(scenario, mutate=mutate)
         assert len(features) == len(sim.reps)
         assert all("deadlift_hip_shift" not in cued for cued in _cued(features))
+
+    def test_a_hip_line_turned_against_the_legs_is_no_hip_shift(self):
+        """The hip keypoints' line 4 deg off legs and travel square to the bar (a
+        habitual pelvic rotation, or 1.5 cm of front-back asymmetry between the
+        two hip keypoints): the hip line leaks, the bar's axis does not."""
+        _, features, _, _ = _analyse(Scenario(), mutate=_hip_line_turned(4.0))
+        assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
+
+    def test_a_pelvis_twist_without_sideways_travel_is_no_hip_shift(self):
+        sim = simulate(Scenario())
+        _, features, _, _ = _analyse(Scenario(), mutate=_pelvis_twisting(sim, 15.0))
+        assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
+
+    @pytest.mark.parametrize("track_bar", [True, False], ids=["tracked", "proxy"])
+    @pytest.mark.parametrize("degrees", [10.0, -10.0])
+    def test_a_real_shift_reads_its_size_when_the_pelvis_turns_with_it(self, degrees: float, track_bar: bool):
+        """The hip axis is taken before the rep: a pelvis turning during the pull
+        neither absorbs the shift nor inflates it."""
+        shift_m = 0.20 * 2.0 * SimAthlete().stance_half_width_m
+        scenario = Scenario(reps=[RepScript(hip_shift_m=shift_m)] * 3, track_bar=track_bar)
+        _, features, _, _ = _analyse(scenario, mutate=_hip_line_turned(degrees, shift_m))
+        assert all(
+            f.hip_shift_ratio == pytest.approx(SQUARE_PELVIS_SHIFT_RATIO, abs=SHIFT_SIZE_TOLERANCE_RATIO) for f in features
+        )
 
     def test_a_real_shift_is_still_seen_off_square(self):
         scenario = Scenario(reps=[RepScript(hip_shift_m=0.05)] * 2)
@@ -961,8 +1070,52 @@ class TestSetBehaviour:
             assert measured.top_time == pytest.approx(expected.top_time, abs=MAX_EVENT_ERROR_S)
         assert all("deadlift_lockout" not in cued for cued in _cued(features))
 
+    def test_a_grind_short_of_lockout_on_the_wrist_proxy_is_not_judged_as_the_lockout(self):
+        """The proxy's noise: the stall ends on medians of the bar's height, and the
+        lockout is judged on the hold's most extended stretch."""
+        lockout_cues = late_tops = reps = 0
+        for seed in range(6):
+            scenario = Scenario(reps=[RepScript(pull_s=2.5, stall_fraction=0.95, stall_s=0.8)] * 3, track_bar=False, seed=seed)
+            sim, features, _, _ = _analyse(scenario, mutate=_correlated_noise(0.015, 0.8, 40 + seed))
+            assert len(features) == len(sim.reps)
+            reps += len(features)
+            late_tops += sum(abs(f.top_time - truth.top_time) > MAX_PROXY_TOP_ERROR_S for f, truth in zip(features, sim.reps))
+            lockout_cues += sum("deadlift_lockout" in cued for cued in _cued(features))
+        assert lockout_cues <= reps // 10
+        assert late_tops <= reps // 10
+
+    def test_a_shrug_at_the_top_is_not_a_slower_rep(self):
+        """A shrug lifts the bar off a lockout: no stall to resume from, so the top
+        stays near where the bar arrived (the shrug's first centimetres sit in
+        the hold) and no velocity loss is read."""
+        scenario = Scenario(reps=[RepScript(top_hold_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M)
+        sim = simulate(scenario)
+        _, features, _, _ = _analyse(scenario, mutate=_shrugged(sim, 0.025, rep_index=3))
+        assert len(features) == len(sim.reps)
+        assert features[3].top_time == pytest.approx(sim.reps[3].top_time, abs=SHRUG_TOP_SHIFT_MAX_S)
+        assert "deadlift_velocity_loss" not in _judge(features)[3]
+
+    @pytest.mark.parametrize("lean_back_deg", [25.0, 40.0])
+    def test_an_over_extended_lockout_with_the_knees_hidden_is_counted(self, lean_back_deg: float):
+        """The knees hidden at the top, the hips as far from the ankles as standing
+        say the legs are straight."""
+        scenario = Scenario(reps=[RepScript(lean_back_deg=lean_back_deg)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M)
+        first = simulate(scenario).frames[0].bar
+        floor_bar_up = -(first.left_end_m[1] + first.right_end_m[1]) / 2.0
+
+        def hide_knees_off_the_floor(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+            confidences = frame.confidences.copy()
+            if -(frame.bar.left_end_m[1] + frame.bar.right_end_m[1]) / 2.0 - floor_bar_up > KNEES_HIDDEN_ABOVE_M:
+                confidences[[CK.LEFT_KNEE, CK.RIGHT_KNEE]] = 0.0
+            return frame.points, confidences, frame.bar
+
+        sim, features, analyzer, _ = _analyse(scenario, mutate=hide_knees_off_the_floor)
+        assert len(features) == len(sim.reps)
+        assert analyzer.failed_reps == 0
+
     def test_a_lean_back_from_mid_thigh_with_the_knees_hidden_is_a_failed_rep(self):
-        """Knees not measured are not known to be straight: no lockout."""
+        """The knees hidden, the hips ~12 cm closer to the ankles than standing say
+        they are bent."""
         scenario = Scenario(reps=[RepScript(), RepScript(fail_rise_m=0.35, lean_back_deg=40.0), RepScript()])
 
         def hide_knees_off_the_floor(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:

@@ -47,6 +47,10 @@ MIN_SHOULDER_RISE_M = 0.01
 # Plausible segment lengths for the setup model (m); outside them the keypoints are wrong.
 MIN_SEGMENT_M = 0.15
 MAX_SEGMENT_M = 0.90
+# The lockout (D6) and lean-back (D5) are judged on the hold's most extended
+# stretch this long: a stall short of lockout inside the hold, or the knees
+# unlocking as the lowering begins, is not the lockout.
+TOP_JUDGE_WINDOW_S = 0.3
 # Event timing: leaving or reaching a level with constant acceleration, the
 # distance from the level is c * (t - t0)^2 on one side of the event t0 and zero
 # on the other. Fitted on the frames within this distance of the level, by a grid
@@ -154,9 +158,9 @@ def liftoff_time(rep: RepTrack, rest_up: float, band_m: float) -> float:
 
 
 def top_time(rep: RepTrack, band_m: float) -> float:
-    """The bar's arrival at its top: the level it held there (or its peak, for a
-    top that never held), reached after the first frame inside the band, on the
-    bar's last climb."""
+    """The bar's arrival at its top: the level it held just after it arrived (or
+    its peak, for a top that never held), reached after the first frame inside
+    the band, on the bar's last climb."""
     level = _median([frame.bar_up for frame in rep.top_frames]) if rep.top_frames else rep.top_up
     if not math.isfinite(level):
         return rep.top_time
@@ -164,8 +168,15 @@ def top_time(rep: RepTrack, band_m: float) -> float:
         (frame.t for frame in rep.frames if frame.t >= rep.climb_start and frame.bar_up >= level - band_m),
         rep.top_time,
     )
+    if rep.climb_start > rep.liftoff.t:
+        # After a stall the bar climbs its last centimetres in a few frames: no
+        # parabola to fit, the arrival is the top.
+        return arrival
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
-    frames = [frame for frame in rep.frames if rep.climb_start <= frame.t <= leaving]
+    # Reaching the level from below: frames above it (a shrug) are no approach.
+    frames = [
+        frame for frame in rep.frames if rep.climb_start <= frame.t <= leaving and frame.bar_up <= level + band_m
+    ]
     estimate = _event_time(frames, level, band_m, arrival, min(arrival + EVENT_MAX_SHIFT_S, leaving), leaving=False)
     return estimate if math.isfinite(estimate) else arrival
 
@@ -391,41 +402,66 @@ def _bar_path_features(pull: list[FrameMeasure], hold: list[FrameMeasure], featu
     features.bar_low_side = "left" if _median(tilts) < 0.0 else "right"
 
 
+# The window of TOP_JUDGE_WINDOW_S with the least hip and knee flexion.
+def _most_extended(frames: list[FrameMeasure]) -> list[FrameMeasure]:
+    windows = [
+        [frame for frame in frames[start:] if frame.t - frames[start].t <= TOP_JUDGE_WINDOW_S + 1e-6]
+        for start in range(len(frames))
+        if frames[-1].t - frames[start].t >= TOP_JUDGE_WINDOW_S - 1e-6 or start == 0
+    ]
+
+    def flexion(window: list[FrameMeasure]) -> float:
+        hip = _median([f.hip_flex_deg for f in window])
+        knee = _median([f.knee_flex_deg for f in window])
+        return (hip if math.isfinite(hip) else 0.0) + (knee if math.isfinite(knee) else 0.0)
+
+    return min(windows, key=flexion)
+
+
 def _top_features(rep: RepTrack, refs: dict[str, float], features: DeadliftRepFeatures) -> None:
     top = [f for f in rep.top_frames if f.legs_measured] or rep.top_frames
     if not top or not refs:
         return
+    top = _most_extended(top)
     features.hip_extension_deficit_deg = _median([f.hip_flex_deg for f in top]) - refs.get("hip_flex_deg", NAN)
     features.knee_extension_deficit_deg = _median([f.knee_flex_deg for f in top]) - refs.get("knee_flex_deg", NAN)
     features.lean_back_deg = refs.get("trunk_deg", NAN) - _median([f.trunk_deg for f in top])
 
 
 # The hips' sideways position over the second half of the pull against where
-# they started, as a fraction of ankle separation, along the pelvis's left-right
-# (the hip line): the hips travel ~45 cm forward square to it, which the bar's
-# axis read as sideways on a stance off square to the bar, and the ankle line on
-# a staggered stance. Medians over many frames: a hip keypoint jitters by more
-# than a real shift's first centimetres.
-def _hip_shift_feature(
-    pull: list[FrameMeasure],
-    locked_midfoot: np.ndarray | None,
-    body_lateral: np.ndarray,
-    features: DeadliftRepFeatures,
-) -> None:
+# they started, as a fraction of ankle separation, along one axis. Medians over
+# many frames: a hip keypoint jitters by more than a real shift's first
+# centimetres.
+def _shift_ratio(pull: list[FrameMeasure], locked_midfoot: np.ndarray | None, axis: np.ndarray) -> float:
     ratios: list[float] = []
     for frame in pull:
         if frame.l_ankle is None or frame.r_ankle is None:
             continue
-        separation = abs(float(np.dot(frame.r_ankle - frame.l_ankle, body_lateral)))
+        separation = abs(float(np.dot(frame.r_ankle - frame.l_ankle, axis)))
         if separation < MIN_ANKLE_SEPARATION_M:
             continue
         reference = locked_midfoot if locked_midfoot is not None else frame.ankle_mid
-        ratios.append(float(np.dot(frame.hip_mid - reference, body_lateral)) / separation)
+        ratios.append(float(np.dot(frame.hip_mid - reference, axis)) / separation)
     if len(ratios) < 2 * SHIFT_START_FRAMES:
-        return
+        return NAN
     start_frames = max(SHIFT_START_FRAMES, int(len(ratios) * SHIFT_START_FRACTION))
     start = float(np.median(ratios[:start_frames]))
-    features.hip_shift_ratio = float(np.median(ratios[len(ratios) // 2:])) - start
+    return float(np.median(ratios[len(ratios) // 2:])) - start
+
+
+# A real sideways shift reads on both axes; the hips' forward travel leaking
+# through one axis's misalignment reads on that one only. So the smaller of the
+# two readings, and none when they disagree on the side.
+def _hip_shift_feature(
+    pull: list[FrameMeasure],
+    locked_midfoot: np.ndarray | None,
+    shift_axes: tuple[np.ndarray, np.ndarray],
+    features: DeadliftRepFeatures,
+) -> None:
+    first, second = (_shift_ratio(pull, locked_midfoot, axis) for axis in shift_axes)
+    if not (math.isfinite(first) and math.isfinite(second)):
+        return
+    features.hip_shift_ratio = min(first, second, key=abs) if first * second > 0.0 else 0.0
 
 
 def rep_features(
@@ -434,13 +470,13 @@ def rep_features(
     rest_up: float,
     event_band_m: float,
     locked_midfoot: np.ndarray | None,
-    body_lateral: np.ndarray,
+    shift_axes: tuple[np.ndarray, np.ndarray],
     athlete: AthleteState,
     gravity_source: str,
     grip: str,
 ) -> DeadliftRepFeatures:
-    """body_lateral: the pelvis's horizontal left-to-right unit vector (the hip
-    line) that sideways hip shift is measured along."""
+    """shift_axes: two horizontal left-to-right unit vectors (the hip line and the
+    bar's line) that sideways hip shift is read along."""
     pull = [frame for frame in rep.frames if frame.t <= rep.top_time]
     liftoff = rep.liftoff
     setup = rep.setup
@@ -481,7 +517,7 @@ def rep_features(
     _coordination_features(rep, features)
     _bar_path_features(pull, rep.top_frames, features)
     _top_features(rep, refs, features)
-    _hip_shift_feature(pull, locked_midfoot, body_lateral, features)
+    _hip_shift_feature(pull, locked_midfoot, shift_axes, features)
     if refs and math.isfinite(refs.get("elbow_flex_deg", NAN)):
         features.elbow_flexion_deg = _percentile(
             [f.elbow_flex_deg - refs["elbow_flex_deg"] for f in pull], WORST_PERCENTILE,

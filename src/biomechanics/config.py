@@ -348,10 +348,17 @@ class DeadliftConfig(BaseModel):
     top_still_frames: int = 3
     top_max_trunk_deg: float = 35.0
     # A trunk this far behind vertical is an over-extended lockout, below the
-    # expected top height or not, with the knees measured and no more bent than
-    # this (a failed pull leaning back from mid-thigh keeps them bent ~60 deg).
+    # expected top height or not, with the legs straight: the knees bent no more
+    # than this (a failed pull leaning back from mid-thigh keeps them bent ~60
+    # deg) or, the knees hidden, the hips no more than this closer to the ankles
+    # than standing (~45 deg of knee bend; 60 deg shortens the leg ~12 cm).
     overextended_top_deg: float = 10.0
     overextended_max_knee_deg: float = 40.0
+    overextended_max_leg_shortening_m: float = 0.06
+    # TOP -> PULL: the bar rose past the top it held, which was a stall short of
+    # lockout only if the hips or knees held this far short of standing (D6's
+    # mild threshold); a shrug or a settling lockout rises too.
+    resume_min_deficit_deg: float = 8.0
     # A pull that rose this far but never reached the top is a failed rep.
     failed_rep_min_rise_m: float = 0.10
     # TOP -> LOWER.
