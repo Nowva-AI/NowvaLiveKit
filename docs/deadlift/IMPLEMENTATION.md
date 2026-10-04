@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v21).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v22).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -33,9 +33,11 @@ J6 (`VALIDATION.md`).
 
 **Reproducing them.** Each number marked [sweep] is printed by
 `PYTHONPATH=src python scripts/tools/deadlift_envelope.py <sweep>`, which also prints each row's
-bodies and seeds. The keypoint noise is drawn independently for every sweep, row, body and seed
-(a row of n sets is n noise draws; until round 8 one draw per seed was shared by every body).
-Numbers marked (test) are pinned by the named test in `tests/test_biomechanics/`.
+bodies and seeds. The keypoint noise is drawn independently for every sweep, row (its noise level
+included), body and seed: a row of n sets is n noise draws. `--salt N` draws every row afresh;
+a rate quoted as a range ("9–14 of 200") spans salts 0, 1 and 2, and a single number is salt 0,
+the default. Numbers marked (test) are pinned by the named test in `tests/test_biomechanics/`;
+`tests/test_deadlift_envelope_script.py` checks the script itself.
 
 **Noise models.** Keypoint noise is added at the analyser's input, after where the pipeline's
 Kalman sits:
@@ -79,24 +81,35 @@ lowerings, 0.2 s tops; 0.5, 0.6 and 0.8 s pulls; 10 seeds; 2 cm AR(0.8) and 1.5 
 point can read as a dead stop: the next rep is then counted as a quick re-pull, not a
 touch-and-go, but no rep is lost.
 
-**False cues on clean reps over five bodies** [clean], [no_pause]. `VALIDATION.md`'s gate is 1
-false correction per 10 reps.
+**False cues on clean reps over five bodies** [clean], [no_pause], AR(0.8) keypoint noise,
+as ranges over three draws (salts 0–2). `VALIDATION.md`'s gate is 1 false correction per 10
+reps.
 
-| Set | 2 cm AR(0.8) | 2.4 cm | 2.5 cm |
-|---|---|---|---|
-| Tracked, dead stop, 3 tempos × seeds 0–3 (180 reps) | 0 | — | 7 (D8 5, D9, D1) |
-| Proxy, 0.6 s holds, seeds 0–5 (90 reps; 0 at 1.5 cm) | 0 | — | 5 (D8 3, D6, D3) |
-| Proxy, no pause (0 s hold), dead stop, seeds 0–7 (120 reps) | 3 | 10 | 13 |
-| Proxy, 0.1 s hold, dead stop (120 reps) | 0 | 7 | 9 |
-| Proxy, no pause, touch-and-go, 0.9 s pulls (200 reps) | 10 (D6 6) | 28 (D6 13, D8 10) | 30 |
-| Proxy, 0.1 s hold, touch-and-go (200 reps) | 3 | 8 | 8 |
-| Tracked, no pause / 0.1 s hold, dead stop (120 reps each) | 0 / 1 | 5 / 3 | 5 / 7 |
-| Tracked, no pause / 0.1 s hold, touch-and-go (200 reps each) | 1 / 5 | 6 / 8 | 9 / 11 |
+| Set | 2 cm | 2.5 cm |
+|---|---|---|
+| Tracked, dead stop, 3 tempos × seeds 0–3 (180 reps) | 0 | 5–7 (D9 and D8) |
+| Proxy, 0.6 s holds, seeds 0–5 (90 reps; 0 at 1.5 cm) | 0–1 | 4–7 (mostly D8) |
 
-Within the gate at 2 cm everywhere. At the top of the platform's documented noise (2.4 cm),
-fast touch-and-go proxy reps with no pause at the top are over it (14 %): a top that never held
-is judged on the 0.1 s either side of its peak, a few frames of noisy angles (finding 45 moved
-that window onto the peak; before it, 2 cm cued 20 of 200).
+No pause at the top, seeds 0–7 (a top that never held is judged on the few frames either
+side of its peak):
+
+| Set (pull / lowering) | Proxy, 2 cm | Proxy, 2.4 cm | Tracked, 2 cm | Tracked, 2.4 cm |
+|---|---|---|---|---|
+| Dead stop, 0 s hold, 1.2 / 1.0 s (120 reps) | 1–8 | 6–13 | 0–2 | 5–7 |
+| Dead stop, 0.1 s hold, 1.2 / 1.0 s (120 reps) | 1–3 | 4–6 | 1–2 | 2–6 |
+| Touch-and-go, 0 s hold, 1.2 / 1.0 s (200 reps) | 7–9 | 18–22 | 1–3 | 8–14 |
+| Touch-and-go, 0 s hold, 0.9 / 0.8 s (200 reps) | 6–12 | 17–21 | 1–3 | 7–13 |
+| Touch-and-go, 0 s hold, 1.2 / 0.5 s (200 reps) | 4–7 | 17–22 | 3–11 | 10–17 |
+| Touch-and-go, 0 s hold, 0.6 / 0.5 s (200 reps) | 7–14 | 24–29 | 4 | 8–17 |
+| Touch-and-go, 0.1 s hold, 0.9 / 0.8 s (200 reps) | 3–5 | 7–15 | 1–6 | 4–9 |
+
+Within the gate at 2 cm on every row and draw. At 2.4 cm, the top of the platform's
+documented noise, the proxy's touch-and-go reps with no pause at the top reach or pass it
+(17–29 of 200, mostly D6 and D8, then D8b and D9), and one draw of its no-pause dead stops does (13 of
+120); the tracked bar stays within it (at most 17 of 200). Findings 49 and 52 took the fast
+lowering and the 0.6 s pull back inside the gate at 2 cm (the review's draws: proxy 9–26 of
+200 at 1.2 / 0.5 s, tracked 35 at 0.6 / 0.5 s). At 2.4 cm, 2 of the proxy's 600 touch-and-go
+sets (three draws) lost a rep; the previous commit lost the same two.
 
 **Through the real pipeline and its Kalman** (test, `test_deadlift_pipeline.py`; tracked bar
 and proxy): 3/3 reps at 1, 1.5 and 2 cm triangulation noise with the closed-loop STANCE
@@ -113,12 +126,26 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
   fault (they were 0.75–0.93 s early with a false moderate D6); a grind finishing its last
   2.5 cm over 0.3 s within 0.1 s (24 reps), over 1 s with a median of 0.07 s (12 reps; max
   0.37 s, its last 0.17 s moving the bar under 2 mm); 5 s pulls at 2 cm AR(0.8) over five bodies
-  within 0.1 s on 88 of 90 (max 0.25 s). On the wrist proxy see `KNOWLEDGE.md` §7.
+  within 0.1 s on 86 of 90 (max 0.41 s early; 88 of 90 without finding 50's settle rule, on
+  the same draw). On the wrist proxy see `KNOWLEDGE.md` §7.
 - **Shrugs at the top** [shrug] (1.2 s holds, every rep shrugged, 4 bodies × seeds 0–3): with a
-  standing reference, 1.5–4 cm shrugs move no top more than 0.18 s (one of 48 at 2.5 cm AR(0.8),
-  +0.37 s), the knees seen or hidden, and read no velocity loss. Without one, a shrug that
-  starts before the bar has read still is taken for the top on 3–8 of 48 reps (+0.83–0.87 s),
-  and the recap then reads a speed loss (D10) in 3–7 of 16 sets.
+  standing reference, 1.5–4 cm shrugs move no top more than 0.18 s, the knees seen or hidden,
+  except one of 48 at 2.5 cm AR(0.8) (+0.37 s), and read no velocity loss. Without one, a shrug
+  that starts before the bar has read still is taken for the top: with the knees seen, on 0
+  of 48 reps noise-free and 0–4 of 48 at 2.5 cm (+0.83–0.87 s, D10 in 0–3 of 16 sets); with
+  the knees hidden, on 3–4 of 48 (D10 in 3–4 of 16 sets).
+- **A lockout settling upward** [shrug] (the bar and upper body 0.8–1.5 cm up from 0.2–0.3 s
+  after the top until the lowering, 4 bodies × seeds 0–3), tops more than 0.18 s late and sets
+  with a velocity loss:
+
+  | Settle | One rep, noise-free | One rep, 2 cm AR(0.8) | Every rep, noise-free | Every rep, 2 cm AR(0.8) |
+  |---|---|---|---|---|
+  | 0.8 cm from +0.2 s | 0 of 16, 0 sets | 5 of 16, 3 sets | 13 of 64, 4 sets | 22 of 64, 7 sets |
+  | 1.0 cm from +0.3 s | 0 of 16, 0 sets | 4 of 16, 4 sets | 0 of 64, 0 sets | 10 of 64, 7 sets |
+  | 1.5 cm from +0.2 s | 0 of 16, 0 sets | 3 of 16, 3 sets | 0 of 64, 0 sets | 9 of 64, 4 sets |
+
+  On the previous commit (36e6a4d) the same rows dated 13–16 of 16 and 54–64 of 64 tops late,
+  with a velocity loss in up to 16 of 16 sets. Finding 50 has what is left and why.
 - **Re-setups at the floor:** feet shuffled 5 cm toward the bar while hinged are judged where
   they now stand (D1 6 → 1 cm measured 6 → 1 cm, at 0 and 2 cm noise); feet the plates hide
   keep the stance's lock.
@@ -133,9 +160,17 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 - **Occlusion:** plates hiding the feet whenever the bar is off the floor, also through the
   pipeline; feet hidden from the setup on: the counting holds and D1 is still judged.
 - **Bar dropouts and gaps:** 20 % and 40 % random dropouts, and a bar at 15 Hz; the set never
-  switches to the wrists. [gaps]: at 10 % and 20 % dropouts on 2.5 s pulls (3 bodies × seeds
-  0–3) every top is within 0.11 s; a bar lost for 0.2–0.6 s around the top dates it within
-  0.22 s (plain pulls and 93 % grinds).
+  switches to the wrists. [gaps], 1.5 cm AR(0.8): at 10 % and 20 % dropouts on 2.5 s pulls
+  (3 bodies × seeds 0–3) every top is within 0.11 s. A bar lost for 0.2–1 s on its way to the
+  top (the loss starting between 0.9 s before it and 0.2 s after; 12 rows of 27 tops, 3 bodies
+  × seeds 0–2):
+  - 1.5 s plain pulls: within 0.13 s on 11 rows. Lost from 0.7 s before the top to 0.3 s
+    after, +0.10 to +0.31 s: the last speed, seen mid-pull, finishes slower than the pull.
+  - 93 % grinds: within 0.21 s on 10 rows. Lost through the whole finish (from 0.7 or 0.3 s
+    before the top to 0.3 s after), up to +0.33 s on 2–3 of 27: the joints date it, through
+    the keypoint noise.
+  Noise-free (test): losses from 0.5–0.9 s before the top of 1.2 s pulls, and through a
+  grind's finish, within 0.15 s, with no false velocity loss.
 - **Drops and failures:** dropped bars, with the lifter standing over the bar until the next
   setup; failed reps, including a stall at the knees, are events, not reps.
 - **Lockouts:**
@@ -144,7 +179,7 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
     the standing reference to judge them.
   - [lockout], 2 cm AR(0.8), five bodies: a 14° soft lockout (15.5–16.3° noise-free) is cued
     on 70 of 90 reps; a 12° one reads 12.1° (median) against 12.9° noise-free. A 10° one
-    (mild, never cued noise-free) is cued on 8 of 60 tracked reps and 16 of 60 proxy reps.
+    (mild, never cued noise-free) is cued on 8 of 60 tracked reps and 15 of 60 proxy reps.
     [tops]: held 2 s, its top is within 0.14 s on a 5 mm tracked bar (90 reps).
   - A lockout 30° short is a failed rep, and so is a pull that leans back 40° from mid-thigh
     with the knees still bent ~60°, whether the knees are seen or hidden. Over-extended
@@ -170,9 +205,9 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 vertical, the same set fakes more than 2 cm of drift.
 
 **Compute (x86)** [compute], 1.5 cm keypoint noise:
-- Analyser: 0.31–0.37 ms median and 0.46–0.62 ms p95 per frame; frames that complete a rep
-  (event fits, the final climb, features, D8's two axes) 3.0 ms median on default pulls and
-  4.3 ms (tracked) / 6.5 ms (proxy) on 5 s pulls with 2 s holds. The first frames of a
+- Analyser: 0.33–0.36 ms median and 0.48–0.64 ms p95 per frame; frames that complete a rep
+  (event fits, the final climb, features, D8's two axes) 2.9–3.1 ms median on default pulls
+  and 5.0 ms (tracked) / 5.5 ms (proxy) on 5 s pulls with 2 s holds. The first frames of a
   process pay numpy's warm-up once (~12–18 ms).
 - Bar association and tracking: about 0.6–1.1 ms.
 - The Jetson numbers are still to be measured (J1).
@@ -488,15 +523,88 @@ vertical, the same set fakes more than 2 cm of drift.
 
 47. **A bar lost as it arrives is dated in the gap.** The fit could not date the top before
     the first frame the bar was seen again: a 0.4 s loss from 0.1 s before the top read
-    +0.33 s, with a false velocity loss in the recap. The fit now starts at the gap's first
-    frame, and with no fit the top is the gap's middle (within 0.22 s for gaps of 0.2–0.6 s
-    around the top, plain pulls and grinds; was up to +0.53 s).
+    +0.33 s, with a false velocity loss in the recap (a review measured up to +0.70 s). The
+    fit now starts at the gap's first frame. With no fit the top was the gap's middle, which
+    finding 51 replaced.
 
 48. **The envelope is a committed script with independent noise.** The tables were drawn
     with one noise sequence per seed, shared by every body in a row, and several quoted rates
-    did not hold on other draws (review, round 8). Every simulated number in this file and
-    `KNOWLEDGE.md` §7 now comes from `scripts/tools/deadlift_envelope.py`, which draws the
-    noise per sweep, row, body and seed and prints each row's bodies and seed range.
+    did not hold on other draws (review, round 8). Every number marked [sweep] in this file
+    and `KNOWLEDGE.md` §7 now comes from `scripts/tools/deadlift_envelope.py`, which draws the
+    noise per sweep, row, body and seed and prints each row's bodies and seed range. Numbers
+    marked (test) come from the named tests, and those credited to a review from its
+    measurements.
+
+49. **A proxy peak that never held is fitted with each side's own curvature** (review,
+    round 9). A touch-and-go is usually lowered faster than it is pulled, so the wrists'
+    height around the peak is lopsided, and finding 45's symmetric parabola put the vertex
+    0.07–0.10 s early, the knees still bending. Noise-free, the proxy read the lockout 4.7°
+    short at a 1.2 s pull and 0.5 s lowering (2.2–2.7° at 1.5 / 0.5 s and 2.0 / 0.6 s; the
+    tracked bar reads 0 to −1.5°), and at 2 cm AR(0.8) those reps drew D6 on 18 of 200 against
+    0 tracked (the test's draw). The vertex is now refined within 0.1 s by a parabola with its
+    own curvature on each side (the steeper at most 8× the other), through the bar's 5-frame
+    running median: fitted to the raw heights, the two-sided fit followed the noise (on round
+    8's layout at 2.4 cm, 1 severe D6). Noise-free the proxy now reads the tracked bar's
+    lockout at all three tempos, and the test's draw cues 3 of 200 (test).
+
+50. **A lockout that settles upward keeps its first plateau's level** (review, round 9). The
+    shoulders drawn back on straight legs lift the bar 0.8–1.5 cm, inside the hold band, and
+    keep it there until the lowering. The lockout window (the hold's last 0.5 s) then sat on
+    the raised plateau, and the top was dated where the bar reached it, 0.35–0.9 s late, with
+    a velocity loss in the recap in 7–16 of 16 sets (review). Below the window's level by more
+    than the band, a stretch flat for 0.2 s with the hips and knees within 5° of the lockout's
+    is now that lockout already reached (a stall is ≥ 12° more bent), and the level is the
+    first such plateau after the final climb began. Noise-free, 1 and 1.5 cm settles on one
+    rep or every rep date every top within 0.05 s with no velocity loss [shrug] (test: 1 cm,
+    five bodies, within 0.1 s). What it does not reach:
+    - A settle smaller than the event band (3 × the rest's noise, 0.5–0.9 cm on a 3 mm bar)
+      stays inside the hold: 0.8 cm on every rep still dates 13 of 64 tops up to 0.41 s late,
+      with a velocity loss in 4 of 16 sets.
+    - At 2 cm AR(0.8) the joints' 5° test misses some settles: 3–5 of 16 tops late with one
+      rep settling, 9–22 of 64 with every rep, and a velocity loss in 3–7 of 16 sets.
+    - It costs slow pulls a little. A 5 s pull's last centimetres can sit flat for 0.2 s,
+      and through 2 cm of keypoint noise its joints can pass the 5° test: on the [tops] draw
+      2 more of 90 tracked tops land beyond 0.1 s (up to 0.41 s early).
+    A settle depth of half the band caught the 0.8 cm settle but put 10 of 90 slow pulls
+    beyond 0.1 s; a tighter joints test (2–4°) changed neither measurably.
+
+51. **A bar lost on its way to the top is dated by its last speed, or by the joints**
+    (review, round 9). Finding 47's gap middle is far before the arrival when the bar is lost
+    low on the climb: lost from 0.9 s before the top of a 1.2 s pull to 0.1 s after, the top
+    read 0.40 s early and the recap read a velocity loss in 9 of 12 sets. With no fit:
+    - A bar slowing evenly from its last seen speed into the top covers the rest in twice
+      the time that speed would; the arrival is there, from the gap's first frame on.
+    - When that does not land inside the gap (the bar lost still in a grind's stall, or
+      speeding up out of it), the hips and knees, still seen, reaching the lockout date it.
+    - After a gap long enough to hide a stall (over 0.3 s), a bar seen again at its level
+      had arrived by then, which bounds the fit too: a 1 s loss from before a grind's stall
+      had let the fit run over the whole climb and date the top up to 0.5 s late. A shorter
+      gap keeps the fit's usual reach (bounded at every dropped frame, a slow approach's
+      last centimetres inside the band read 0.17 s early).
+    Noise-free, losses of 0.5–0.9 s before the top on 1.2 s pulls, and losses through a
+    grind's finish, date the top within 0.15 s with no false velocity loss (test). Tried on
+    the [gaps] rows and not kept: the joints alone, worse than the bar's speed on plain
+    pulls.
+
+52. **A fast top that never held is judged on a narrower window** (review, round 9). On a
+    0.6 s pull the knees are still bending 0.1 s either side of the top: noise-free, a
+    touch-and-go with no pause read the lockout 7.5° short on the tracked bar, and at 2 cm
+    AR(0.8) cued D6 on 24 of 200 tracked reps (a review's draw: 35). The window is now 0.1 s
+    either side of the peak, or 0.11 of the pull when that is shorter (pulls under ~0.9 s):
+    noise-free the same reps read −1° on both bar sources (test).
+
+53. **The envelope's draws carry their noise level and can be redrawn** (review, round 9).
+    Rows of one sweep at different noise levels shared a draw, and one draw's rate could
+    differ ~2× from another's. The keys now include the noise level, `--salt N` draws every
+    row afresh (the false-cue rates above are ranges over three draws), and
+    `tests/test_deadlift_envelope_script.py` checks the draws' independence and runs a sweep
+    end to end.
+
+54. **The features' median is a sort.** Finding 50's joints test runs on every flat stretch,
+    and the wrists' noise makes a slow proxy pull flat almost throughout: rep-completing
+    frames on proxy 5 s pulls with 2 s holds went from 6.4 to 9.8 ms, nearly all of it
+    `np.median`'s call on windows of a few frames. `statistics.median` returns the same values
+    (every feature identical on 30 noisy sets, both bar sources) in 5.5 ms.
 
 ## Deferred: needs data, hardware or keys (not code)
 

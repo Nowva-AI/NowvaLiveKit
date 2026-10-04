@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""
-Re-measure the deadlift's simulated envelope: every simulator number quoted in
-docs/deadlift/IMPLEMENTATION.md ("Measured on the simulator") and KNOWLEDGE.md §7.
-
-    PYTHONPATH=src python scripts/tools/deadlift_envelope.py events clean ...
-
-Sweeps: events, counting, clean, no_pause, lockout, tops, shrug, hip_shift, d2, gaps,
-compute (or all).
-Keypoint noise is added at the analyser's input, drawn independently for every
-sweep, row, body and seed (a numpy SeedSequence of the four), so a row of n sets
-is n noise draws. Each row prints its bodies and seed range.
+"""Re-measure the deadlift's simulated envelope (docs/deadlift/IMPLEMENTATION.md, KNOWLEDGE.md §7):
+`PYTHONPATH=src python scripts/tools/deadlift_envelope.py <sweep>... [--salt N]`. Keypoint noise is
+drawn independently for every sweep, row (noise level included), body and seed, so a row of n sets
+is n draws; --salt N draws them all afresh. Each row prints its bodies and seeds.
 """
 
 from __future__ import annotations
@@ -66,8 +59,13 @@ Mutation = Callable[[SimFrame], SimFrame]
 
 # ---------------------------------------------------------------- running a set
 
+# --salt: a fresh draw of every row's noise (0, the default, is the docs' draw).
+SALT = {"value": 0}
+
+
 def _rng(*key: object) -> np.random.Generator:
-    return np.random.default_rng([zlib.crc32(str(part).encode()) for part in key])
+    salted = (SALT["value"], *key) if SALT["value"] else key
+    return np.random.default_rng([zlib.crc32(str(part).encode()) for part in salted])
 
 
 def _noise(model: str, sigma_m: float, *key: object) -> Mutation | None:
@@ -136,6 +134,10 @@ def _summary(errors: list[float]) -> str:
 def _cue_summary(cues: list[set[str]]) -> str:
     counts = Counter(fault for rep in cues for fault in rep)
     return f"{sum(1 for rep in cues if rep)} of {len(cues)} reps cued {dict(counts) or ''}"
+
+
+def _not_counted(expected: int, cues: list[set[str]]) -> str:
+    return f"; {expected - len(cues)} of {expected} reps not counted" if len(cues) != expected else ""
 
 
 # --------------------------------------------------------------- frame mutations
@@ -238,6 +240,38 @@ def _stance(sim: SimulatedSet, kind: str, amount: float, shift_m: float) -> Muta
     return mutate
 
 
+def _settled_up(sim: SimulatedSet, rise_m: float, start_after_s: float, ramp_s: float, rep_indices: tuple[int, ...]) -> Mutation:
+    hold_s = RepScript(top_hold_s=1.2).top_hold_s
+    lower_s = RepScript().lower_s
+    windows = [(sim.reps[index].top_time + start_after_s, sim.reps[index].top_time + hold_s) for index in rep_indices]
+
+    def lift_m(t: float) -> float:
+        for start, lowering in windows:
+            if start <= t < start + ramp_s:
+                return rise_m * (t - start) / ramp_s
+            if start + ramp_s <= t < lowering:
+                return rise_m
+            if lowering <= t < lowering + lower_s:
+                return rise_m * (1.0 - (t - lowering) / lower_s)
+        return 0.0
+
+    def mutate(frame: SimFrame) -> SimFrame:
+        lift = lift_m(frame.timestamp)
+        if lift <= 0.0:
+            return frame
+        points = frame.points.copy()
+        points[list(UPPER_BODY), 1] -= lift
+        bar = frame.bar
+        if bar is not None:
+            left, right = list(bar.left_end_m), list(bar.right_end_m)
+            left[1] -= lift
+            right[1] -= lift
+            bar = bar.model_copy(update={"left_end_m": tuple(left), "right_end_m": tuple(right)})
+        return frame._replace(points=points, bar=bar)
+
+    return mutate
+
+
 def _bar_lost(windows: list[tuple[float, float]]) -> Mutation:
     def mutate(frame: SimFrame) -> SimFrame:
         lost = any(start <= frame.timestamp < end for start, end in windows)
@@ -296,41 +330,53 @@ def sweep_clean() -> None:
     """False cues on clean sets over five bodies."""
     for sigma_m in (0.02, 0.025):
         cues: list[set[str]] = []
+        expected = 0
         for body_name, body in BODIES.items():
             for pull_s in PULLS_S:
                 for seed in range(4):
                     sim = simulate(Scenario(athlete=body, reps=[RepScript(pull_s=pull_s)] * 3,
                                             bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
-                    cues += _cued(_analyse(sim, _noise("ar", sigma_m, "clean_bar", body_name, pull_s, seed)))
-        print(f"tracked, 5 bodies x pulls {PULLS_S} x seeds 0-3, {sigma_m * 100:.1f} cm AR: {_cue_summary(cues)}")
+                    cues += _cued(_analyse(sim, _noise("ar", sigma_m, "clean_bar", sigma_m, body_name, pull_s, seed)))
+                    expected += len(sim.reps)
+        print(f"tracked, 5 bodies x pulls {PULLS_S} x seeds 0-3, {sigma_m * 100:.1f} cm AR: {_cue_summary(cues)}"
+              f"{_not_counted(expected, cues)}")
     for sigma_m in (0.015, 0.02, 0.025):
         cues = []
+        expected = 0
         for body_name, body in BODIES.items():
             for seed in range(6):
                 sim = simulate(Scenario(athlete=body, reps=[RepScript()] * 3, track_bar=False, seed=seed))
-                cues += _cued(_analyse(sim, _noise("ar", sigma_m, "clean_proxy", body_name, seed)))
-        print(f"proxy, 5 bodies x seeds 0-5, 0.6 s holds, {sigma_m * 100:.1f} cm AR: {_cue_summary(cues)}")
+                cues += _cued(_analyse(sim, _noise("ar", sigma_m, "clean_proxy", sigma_m, body_name, seed)))
+                expected += len(sim.reps)
+        print(f"proxy, 5 bodies x seeds 0-5, 0.6 s holds, {sigma_m * 100:.1f} cm AR: {_cue_summary(cues)}"
+              f"{_not_counted(expected, cues)}")
 
 
 def sweep_no_pause() -> None:
     """Clean reps with no pause at the top (0 and 0.1 s holds), five bodies x seeds 0-7."""
+    # (label, touch-and-go, hold, pull, lowering)
+    rows = (("dead stop", False, 0.0, 1.2, 1.0), ("dead stop", False, 0.1, 1.2, 1.0),
+            ("touch-and-go", True, 0.0, 1.2, 1.0), ("touch-and-go", True, 0.0, 0.9, 0.8),
+            ("touch-and-go", True, 0.0, 1.2, 0.5), ("touch-and-go", True, 0.0, 0.6, 0.5),
+            ("touch-and-go", True, 0.1, 0.9, 0.8))
     for track_bar in (False, True):
-        for touch_and_go in (False, True):
-            for hold_s in (0.0, 0.1):
-                for sigma_m in (0.02, 0.024, 0.025):
-                    cues: list[set[str]] = []
-                    for body_name, body in BODIES.items():
-                        for seed in range(8):
-                            reps = ([RepScript(top_hold_s=hold_s, floor_hold_s=0.0, pull_s=0.9, lower_s=0.8)] * 4
-                                    + [RepScript(top_hold_s=hold_s)]) if touch_and_go else [RepScript(top_hold_s=hold_s)] * 3
-                            sim = simulate(Scenario(athlete=body, reps=reps, track_bar=track_bar,
-                                                    bar_noise_m=TRACKED_BAR_NOISE_M if track_bar else 0.0, seed=seed))
-                            features = _analyse(sim, _noise("ar", sigma_m, "no_pause", track_bar, touch_and_go, hold_s,
-                                                            body_name, seed))
-                            cues += _cued(features)
-                    source = "tracked" if track_bar else "proxy"
-                    kind = "touch-and-go" if touch_and_go else "dead stop"
-                    print(f"{source} {kind} hold {hold_s} s {sigma_m * 100:.1f} cm AR: {_cue_summary(cues)}")
+        for label, touch_and_go, hold_s, pull_s, lower_s in rows:
+            for sigma_m in (0.02, 0.024):
+                cues: list[set[str]] = []
+                expected = 0
+                for body_name, body in BODIES.items():
+                    for seed in range(8):
+                        script = RepScript(top_hold_s=hold_s, pull_s=pull_s, lower_s=lower_s)
+                        reps = [script.model_copy(update={"floor_hold_s": 0.0})] * 4 + [script] if touch_and_go else [script] * 3
+                        sim = simulate(Scenario(athlete=body, reps=reps, track_bar=track_bar,
+                                                bar_noise_m=TRACKED_BAR_NOISE_M if track_bar else 0.0, seed=seed))
+                        features = _analyse(sim, _noise("ar", sigma_m, "no_pause", track_bar, label, hold_s, pull_s, lower_s,
+                                                        sigma_m, body_name, seed))
+                        cues += _cued(features)
+                        expected += len(sim.reps)
+                source = "tracked" if track_bar else "proxy"
+                print(f"{source} {label} hold {hold_s} s, pull {pull_s} s / lowering {lower_s} s, {sigma_m * 100:.1f} cm AR: "
+                      f"{_cue_summary(cues)}{_not_counted(expected, cues)}")
 
 
 def sweep_lockout() -> None:
@@ -420,6 +466,28 @@ def sweep_shrug() -> None:
                     print(f"shrug {rise_m * 100:.1f} cm, {'standing reference' if stance_s > 1.0 else 'no standing reference'}, "
                           f"knees {'hidden' if knees_hidden else 'seen'}, {sigma_m * 100:.1f} cm AR (4 bodies x seeds 0-3): "
                           f"tops > {SHRUG_SHIFT_S} s late {late} of {len(errors)} (max {max(errors):+.3f}), sets with D10 {slowed} of {sets}")
+    # A lockout that settles upward and stays up (shoulders drawn back, legs straight),
+    # on every rep or only the second.
+    for rise_m, start_after_s, ramp_s in ((0.008, 0.2, 0.4), (0.01, 0.3, 0.3), (0.015, 0.2, 0.4)):
+        for every_rep in (False, True):
+            for sigma_m in (0.0, 0.02):
+                errors = []
+                slowed = sets = 0
+                for body_name in ("default", "short", "tall", "long_femurs"):
+                    for seed in range(4):
+                        sim = simulate(Scenario(athlete=BODIES[body_name], reps=[RepScript(top_hold_s=1.2)] * 4,
+                                                bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                        indices = tuple(range(4)) if every_rep else (1,)
+                        features = _analyse(sim, _settled_up(sim, rise_m, start_after_s, ramp_s, indices),
+                                            _noise("ar", sigma_m, "settle", rise_m, every_rep, sigma_m, body_name, seed))
+                        rep_errors = _top_errors(sim, features)
+                        errors += rep_errors if every_rep else rep_errors[1:2]
+                        sets += 1
+                        slowed += any("deadlift_velocity_loss" in rep for rep in _judged(features))
+                late = sum(error > SHRUG_SHIFT_S for error in errors)
+                print(f"lockout settling {rise_m * 100:.1f} cm up from +{start_after_s} s, {'every rep' if every_rep else 'rep 2'}, "
+                      f"{sigma_m * 100:.1f} cm AR (4 bodies x seeds 0-3): tops > {SHRUG_SHIFT_S} s late {late} of {len(errors)} "
+                      f"(max {max(errors):+.3f}), sets with D10 {slowed} of {sets}")
 
 
 def sweep_hip_shift() -> None:
@@ -472,16 +540,16 @@ def sweep_gaps() -> None:
         print(f"{probability:.0%} random bar dropouts, 2.5 s pulls (3 bodies x seeds 0-3): {_summary(errors)}")
     for kind, scripts in (("plain", [RepScript(pull_s=1.5)] * 3),
                           ("grind 93%", [RepScript(pull_s=1.6, stall_fraction=0.93, stall_s=0.6, finish_s=0.4)] * 3)):
-        for offset_s in (-0.3, -0.1, 0.0, 0.2):
-            for gap_s in (0.2, 0.4, 0.6):
-                errors = []
-                for body_name in ("default", "short", "tall"):
-                    for seed in range(3):
-                        sim = simulate(Scenario(athlete=BODIES[body_name], reps=scripts, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
-                        lost = _bar_lost([(rep.top_time + offset_s, rep.top_time + offset_s + gap_s) for rep in sim.reps])
-                        errors += _top_errors(sim, _analyse(sim, lost, _noise("ar", 0.015, "gaps", kind, offset_s, gap_s,
-                                                                                body_name, seed)))
-                print(f"{kind}: bar lost {gap_s} s from {offset_s:+.1f} s of the top (3 bodies x seeds 0-2): {_summary(errors)}")
+        for offset_s, gap_s in ((-0.9, 1.0), (-0.7, 0.8), (-0.5, 0.6), (-0.7, 1.0), (-0.3, 0.2), (-0.3, 0.4), (-0.3, 0.6),
+                                (-0.1, 0.2), (-0.1, 0.4), (-0.1, 0.6), (0.0, 0.4), (0.2, 0.4)):
+            errors = []
+            for body_name in ("default", "short", "tall"):
+                for seed in range(3):
+                    sim = simulate(Scenario(athlete=BODIES[body_name], reps=scripts, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                    lost = _bar_lost([(rep.top_time + offset_s, rep.top_time + offset_s + gap_s) for rep in sim.reps])
+                    errors += _top_errors(sim, _analyse(sim, lost, _noise("ar", 0.015, "gaps", kind, offset_s, gap_s,
+                                                                            body_name, seed)))
+            print(f"{kind}: bar lost {gap_s} s from {offset_s:+.1f} s of the top (3 bodies x seeds 0-2): {_summary(errors)}")
 
 
 def sweep_counting() -> None:
@@ -565,7 +633,9 @@ SWEEPS = {
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("sweeps", nargs="+", choices=[*SWEEPS, "all"])
+    parser.add_argument("--salt", type=int, default=0, help="draw every row's noise afresh")
     args = parser.parse_args()
+    SALT["value"] = args.salt
     for name in SWEEPS if "all" in args.sweeps else args.sweeps:
         print(f"\n== {name}: {SWEEPS[name].__doc__}", flush=True)
         SWEEPS[name]()
