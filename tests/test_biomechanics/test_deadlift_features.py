@@ -25,7 +25,7 @@ CURVATURE = 0.1
 def _template() -> FrameMeasure:
     sim = simulate(Scenario(reps=[RepScript()]))
     frame = sim.frames[0]
-    context = MeasureContext(default_up(), None, None, 0.075, None, None, False)
+    context = MeasureContext(default_up(), None, None, 0.075, None, None)
     return measure_frame(
         DeadliftFrameInput(frame.timestamp, frame.frame_index, frame.points, frame.confidences, frame.bar),
         context, BiomechanicsConfig().deadlift,

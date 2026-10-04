@@ -22,7 +22,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from biomechanics.config import BarbellTrackingConfig  # noqa: E402
+from biomechanics.config import BarbellTrackingConfig, BiomechanicsConfig  # noqa: E402
+from biomechanics.deadlift.analyzer import DeadliftFrameInput, DeadliftRepAnalyzer  # noqa: E402
 from biomechanics.deadlift.bar_buffer import BarStateBuffer  # noqa: E402
 from biomechanics.deadlift.bar_detector_multi import BarCandidate2D, MultiViewBarDetector  # noqa: E402
 from biomechanics.deadlift.bar_tracker_3d import (  # noqa: E402
@@ -32,6 +33,8 @@ from biomechanics.deadlift.bar_tracker_3d import (  # noqa: E402
     associate_and_triangulate,
     wrists_and_ankles_world,
 )
+from biomechanics.deadlift.simulator import RepScript, Scenario, SimAthlete, SimulatedSet, simulate  # noqa: E402
+from biomechanics.deadlift.types import GRAVITY_SOURCE_MEASURED, BarState3D, DeadliftRepFeatures  # noqa: E402
 from biomechanics.pose.multi_camera import MultiCameraPoseProvider  # noqa: E402
 from biomechanics.triangulation.calibration import CalibrationResult, CameraCalibration  # noqa: E402
 from biomechanics.utils.types import CocoKeypoints as CK  # noqa: E402
@@ -69,6 +72,11 @@ HUB_DISTANCE_TOL_M = 0.005
 PREDICTION_TOL_M = 0.015
 EXACT_TOL_M = 1e-6
 NUM_STATIC_FRAMES = 30
+# The simulator's world has its floor at y = 0; the rig's at FLOOR_Y_M.
+SIM_TO_RIG_M = np.array([0.0, FLOOR_Y_M, 0.0])
+# PLAN.md §9's first option: pose at 30 Hz, the bar detected on every other frame.
+DETECTION_EVERY_FRAMES = 2
+MAX_EVENT_ERROR_S = 0.1
 
 
 def _look_at_camera(camera_id: str) -> CameraCalibration:
@@ -161,6 +169,36 @@ class _StubDetector:
     def detect(self, views: dict[str, np.ndarray]) -> dict[str, list[BarCandidate2D]]:
         self.seen_views.append(sorted(views))
         return self.candidates
+
+
+# The simulated set's bar as the real tracker reports it from the rig: the hubs
+# detected in every view on every DETECTION_EVERY_FRAMES-th frame, predicted
+# states between; then the analyser's features.
+def _analysed_through_the_tracker(sim: SimulatedSet, calibration: CalibrationResult, seed: int) -> list[DeadliftRepFeatures]:
+    rng = np.random.default_rng(seed)
+    tracker = BarTracker3D(calibration)
+    tracker.set_up(sim.gravity_up_world)
+    analyzer = DeadliftRepAnalyzer(BiomechanicsConfig().deadlift)
+    analyzer.set_gravity(sim.gravity_up_world, GRAVITY_SOURCE_MEASURED)
+    features = []
+    for frame in sim.frames:
+        candidates = {}
+        if frame.frame_index % DETECTION_EVERY_FRAMES == 0:
+            ends_m = np.array([frame.bar.left_end_m, frame.bar.right_end_m]) + SIM_TO_RIG_M
+            candidates = _per_view(_bar_candidates(calibration, ends_m, rng))
+        wrists = frame.points[[CK.LEFT_WRIST, CK.RIGHT_WRIST]] + SIM_TO_RIG_M
+        ankles = frame.points[[CK.LEFT_ANKLE, CK.RIGHT_ANKLE]] + SIM_TO_RIG_M
+        state = tracker.update_from_candidates(candidates, frame.timestamp, wrists, ankles)
+        bar: BarState3D | None = None
+        if state is not None:
+            bar = state.model_copy(update={
+                "left_end_m": tuple((np.asarray(state.left_end_m) - SIM_TO_RIG_M).tolist()),
+                "right_end_m": tuple((np.asarray(state.right_end_m) - SIM_TO_RIG_M).tolist()),
+            })
+        analyzer.observe(DeadliftFrameInput(frame.timestamp, frame.frame_index, frame.points, frame.confidences, bar))
+        while analyzer.take_completed_rep() is not None:
+            features.append(analyzer.finish_rep())
+    return features
 
 
 @pytest.fixture
@@ -413,6 +451,34 @@ class TestBarTracker3D:
         tracker = BarTracker3D(None, detector=detector)
         assert tracker.update(_blank_frames(), 0.0) is None
         assert detector.seen_views == []
+
+
+class TestTheAnalyserAtFifteenHertz:
+    """The real tracker at PLAN.md §9's 15 Hz detector: its predicted state on the
+    frames between detections carries the bar's geometry, not its height (one
+    kept as a height overshot a top that never held and dated it up to 0.13 s
+    early)."""
+
+    @pytest.mark.parametrize("seed", range(2))
+    def test_tops_that_never_held_are_on_time(self, rig_calibration: CalibrationResult, seed: int):
+        script = RepScript(top_hold_s=0.0, pull_s=1.2, lower_s=1.0)
+        reps = [script.model_copy(update={"floor_hold_s": 0.0})] * 4 + [script]
+        for athlete in (SimAthlete(), SimAthlete(tibia_m=0.48, femur_m=0.50, torso_m=0.57)):
+            sim = simulate(Scenario(athlete=athlete, reps=reps, seed=seed))
+            features = _analysed_through_the_tracker(sim, rig_calibration, seed)
+            assert len(features) == len(sim.reps)
+            assert max(abs(measured.top_time - expected.top_time)
+                       for measured, expected in zip(features, sim.reps)) <= MAX_EVENT_ERROR_S
+
+    @pytest.mark.parametrize("pull_s", [0.45, 1.2, 5.0])
+    def test_held_reps_keep_their_events_on_time(self, rig_calibration: CalibrationResult, pull_s: float):
+        sim = simulate(Scenario(reps=[RepScript(pull_s=pull_s, lower_s=max(0.4, pull_s * 0.6))] * 3))
+        features = _analysed_through_the_tracker(sim, rig_calibration, seed=3)
+        assert len(features) == len(sim.reps)
+        for measured, expected in zip(features, sim.reps):
+            assert measured.liftoff_time == pytest.approx(expected.liftoff_time, abs=MAX_EVENT_ERROR_S)
+            assert measured.top_time == pytest.approx(expected.top_time, abs=MAX_EVENT_ERROR_S)
+            assert measured.floor_time == pytest.approx(expected.floor_time, abs=MAX_EVENT_ERROR_S)
 
 
 class TestFromProvider:

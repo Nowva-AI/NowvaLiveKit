@@ -36,7 +36,7 @@ def _setup_frame() -> SimFrame:
 def _context(**overrides) -> MeasureContext:
     values = dict(
         up=default_up(), rest_source=None, rest_axis=None, grip_offset_m=GRIP_OFFSET_M,
-        carried_bar=None, planted_feet=None, coasted_bar=False,
+        carried_bar=None, planted_feet=None,
     )
     values.update(overrides)
     return MeasureContext(**values)
@@ -85,18 +85,12 @@ class TestBarSources:
         assert not measured.bar_measured
         assert measured.hands_on_bar
 
-    def test_a_predicted_bar_has_a_height_but_is_not_a_measurement(self):
+    def test_a_predicted_bar_keeps_its_geometry_but_has_no_height(self):
         frame = _setup_frame()
         predicted = frame.bar.model_copy(update={"predicted": True})
         measured = measure_frame(_input(frame, bar=predicted), _context(), DeadliftConfig())
-        assert math.isfinite(measured.bar_up)
-        assert not measured.bar_measured
-
-    def test_a_bar_coasted_past_one_detector_interval_has_no_height(self):
-        frame = _setup_frame()
-        predicted = frame.bar.model_copy(update={"predicted": True})
-        measured = measure_frame(_input(frame, bar=predicted), _context(coasted_bar=True), DeadliftConfig())
         assert math.isnan(measured.bar_up)
+        assert not measured.bar_measured
         assert measured.bar_centre is not None
         assert measured.hands_on_bar
 

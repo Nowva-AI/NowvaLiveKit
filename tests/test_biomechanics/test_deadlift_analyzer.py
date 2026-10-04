@@ -77,6 +77,14 @@ SAG_RAMP_S = 0.2
 SAG_UP_S = 0.6
 # Touch-and-go with no pause at the top, lowered faster than pulled (pull_s, lower_s).
 FAST_LOWERING_TEMPOS = ((1.2, 0.5), (1.5, 0.5), (2.0, 0.6))
+# A soft lockout cued moderate or worse on every rep, noise-free.
+SOFT_LOCKOUT_DEG = 15.0
+# On the wrist proxy with the wrists hidden through the hold, at 1.5 cm of
+# correlated noise: a soft lockout is still cued on this share of reps (38-40 of
+# 45 on four draws; 43-45 with the wrists seen).
+HIDDEN_SOFT_LOCKOUT_RECALL_RATIO = 0.8
+# The wrist proxy's tops beyond MAX_PROXY_TOP_ERROR_S: at most this share.
+LATE_PROXY_TOP_RATIO = 0.1
 # A noise-free wrist-proxy lockout reads within this of the tracked bar's.
 NOISE_FREE_PROXY_LOCKOUT_TOLERANCE_DEG = 1.0
 # A noise-free 0.6 s pull with no pause at the top reads its lockout within this
@@ -344,6 +352,19 @@ def _bar_dropped(windows: list[tuple[float, float]]) -> FrameMutation:
 
 
 LOSSES = {"dropped": _bar_dropped, "coasting": _tracker_coasting}
+
+
+# The wrists unseen (confidence 0) in the windows, the wrist proxy's bar lost
+# with them. Then the next mutation (noise), if any.
+def _wrists_hidden(windows: list[tuple[float, float]], then: FrameMutation | None = None) -> FrameMutation:
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        if any(start <= frame.timestamp < end for start, end in windows):
+            confidences = frame.confidences.copy()
+            confidences[[CK.LEFT_WRIST, CK.RIGHT_WRIST]] = 0.0
+            frame = frame._replace(confidences=confidences)
+        return (frame.points, frame.confidences, frame.bar) if then is None else then(index, frame)
+
+    return mutate
 
 
 # A lockout whose shoulders relax after the top, lowering the bar sag_m, and
@@ -868,9 +889,10 @@ class TestOcclusionAndDropouts:
                 errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
         assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
 
+    @pytest.mark.parametrize("loss", LOSSES)
     @pytest.mark.parametrize(("stall_s", "finish_s", "lost_before_stall_s"), [(0.4, 0.3, 0.1), (0.6, 0.4, 0.2)])
     def test_a_bar_lost_on_its_way_into_a_stall_is_dated_at_the_top(
-        self, stall_s: float, finish_s: float, lost_before_stall_s: float,
+        self, stall_s: float, finish_s: float, lost_before_stall_s: float, loss: str,
     ):
         """Lost still moving, its last speed would put the arrival inside the
         stall; the hips and knees, still bent like a stall there, say it had not
@@ -882,12 +904,7 @@ class TestOcclusionAndDropouts:
                 scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.6), grind, RepScript(pull_s=1.6)],
                                     bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
                 top = simulate(scenario).reps[1].top_time
-                lost_from = top - finish_s - stall_s - lost_before_stall_s
-
-                def lose_the_bar(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
-                    lost = lost_from <= frame.timestamp < top + 0.1
-                    return frame.points, frame.confidences, None if lost else frame.bar
-
+                lose_the_bar = LOSSES[loss]([(top - finish_s - stall_s - lost_before_stall_s, top + 0.1)])
                 sim, features, _, _ = _analyse(scenario, mutate=lose_the_bar)
                 assert len(features) == len(sim.reps)
                 errors.append(features[1].top_time - top)
@@ -941,6 +958,62 @@ class TestOcclusionAndDropouts:
             mutate = LOSSES[loss]([(rep.top_time - 0.2, rep.top_time + 0.2) for rep in simulate(scenario).reps[1:4]])
             sim, features, _, _ = _analyse(scenario, mutate=mutate)
             assert len(features) == len(sim.reps)
+
+    @pytest.mark.parametrize(("lost_from_s", "lost_to_s"), [(-0.1, 0.7), (0.03, 0.75)], ids=["before_the_top", "after_arriving"])
+    def test_a_hold_lost_from_view_until_the_lowering_is_dated_at_the_top(self, lost_from_s: float, lost_to_s: float):
+        """The hold is never seen, and the hips and knees are flat through it: the
+        top is where the bar's last rise, slowing into it, arrives (dated at the
+        joints' most extended frame, anywhere in the hold, it read up to 0.37 s late
+        and the recap a velocity loss in every set)."""
+        errors = []
+        slowed = 0
+        for body in BODIES:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                lost = simulate(scenario).reps[1:3]
+                mutate = _tracker_coasting([(rep.top_time + lost_from_s, rep.top_time + lost_to_s) for rep in lost])
+                sim, features, _, _ = _analyse(scenario, mutate=mutate)
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features[1:3], lost)]
+                slowed += any("deadlift_velocity_loss" in judged for judged in _judge(features))
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+        assert slowed == 0
+
+    def test_a_hold_lost_from_view_under_keypoint_noise_reads_no_velocity_loss(self):
+        """1 s losses from 0.2 s before every top, at 1.5 cm of correlated keypoint
+        noise: the joints alone wander through a hold, the bar's last rise does not."""
+        errors = []
+        slowed = 0
+        for body_index, body in enumerate(BODIES[:3]):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.5)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                lost = _tracker_coasting([(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps])
+                noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 1200 + 10 * body_index + seed)
+
+                def lose_then_noise(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+                    points, confidences, bar = lost(index, frame)
+                    return noise(index, frame._replace(points=points, confidences=confidences, bar=bar))
+
+                sim, features, _, _ = _analyse(scenario, mutate=lose_then_noise)
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+                slowed += any("deadlift_velocity_loss" in judged for judged in _judge(features))
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+        assert slowed == 0
+
+    def test_a_bar_tracked_at_half_the_frame_rate_is_timed_at_its_tops(self):
+        """One unseen frame after the highest is a skipped detection, not a top lost
+        from view; and a 0.6 s hold is still read at half the frame rate."""
+        def every_other(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+            return frame.points, frame.confidences, frame.bar if frame.frame_index % 2 == 0 else None
+
+        errors = []
+        for seed in range(4):
+            scenario = Scenario(reps=[RepScript(pull_s=0.6)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+            sim, features, _, _ = _analyse(scenario, mutate=every_other)
+            assert len(features) == len(sim.reps)
+            errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= MAX_EVENT_ERROR_S, errors
 
     def test_a_bar_tracked_at_half_the_frame_rate_stays_the_bar(self):
         def every_other(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
@@ -1332,6 +1405,63 @@ class TestWristProxyAtPlatformNoise:
             errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
         assert float(np.median(errors)) <= MAX_EVENT_ERROR_S
         assert max(errors) <= MAX_PROXY_TOP_ERROR_S
+
+    @pytest.mark.parametrize("lockout_deficit_deg", [0.0, SOFT_LOCKOUT_DEG])
+    def test_wrists_hidden_through_the_hold_still_judge_the_lockout(self, lockout_deficit_deg: float):
+        """Hidden from 0.2 s before the top until 0.2 s into the lowering: the
+        wrists are first seen leaving the top 0.8 s after it, and the 0.5 s before
+        that held none of the top's frames (the lockout went unjudged). Judged on
+        the few frames around the top instead of the hold's last 0.5 s, a soft
+        lockout is cued a little less often than with the wrists seen."""
+        judged = cued = reps = 0
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scripts = [RepScript(pull_s=1.2, lockout_deficit_deg=lockout_deficit_deg)] * 3
+                scenario = Scenario(athlete=body, reps=scripts, track_bar=False, seed=seed)
+                hidden = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 1300 + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_wrists_hidden(hidden, then=noise))
+                assert len(features) == len(sim.reps)
+                reps += len(features)
+                judged += sum(math.isfinite(f.hip_extension_deficit_deg) for f in features)
+                cued += sum("deadlift_lockout" in rep_cues for rep_cues in _cued(features))
+        assert judged == reps
+        if lockout_deficit_deg:
+            assert cued >= HIDDEN_SOFT_LOCKOUT_RECALL_RATIO * reps, f"D6 on {cued} of {reps}"
+        else:
+            assert cued <= FALSE_CUE_GATE_RATIO * reps, f"D6 on {cued} of {reps}"
+
+    def test_wrists_hidden_across_a_top_with_no_pause_read_no_soft_lockout(self):
+        """Hidden 0.2 s either side of each top: judged where the hips and knees were
+        most extended while the wrists were unseen, not around the last height seen
+        on the climb (at 1.5 cm, D6 on 21 of 75 reps)."""
+        cued = reps = 0
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=_no_pause_touch_and_go(1.2, 1.0), track_bar=False, seed=seed)
+                hidden = [(rep.top_time - 0.2, rep.top_time + 0.2) for rep in simulate(scenario).reps]
+                noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 1500 + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_wrists_hidden(hidden, then=noise))
+                assert len(features) == len(sim.reps)
+                reps += len(features)
+                cued += sum("deadlift_lockout" in rep_cues for rep_cues in _cued(features))
+        assert cued <= FALSE_CUE_GATE_RATIO * reps, f"D6 on {cued} of {reps}"
+
+    def test_wrists_hidden_as_they_arrive_date_the_top_by_the_joints(self):
+        """Hidden from 0.1 s before the top to 0.3 s after: the hips and knees, still
+        seen, reach the lockout in the gap (dated from where the wrists were seen
+        again, 13-16 of 45 tops read beyond 0.3 s, up to 0.43 s late)."""
+        errors = []
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.2)] * 3, track_bar=False, seed=seed)
+                hidden = [(rep.top_time - 0.1, rep.top_time + 0.3) for rep in simulate(scenario).reps]
+                noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 1400 + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_wrists_hidden(hidden, then=noise))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        late = sum(abs(error) > MAX_PROXY_TOP_ERROR_S for error in errors)
+        assert late <= LATE_PROXY_TOP_RATIO * len(errors), errors
 
     def test_a_slow_pull_is_dated_early_by_the_joints_last_creep(self):
         errors = []

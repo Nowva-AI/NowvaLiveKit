@@ -131,7 +131,7 @@ class RepTrack:
 
 # statistics.median: the windows are a few frames, where np.median's call costs
 # more than the sort.
-def _median(values: list[float]) -> float:
+def median(values: list[float]) -> float:
     finite = [value for value in values if math.isfinite(value)]
     return float(statistics.median(finite)) if finite else NAN
 
@@ -191,37 +191,33 @@ class _FinalClimb(NamedTuple):
     start_up: float
 
 
+# The hold's last LOCKOUT_WINDOW_S; all of a top's frames when the bar went
+# unseen right after them and was seen leaving more than LOCKOUT_WINDOW_S later.
 def _lockout_frames(rep: RepTrack) -> list[FrameMeasure]:
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
-    return [frame for frame in rep.top_frames if leaving - frame.t <= LOCKOUT_WINDOW_S]
+    window = [frame for frame in rep.top_frames if leaving - frame.t <= LOCKOUT_WINDOW_S]
+    if window or not rep.top_frames:
+        return window
+    after = next((frame for frame in rep.frames if frame.t > rep.top_frames[-1].t), None)
+    return rep.top_frames if after is not None and not math.isfinite(after.bar_up) else window
 
 
 def _flexion_deg(frames: list[FrameMeasure]) -> float:
     measured = [frame for frame in frames if frame.legs_measured] or frames
-    return _median([frame.hip_flex_deg for frame in measured]) + _median([frame.knee_flex_deg for frame in measured])
-
-
-# A bar height measured on this frame: not a prediction carried over a gap (the
-# tracker's, which only bridges a detector's skipped frame).
-def _seen(frame: FrameMeasure) -> bool:
-    return math.isfinite(frame.bar_up) and frame.bar_measured
-
-
-def _measured_heights(frames: list[FrameMeasure]) -> list[float]:
-    return [frame.bar_up if _seen(frame) else NAN for frame in frames]
+    return median([frame.hip_flex_deg for frame in measured]) + median([frame.knee_flex_deg for frame in measured])
 
 
 # The bar's height in the lockout window, on its lowest plateau: the frames whose
 # running median sits within the band of the lowest. A shrug inside the hold
 # band adds frames above it, which a plain median would follow up.
 def _lockout_level(lockout: list[FrameMeasure], band_m: float) -> float:
-    heights = _measured_heights(lockout)
-    smoothed = _running_median(heights, STALL_MEDIAN_FRAMES)
+    heights = [frame.bar_up for frame in lockout]
+    smoothed = running_median(heights, STALL_MEDIAN_FRAMES)
     finite = [value for value in smoothed if math.isfinite(value)]
     if not finite:
         return NAN
     lowest = min(finite)
-    return _median([height for height, value in zip(heights, smoothed) if value <= lowest + band_m])
+    return median([height for height, value in zip(heights, smoothed) if value <= lowest + band_m])
 
 
 # A stretch of at least duration_s ending at index over which the bar's running
@@ -242,13 +238,18 @@ def _flat(frames: list[FrameMeasure], smoothed: list[float], first: int, index: 
 # lockout's, the first after the climb.
 def _final_climb(rep: RepTrack, band_m: float) -> _FinalClimb:
     lockout = _lockout_frames(rep)
-    level = _lockout_level(lockout, band_m) if lockout else NAN
-    # A lockout window the bar went unseen through: its peak is the level.
-    level = level if math.isfinite(level) else rep.top_up
+    # Fewer measured heights than the running median takes (a 15 Hz detector's few
+    # frames of a top that never held, or a hold mostly unseen) hold no plateau,
+    # and their lowest is a side of the peak: the level is their median.
+    heights = [frame.bar_up for frame in lockout if math.isfinite(frame.bar_up)]
+    if len(heights) >= STALL_MEDIAN_FRAMES:
+        level = _lockout_level(lockout, band_m)
+    else:
+        level = median(heights) if heights else rep.top_up
     climb = _FinalClimb(level, rep.liftoff.t, rep.liftoff.bar_up)
     if not lockout:
         return climb
-    smoothed = _running_median(_measured_heights(rep.frames), STALL_MEDIAN_FRAMES)
+    smoothed = running_median([frame.bar_up for frame in rep.frames], STALL_MEDIAN_FRAMES)
     # The bar's first arrival at the level ends its climbs: a plateau after it,
     # back up from, is a sag (the shoulders relaxing), not a stall; and a settle
     # began before it.
@@ -268,7 +269,7 @@ def _final_climb(rep: RepTrack, band_m: float) -> _FinalClimb:
             climb = _FinalClimb(level, frame.t, smoothed[index])
         settled = _flat(rep.frames, smoothed, settle_first, index, SETTLE_MIN_S, band_m)
         if settled and _flexion_deg(rep.frames[settle_first:index + 1]) - lockout_flexion <= LOCKOUT_REACHED_DEG:
-            settles.append((rep.frames[settle_first].t, _median(smoothed[settle_first:index + 1])))
+            settles.append((rep.frames[settle_first].t, median(smoothed[settle_first:index + 1])))
     settled_up = next((up for t, up in settles if climb.start_t <= t < reached_t), NAN)
     return climb._replace(level=settled_up) if math.isfinite(settled_up) else climb
 
@@ -277,7 +278,7 @@ def _final_climb(rep: RepTrack, band_m: float) -> _FinalClimb:
 # summed flexion's running median less the reference's.
 def _past_flexion_deg(frames: list[FrameMeasure], reference: list[FrameMeasure]) -> list[float]:
     reference_flexion = _flexion_deg(reference)
-    flexion = _running_median([frame.hip_flex_deg + frame.knee_flex_deg for frame in frames], STALL_MEDIAN_FRAMES)
+    flexion = running_median([frame.hip_flex_deg + frame.knee_flex_deg for frame in frames], STALL_MEDIAN_FRAMES)
     return [degrees - reference_flexion for degrees in flexion]
 
 
@@ -289,14 +290,18 @@ def _past_flexion_deg(frames: list[FrameMeasure], reference: list[FrameMeasure])
 # are still clearly bent (lost on its way into a stall).
 def _arrival_in_gap(rep: RepTrack, first_unseen: int, level: float, arrival: float) -> float:
     gap_start = rep.frames[first_unseen].t
-    last = [frame for frame in rep.frames[max(0, first_unseen - GAP_SPEED_FRAMES):first_unseen] if _seen(frame)]
+    before = rep.frames[max(0, first_unseen - GAP_SPEED_FRAMES):first_unseen]
+    last = [frame for frame in before if math.isfinite(frame.bar_up)]
     if len(last) < 2:
         return NAN
     speed_mps = (last[-1].bar_up - last[0].bar_up) / (last[-1].t - last[0].t)
     if speed_mps <= 0.0:
         return NAN
     estimate = max(gap_start, last[-1].t + 2.0 * (level - last[-1].bar_up) / speed_mps)
-    after = [frame for frame in rep.frames if frame.legs_measured and estimate <= frame.t <= estimate + STALL_MIN_S / 2.0]
+    after = [
+        frame for frame in rep.frames
+        if frame.legs_measured and estimate <= frame.t <= estimate + STALL_MIN_S / 2.0
+    ]
     lockout = _lockout_frames(rep)
     bent = bool(after and lockout) and _flexion_deg(after) - _flexion_deg(lockout) >= CLEARLY_BENT_DEG
     return estimate if estimate < arrival and not bent else NAN
@@ -321,10 +326,10 @@ def _joints_locked_in_gap(rep: RepTrack, gap_start: float, arrival: float) -> fl
 # On the wrist proxy the bar's height cannot date the top: through the wrists'
 # noise a stall a few cm short of the lockout, and a slow pull's last
 # centimetres, look like the hold. The hips and knees reaching the lockout date
-# it instead, from the bar's arrival at its level; no later than
-# EVENT_MAX_SHIFT_S after the bar's own top or the joints' last clearly bent
-# frame before the lockout window, so the angles' slow wander over a long hold
-# does not move it.
+# it instead, from the bar's arrival at its level (or a gap just before it); no
+# later than EVENT_MAX_SHIFT_S after the bar's own top or the joints' last
+# clearly bent frame before the lockout window, so the angles' slow wander over
+# a long hold does not move it.
 def _joints_locked_time(rep: RepTrack, arrival: float, bar_top: float, leaving: float) -> float:
     lockout = _lockout_frames(rep)
     frames = [frame for frame in rep.frames if frame.legs_measured and arrival <= frame.t <= leaving]
@@ -354,7 +359,7 @@ def top_time(rep: RepTrack, band_m: float) -> float:
     if not math.isfinite(level):
         return rep.top_time
     arrival_index = next(
-        (index for index, frame in enumerate(rep.frames) if frame.t >= start_t and _seen(frame) and frame.bar_up >= level - band_m),
+        (index for index, frame in enumerate(rep.frames) if frame.t >= start_t and frame.bar_up >= level - band_m),
         None,
     )
     if arrival_index is None:
@@ -363,10 +368,15 @@ def top_time(rep: RepTrack, band_m: float) -> float:
         arrival = rep.frames[arrival_index].t
         # A bar lost just before it arrived may have arrived in the gap: where its
         # last seen speed puts it, or else (it says nothing) where the joints, still
-        # seen, reached the lockout.
-        first_unseen = arrival_index
-        while first_unseen > 0 and not _seen(rep.frames[first_unseen - 1]):
+        # seen, reached the lockout. Seen again just short of the level (within
+        # another band: its noise, or its last millimetres), all the same.
+        near = arrival_index
+        while near > 0 and rep.frames[near - 1].t >= start_t and rep.frames[near - 1].bar_up >= level - 2.0 * band_m:
+            near -= 1
+        first_unseen = near
+        while first_unseen > 0 and not math.isfinite(rep.frames[first_unseen - 1].bar_up):
             first_unseen -= 1
+        first_unseen = first_unseen if first_unseen < near else arrival_index
         earliest = rep.frames[first_unseen].t
         unseen_arrival = arrival
         if earliest < arrival:
@@ -379,15 +389,17 @@ def top_time(rep: RepTrack, band_m: float) -> float:
     # the few frames of a short last climb.
     frames = [
         frame._replace(bar_up=min(frame.bar_up, level)) for frame in rep.frames
-        if start_t <= frame.t <= min(leaving, arrival + TOP_FIT_HOLD_S) and _seen(frame) and frame.bar_up >= (level + start_up) / 2.0
+        if start_t <= frame.t <= min(leaving, arrival + TOP_FIT_HOLD_S) and frame.bar_up >= (level + start_up) / 2.0
     ]
     # A gap long enough to hide a stall leaves the climb before it no say in when the
     # bar arrived: seen again at its level, it had arrived by then.
     latest = arrival if arrival - earliest > STALL_MIN_S else min(arrival + EVENT_MAX_SHIFT_S, leaving)
     estimate = _event_time(frames, level, band_m, earliest, latest, leaving=False)
     bar_top = estimate if math.isfinite(estimate) else unseen_arrival
+    # The wrists hidden as they arrived: the hips and knees, still seen, may
+    # reach the lockout in the gap.
     if any(frame.bar_source == BAR_SOURCE_WRIST_PROXY for frame in rep.frames):
-        return _joints_locked_time(rep, arrival, bar_top, leaving)
+        return _joints_locked_time(rep, earliest, bar_top, leaving)
     return bar_top
 
 
@@ -410,12 +422,12 @@ def _segment_lengths(
             return NAN
         return math.hypot(forward_m(frame, upper, lower), height_m(frame, upper, lower))
 
-    tibia = _median([projected(f.ankle_mid, f.knee_mid, f.frame) for f in frames])
-    femur = _median([projected(f.knee_mid, f.hip_mid, f.frame) for f in frames])
-    torso = _median([projected(f.hip_mid, f.shoulder_mid, f.frame) for f in frames])
+    tibia = median([projected(f.ankle_mid, f.knee_mid, f.frame) for f in frames])
+    femur = median([projected(f.knee_mid, f.hip_mid, f.frame) for f in frames])
+    torso = median([projected(f.hip_mid, f.shoulder_mid, f.frame) for f in frames])
     arm = athlete.standing_refs.get("arm_m", NAN)
     if not math.isfinite(arm):
-        arm = _median([f.arm_m for f in frames])
+        arm = median([f.arm_m for f in frames])
     if not math.isfinite(torso):
         torso = athlete.seeded_segments.get("torso_avg_m", NAN)
     lengths = (tibia, femur, torso, arm)
@@ -444,7 +456,7 @@ def _shin_bar_distance_m(frames: list[FrameMeasure], config: DeadliftConfig) -> 
         shin_length = math.hypot(shin_forward, shin_up)
         if shin_length > 0.0:
             distances.append((bar_forward * shin_up - bar_up * shin_forward) / shin_length)
-    measured = _median(distances)
+    measured = median(distances)
     if not math.isfinite(measured):
         return config.shin_bar_distance_m
     return min(max(measured, config.min_shin_bar_distance_m), config.max_shin_bar_distance_m)
@@ -458,8 +470,8 @@ def _predict_setup(
         return None
     prediction = predict_setup(
         segments,
-        bar_forward_m=_median([forward_m(f.frame, f.bar_centre, f.ankle_mid) for f in frames]),
-        bar_height_m=_median([height_m(f.frame, f.bar_centre, f.ankle_mid) for f in frames]),
+        bar_forward_m=median([forward_m(f.frame, f.bar_centre, f.ankle_mid) for f in frames]),
+        bar_height_m=median([height_m(f.frame, f.bar_centre, f.ankle_mid) for f in frames]),
         shoulder_band_m=(config.shoulder_band_low_m, config.shoulder_band_high_m),
         shoulder_ahead_m=shoulder_vs_bar_cm / 100.0,
         shin_bar_m=_shin_bar_distance_m(frames, config),
@@ -493,23 +505,23 @@ def measure_setup(
     setup: dict[str, float] = {}
     legs = [f for f in window if f.legs_measured]
     if len(legs) >= config.min_setup_frames:
-        setup["hip_height_cm"] = _median([height_m(f.frame, f.hip_mid, f.ankle_mid) * 100.0 for f in legs])
-        setup["trunk_deg"] = _median([f.trunk_deg for f in legs])
+        setup["hip_height_cm"] = median([height_m(f.frame, f.hip_mid, f.ankle_mid) * 100.0 for f in legs])
+        setup["trunk_deg"] = median([f.trunk_deg for f in legs])
     # A bar carried over a tracking gap or predicted by the tracker is not a
     # setup measurement.
     bar_frames = [f for f in window if f.bar_centre is not None and f.bar_measured]
     if len(bar_frames) < config.min_setup_frames:
         return setup
-    setup["shoulder_vs_bar_cm"] = _median([
+    setup["shoulder_vs_bar_cm"] = median([
         forward_m(f.frame, f.shoulder_mid, f.bar_centre) * 100.0 for f in bar_frames
     ])
     if locked_midfoot is not None:
-        setup["bar_midfoot_cm"] = _median([
+        setup["bar_midfoot_cm"] = median([
             forward_m(f.frame, f.bar_centre, locked_midfoot) * 100.0 for f in bar_frames
         ])
     tracked = [f for f in bar_frames if f.bar_source == BAR_SOURCE_BAR and f.wrist_mid is not None]
     if tracked:
-        offset = _median([height_m(f.frame, f.wrist_mid, f.bar_centre) for f in tracked])
+        offset = median([height_m(f.frame, f.wrist_mid, f.bar_centre) for f in tracked])
         if math.isfinite(offset):
             setup["grip_offset_m"] = min(
                 max(offset, config.min_wrist_to_bar_offset_m), config.max_wrist_to_bar_offset_m,
@@ -570,7 +582,7 @@ def _coordination_features(rep: RepTrack, features: DeadliftRepFeatures) -> None
 
 # Centred, over the frames there are at the ends; NaN (a dropped frame) is no
 # value, and a window of nothing but NaN is NaN.
-def _running_median(values: list[float], frames: int) -> list[float]:
+def running_median(values: list[float], frames: int) -> list[float]:
     half = frames // 2
     padded = np.pad(np.asarray(values, dtype=float), half, constant_values=NAN)
     windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
@@ -607,15 +619,15 @@ def _bar_path_features(pull: list[FrameMeasure], hold: list[FrameMeasure], featu
         tilts = [tilt for tilt in (_tilt_cm(frame) for frame in held) if math.isfinite(tilt)]
         if not tilts:
             return
-        features.bar_tilt_cm = abs(_median(tilts))
+        features.bar_tilt_cm = abs(median(tilts))
     else:
         tilts = [tilt for tilt in (_tilt_cm(frame) for frame in bar_frames) if math.isfinite(tilt)]
         if not tilts:
             return
         if len(tilts) >= TILT_SMOOTHING_FRAMES:
-            tilts = _running_median(tilts, TILT_SMOOTHING_FRAMES)
+            tilts = running_median(tilts, TILT_SMOOTHING_FRAMES)
         features.bar_tilt_cm = _percentile([abs(tilt) for tilt in tilts], WORST_PERCENTILE)
-    features.bar_low_side = "left" if _median(tilts) < 0.0 else "right"
+    features.bar_low_side = "left" if median(tilts) < 0.0 else "right"
 
 
 def _top_features(rep: RepTrack, refs: dict[str, float], features: DeadliftRepFeatures) -> None:
@@ -623,9 +635,9 @@ def _top_features(rep: RepTrack, refs: dict[str, float], features: DeadliftRepFe
     top = [f for f in lockout if f.legs_measured] or lockout
     if not top or not refs:
         return
-    features.hip_extension_deficit_deg = _median([f.hip_flex_deg for f in top]) - refs.get("hip_flex_deg", NAN)
-    features.knee_extension_deficit_deg = _median([f.knee_flex_deg for f in top]) - refs.get("knee_flex_deg", NAN)
-    features.lean_back_deg = refs.get("trunk_deg", NAN) - _median([f.trunk_deg for f in top])
+    features.hip_extension_deficit_deg = median([f.hip_flex_deg for f in top]) - refs.get("hip_flex_deg", NAN)
+    features.knee_extension_deficit_deg = median([f.knee_flex_deg for f in top]) - refs.get("knee_flex_deg", NAN)
+    features.lean_back_deg = refs.get("trunk_deg", NAN) - median([f.trunk_deg for f in top])
 
 
 # The hips' sideways position over the second half of the pull against where
