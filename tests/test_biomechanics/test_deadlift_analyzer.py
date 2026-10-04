@@ -12,6 +12,7 @@ import pytest
 
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.deadlift.analyzer import LIVE_OFFSET_MIN_FRAMES, DeadliftFrameInput, DeadliftRepAnalyzer
+from biomechanics.deadlift.bar_tracker_3d import DEFAULT_CONFIG as TRACKER_CONFIG
 from biomechanics.deadlift.rule_base import TIER_RANK
 from biomechanics.deadlift.setup_model import MAX_SETUP_KNEE_FLEXION_DEG, MIN_SETUP_KNEE_FLEXION_DEG
 from biomechanics.deadlift.session_reference import DeadliftSessionReference
@@ -69,6 +70,11 @@ SETTLE_RAMP_S = 0.3
 # A bar lost low on its last climb and seen again at the top: its arrival read
 # from its last seen speed, within this.
 GAP_TOP_MAX_ERROR_S = 0.15
+# A sag after the lockout: from SAG_START_S after the top, down and back up over
+# SAG_RAMP_S each, back up from SAG_UP_S.
+SAG_START_S = 0.1
+SAG_RAMP_S = 0.2
+SAG_UP_S = 0.6
 # Touch-and-go with no pause at the top, lowered faster than pulled (pull_s, lower_s).
 FAST_LOWERING_TEMPOS = ((1.2, 0.5), (1.5, 0.5), (2.0, 0.6))
 # A noise-free wrist-proxy lockout reads within this of the tracked bar's.
@@ -78,6 +84,10 @@ NOISE_FREE_PROXY_LOCKOUT_TOLERANCE_DEG = 1.0
 FAST_TOP_MAX_DEFICIT_DEG = 4.0
 # A grind stalled 93 % of the way up for 0.6 s, finishing in 0.4 s.
 GRIND_93 = RepScript(pull_s=1.6, stall_fraction=0.93, stall_s=0.6, finish_s=0.4)
+# The tracker's last measured centres its coasting velocity is fitted to.
+TRACKER_VELOCITY_FRAMES = 4
+# VALIDATION.md's gate: 1 false correction per 10 reps.
+FALSE_CUE_GATE_RATIO = 0.1
 # The wrist proxy's top event: bound by the wrists' noise, not the 100 ms gate.
 MAX_PROXY_TOP_ERROR_S = 0.3
 # A slow proxy pull's joints creep their last few degrees to the lockout over
@@ -283,9 +293,10 @@ def _shrugged(
     return mutate
 
 
-# The shoulders, arms, head and bar lifted by lift_m (Y-down: up is -y).
+# The shoulders, arms, head and bar lifted by lift_m, lowered when negative
+# (Y-down: up is -y).
 def _upper_body_lifted(frame: SimFrame, lift_m: float) -> SimFrame:
-    if lift_m <= 0.0:
+    if lift_m == 0.0:
         return frame
     points = frame.points.copy()
     points[list(UPPER_BODY), 1] -= lift_m
@@ -294,6 +305,76 @@ def _upper_body_lifted(frame: SimFrame, lift_m: float) -> SimFrame:
     right[1] -= lift_m
     bar = frame.bar.model_copy(update={"left_end_m": tuple(left), "right_end_m": tuple(right)})
     return frame._replace(points=points, bar=bar)
+
+
+# The bar lost in the windows as BarTracker3D reports it: predicted states
+# carried on at the last measured velocity for its max_prediction_s, then None.
+def _tracker_coasting(windows: list[tuple[float, float]]) -> FrameMutation:
+    history: list[tuple[float, BarState3D]] = []
+
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        if not any(start <= frame.timestamp < end for start, end in windows):
+            history.append((frame.timestamp, frame.bar))
+            del history[:-TRACKER_VELOCITY_FRAMES]
+            return frame.points, frame.confidences, frame.bar
+        last_t, last = history[-1]
+        if frame.timestamp - last_t > TRACKER_CONFIG.max_prediction_s + 1e-9:
+            return frame.points, frame.confidences, None
+        times = np.array([t for t, _ in history]) - last_t
+        velocity = np.polyfit(times, np.array([bar.centre for _, bar in history]), 1)[0]
+        shift = velocity * (frame.timestamp - last_t)
+        bar = last.model_copy(update={
+            "timestamp": frame.timestamp,
+            "left_end_m": tuple((np.asarray(last.left_end_m) + shift).tolist()),
+            "right_end_m": tuple((np.asarray(last.right_end_m) + shift).tolist()),
+            "predicted": True,
+        })
+        return frame.points, frame.confidences, bar
+
+    return mutate
+
+
+# The bar gone (None) in the windows: the detector's frames dropped outright.
+def _bar_dropped(windows: list[tuple[float, float]]) -> FrameMutation:
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        lost = any(start <= frame.timestamp < end for start, end in windows)
+        return frame.points, frame.confidences, None if lost else frame.bar
+
+    return mutate
+
+
+LOSSES = {"dropped": _bar_dropped, "coasting": _tracker_coasting}
+
+
+# A lockout whose shoulders relax after the top, lowering the bar sag_m, and
+# tighten again before the lowering. Then the next mutation (noise), if any.
+def _sagged(
+    sim: SimulatedSet, sag_m: float, rep_indices: tuple[int, ...], then: FrameMutation | None = None,
+) -> FrameMutation:
+    tops = [sim.reps[rep_index].top_time for rep_index in rep_indices]
+
+    def sag_at(t: float) -> float:
+        for top in tops:
+            down, held, up, back = top + SAG_START_S, top + SAG_START_S + SAG_RAMP_S, top + SAG_UP_S, top + SAG_UP_S + SAG_RAMP_S
+            if down <= t < held:
+                return sag_m * (t - down) / SAG_RAMP_S
+            if held <= t < up:
+                return sag_m
+            if up <= t < back:
+                return sag_m * (1.0 - (t - up) / SAG_RAMP_S)
+        return 0.0
+
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        frame = _upper_body_lifted(frame, -sag_at(frame.timestamp))
+        return (frame.points, frame.confidences, frame.bar) if then is None else then(index, frame)
+
+    return mutate
+
+
+# Touch-and-go reps with no pause at the top.
+def _no_pause_touch_and_go(pull_s: float, lower_s: float) -> list[RepScript]:
+    script = RepScript(top_hold_s=0.0, pull_s=pull_s, lower_s=lower_s)
+    return [script.model_copy(update={"floor_hold_s": 0.0})] * 4 + [script]
 
 
 # A lockout that settles upward by rise_m on each of the reps and stays there
@@ -787,6 +868,80 @@ class TestOcclusionAndDropouts:
                 errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
         assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
 
+    @pytest.mark.parametrize(("stall_s", "finish_s", "lost_before_stall_s"), [(0.4, 0.3, 0.1), (0.6, 0.4, 0.2)])
+    def test_a_bar_lost_on_its_way_into_a_stall_is_dated_at_the_top(
+        self, stall_s: float, finish_s: float, lost_before_stall_s: float,
+    ):
+        """Lost still moving, its last speed would put the arrival inside the
+        stall; the hips and knees, still bent like a stall there, say it had not
+        arrived (the speed alone read 0.3-0.8 s early)."""
+        grind = RepScript(pull_s=1.6, stall_fraction=0.93, stall_s=stall_s, finish_s=finish_s)
+        errors = []
+        for body in BODIES[:3]:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.6), grind, RepScript(pull_s=1.6)],
+                                    bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                top = simulate(scenario).reps[1].top_time
+                lost_from = top - finish_s - stall_s - lost_before_stall_s
+
+                def lose_the_bar(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+                    lost = lost_from <= frame.timestamp < top + 0.1
+                    return frame.points, frame.confidences, None if lost else frame.bar
+
+                sim, features, _, _ = _analyse(scenario, mutate=lose_the_bar)
+                assert len(features) == len(sim.reps)
+                errors.append(features[1].top_time - top)
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+
+    def test_a_bar_the_tracker_coasts_over_at_the_top_neither_moves_the_top_nor_fakes_a_soft_lockout(self):
+        """The tracker carries a lost bar on at its last velocity: past the frame
+        between two detections, the prediction overshoots a bar that stops, and
+        it is no height (as a prediction the top read 0.13-0.17 s early, with a
+        false D6 on 4 of 12)."""
+        errors = []
+        cued = 0
+        for body in BODIES[:3] + BODIES[4:]:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                top = simulate(scenario).reps[1].top_time
+                sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting([(top - 0.3, top + 0.1)]))
+                assert len(features) == len(sim.reps)
+                errors.append(features[1].top_time - top)
+                cued += "deadlift_lockout" in _cued(features)[1]
+        assert max(map(abs, errors)) <= MAX_EVENT_ERROR_S, errors
+        assert cued == 0
+
+    @pytest.mark.parametrize("loss", LOSSES)
+    def test_a_bar_lost_across_a_top_that_never_held_is_judged_at_the_top(self, loss: str):
+        """The highest frame seen is on the climb: the lockout is judged where the
+        hips and knees were most extended while the bar was unseen, and a gap is
+        no hold (judged on the climb, 30 of 30 reps were cued D6)."""
+        cued = reps = 0
+        errors = []
+        for body in BODIES:
+            for seed in range(2):
+                scenario = Scenario(athlete=body, reps=_no_pause_touch_and_go(1.2, 1.0), bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed)
+                lost = simulate(scenario).reps[1:4]
+                mutate = LOSSES[loss]([(rep.top_time - 0.2, rep.top_time + 0.2) for rep in lost])
+                sim, features, _, _ = _analyse(scenario, mutate=mutate)
+                assert len(features) == len(sim.reps)
+                reps += len(lost)
+                cued += sum("deadlift_lockout" in rep_cues for rep_cues in _cued(features)[1:4])
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features[1:4], lost)]
+        assert max(map(abs, errors)) <= MAX_EVENT_ERROR_S, errors
+        assert cued <= FALSE_CUE_GATE_RATIO * reps, f"D6 on {cued} of {reps}"
+
+    @pytest.mark.parametrize("loss", LOSSES)
+    def test_a_bar_lost_across_a_fast_top_that_never_held_loses_no_rep(self, loss: str):
+        """The highest frame seen sits short of the expected top: the lifter seen
+        standing while the bar was unseen makes it a top (three reps merged)."""
+        for body in BODIES[:3]:
+            scenario = Scenario(athlete=body, reps=_no_pause_touch_and_go(0.9, 0.8), bar_noise_m=TRACKED_BAR_NOISE_M)
+            mutate = LOSSES[loss]([(rep.top_time - 0.2, rep.top_time + 0.2) for rep in simulate(scenario).reps[1:4]])
+            sim, features, _, _ = _analyse(scenario, mutate=mutate)
+            assert len(features) == len(sim.reps)
+
     def test_a_bar_tracked_at_half_the_frame_rate_stays_the_bar(self):
         def every_other(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
             return frame.points, frame.confidences, frame.bar if index % 2 == 0 else None
@@ -1058,7 +1213,6 @@ class TestTouchAndGoUnderNoise:
         reps = [RepScript(floor_hold_s=0.0, pull_s=0.5, lower_s=0.4, top_hold_s=0.2)] * 5 + [RepScript(pull_s=0.5, lower_s=0.4)]
         sim, features, _, _ = _analyse(Scenario(track_bar=False, reps=reps, keypoint_noise_m=0.015, seed=seed))
         assert len(features) == len(sim.reps)
-
 
     @pytest.mark.parametrize("track_bar", [True, False], ids=["tracked", "proxy"])
     def test_a_fast_top_that_never_held_reads_its_lockout(self, track_bar: bool):
@@ -1537,6 +1691,40 @@ class TestSetBehaviour:
                 errors += [features[index].top_time - sim.reps[index].top_time for index in rep_indices]
                 slowed += any("deadlift_velocity_loss" in judged for judged in _judge(features))
         assert max(map(abs, errors)) <= MAX_EVENT_ERROR_S, errors
+        assert slowed == 0
+
+    @pytest.mark.parametrize("sag_m", [0.012, 0.02])
+    def test_a_lockout_that_sags_and_is_tightened_again_keeps_its_top(self, sag_m: float):
+        """A plateau after the bar reached the lockout's level is a sag it came back
+        up from, not a lockout settling upward (read as one, the top was dated
+        0.13-0.17 s early)."""
+        errors = []
+        for body in BODIES:
+            for seed in range(2):
+                scenario = Scenario(athlete=body, reps=[RepScript(top_hold_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                sim = simulate(scenario)
+                _, features, _, _ = _analyse(scenario, mutate=_sagged(sim, sag_m, rep_indices=(0, 1, 2, 3)))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= MAX_EVENT_ERROR_S, errors
+
+    def test_keypoint_noise_does_not_make_a_sag_a_stall(self):
+        """Through 2 cm of correlated noise the joints on a sag's plateau can read a
+        stall's 12 deg: the bar's first arrival at the level ends its climbs, so the
+        tightening back up is no last climb (read as one, 9 of 64 tops were 0.7 s
+        late and the recap read a velocity loss in 6 of 16 sets)."""
+        late = slowed = 0
+        for body_index, body in enumerate(BODIES[:4]):
+            for seed in range(4):
+                scenario = Scenario(athlete=body, reps=[RepScript(top_hold_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                sim = simulate(scenario)
+                noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 7000 + 10 * body_index + seed)
+                _, features, _, _ = _analyse(scenario, mutate=_sagged(sim, 0.015, rep_indices=(0, 1, 2, 3), then=noise))
+                assert len(features) == len(sim.reps)
+                late += sum(abs(measured.top_time - expected.top_time) > SHRUG_TOP_SHIFT_MAX_S
+                            for measured, expected in zip(features, sim.reps))
+                slowed += any("deadlift_velocity_loss" in judged for judged in _judge(features))
+        assert late <= 1
         assert slowed == 0
 
     def test_a_shrug_with_the_knees_hidden_is_not_a_slower_rep(self):

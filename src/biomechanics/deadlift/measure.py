@@ -49,6 +49,8 @@ class MeasureContext(NamedTuple):
     carried_bar: BarState3D | None
     # Last measured feet, standing in for feet the plates hide (None: no substitution).
     planted_feet: dict[int, np.ndarray] | None
+    # A predicted bar that has coasted past one detector interval: geometry only.
+    coasted_bar: bool
 
 
 class FrameMeasure(NamedTuple):
@@ -260,7 +262,7 @@ def measure_frame(
         if lateral_m(frame, bar_left, bar_right) > 0.0:
             bar_left, bar_right = bar_right, bar_left
         bar_measured = not carried and not bar.predicted
-        if not carried:
+        if not carried and not context.coasted_bar:
             bar_up = float(np.dot(bar_centre, frame.up))
     elif context.rest_source != BAR_SOURCE_BAR and wrist_mid is not None:
         bar_source = BAR_SOURCE_WRIST_PROXY
