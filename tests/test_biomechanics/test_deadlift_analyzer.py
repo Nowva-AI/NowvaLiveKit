@@ -100,6 +100,17 @@ LOST_TOP_FAR_RATIO = 0.05
 # A draw (2 cm AR(0.8), 1.5 s pulls) whose hips and knees wander through the
 # hold: against their least, the fit was vetoed and one top read +0.47 s.
 WANDERING_JOINTS_NOISE_SEED = 3600
+# A 2 cm AR(0.8) draw over long unseen holds whose hips and knees' 5-frame medians
+# reached the resume deficit on both: frame by frame, 8 soft lockouts and 3 holds
+# without a standing reference resumed and read 0.33-1.04 s late.
+UNSEEN_HOLD_NOISE_SEED = 2800
+# The faulted lockouts a top lost from view is dated at (deg).
+FAULTED_LOCKOUT_DEG = 15.0
+# Grinds stalled 3 % short and lost through their finish and hold, 1.5 cm AR(0.8):
+# the share dated beyond 0.3 s (the hips finish such a stall by little more than
+# the resume deficit; requiring it of both joints, 19 of 27 on this draw).
+NEAR_LOCKOUT_GRIND_NOISE_SEED = 4100
+NEAR_LOCKOUT_GRIND_FAR_RATIO = 0.5
 # A no-pause top lost from view reads its lockout within this of straight,
 # noise-free (seen: within 3 deg), short of D6's mild threshold.
 LOST_TOP_MAX_DEFICIT_DEG = 6.0
@@ -927,14 +938,16 @@ class TestOcclusionAndDropouts:
                 errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
         assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
 
+    @pytest.mark.parametrize("lost_after_top_s", [0.1, 0.8], ids=["seen_holding", "lost_until_the_lowering"])
     @pytest.mark.parametrize("loss", LOSSES)
     @pytest.mark.parametrize(("stall_s", "finish_s", "lost_before_stall_s"), [(0.4, 0.3, 0.1), (0.6, 0.4, 0.2)])
     def test_a_bar_lost_on_its_way_into_a_stall_is_dated_at_the_top(
-        self, stall_s: float, finish_s: float, lost_before_stall_s: float, loss: str,
+        self, stall_s: float, finish_s: float, lost_before_stall_s: float, loss: str, lost_after_top_s: float,
     ):
         """Lost still moving, its last speed would put the arrival inside the
         stall; the hips and knees, still bent like a stall there, say it had not
-        arrived (the speed alone read 0.3-0.8 s early)."""
+        arrived (the speed alone read 0.3-0.8 s early; lost until the lowering, the
+        bar's fitted rise, -0.78 s)."""
         grind = RepScript(pull_s=1.6, stall_fraction=0.93, stall_s=stall_s, finish_s=finish_s)
         errors = []
         for body in BODIES[:3]:
@@ -942,7 +955,7 @@ class TestOcclusionAndDropouts:
                 scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.6), grind, RepScript(pull_s=1.6)],
                                     bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
                 top = simulate(scenario).reps[1].top_time
-                lose_the_bar = LOSSES[loss]([(top - finish_s - stall_s - lost_before_stall_s, top + 0.1)])
+                lose_the_bar = LOSSES[loss]([(top - finish_s - stall_s - lost_before_stall_s, top + lost_after_top_s)])
                 sim, features, _, _ = _analyse(scenario, mutate=lose_the_bar)
                 assert len(features) == len(sim.reps)
                 errors.append(features[1].top_time - top)
@@ -999,8 +1012,10 @@ class TestOcclusionAndDropouts:
 
     @pytest.mark.parametrize(
         ("pull_s", "lost_from_s", "lost_to_s"),
-        [(1.2, -0.1, 0.7), (1.2, 0.03, 0.75), (1.2, -0.3, 0.8), (1.5, -0.3, 0.8), (2.0, -0.4, 0.8), (2.5, -0.4, 0.8)],
-        ids=["before_the_top", "after_arriving", "lost_earlier", "slower_pull", "two_second_pull", "heavy_pull"],
+        [(1.2, -0.1, 0.7), (1.2, 0.03, 0.75), (1.2, -0.3, 0.8), (1.5, -0.3, 0.8), (2.0, -0.4, 0.8), (2.5, -0.4, 0.8),
+         (0.6, -0.3, 0.8), (0.6, -0.2, 0.8)],
+        ids=["before_the_top", "after_arriving", "lost_earlier", "slower_pull", "two_second_pull", "heavy_pull",
+             "quick_pull_from_its_middle", "quick_pull_from_a_third"],
     )
     def test_a_hold_lost_from_view_until_the_lowering_is_dated_at_the_top(
         self, pull_s: float, lost_from_s: float, lost_to_s: float,
@@ -1010,7 +1025,9 @@ class TestOcclusionAndDropouts:
         arrives (dated at the joints' most extended frame, anywhere in the hold, it
         read up to 0.37 s late and the recap a velocity loss in every set; by a
         parabola's free vertex, up to 0.56 s late on 2 s pulls). Seen again coming
-        down higher than it was last seen going up, the same."""
+        down higher than it was last seen going up, the same. A quick pull's last
+        0.3 s seen is not yet slowing into the top: the fit overshoots it (up to
+        +0.59 s), and the hips and knees reaching their plateau date it."""
         errors = []
         slowed = 0
         for body in BODIES:
@@ -1075,6 +1092,79 @@ class TestOcclusionAndDropouts:
                 assert len(features) == len(sim.reps)
                 errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
         assert max(map(abs, errors)) <= 2.0 * GAP_TOP_MAX_ERROR_S, errors
+
+    @pytest.mark.parametrize("lost_from_s", [-0.2, 0.1], ids=["lost_before_the_top", "seen_arriving"])
+    @pytest.mark.parametrize("fault", ["lean_back_deg", "lockout_deficit_deg"], ids=["leaned_back", "soft"])
+    def test_a_faulted_lockout_lost_from_view_is_dated_at_its_top(self, fault: str, lost_from_s: float):
+        """A leaned-back or soft lockout stops short of the expected top height the
+        bar's fit runs into. Seen arriving, the hips and knees are at their plateau
+        when the bar was last seen: the top seen (fitted, up to 0.6 s late). Lost
+        before, they reach it well before the fit: they date it."""
+        errors = []
+        for body in BODIES:
+            for seed in range(3):
+                script = RepScript(pull_s=1.2, **{fault: FAULTED_LOCKOUT_DEG})
+                scenario = Scenario(athlete=body, reps=[script] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                lost = [(rep.top_time + lost_from_s, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting(lost))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+
+    def test_every_top_lost_without_a_standing_reference_is_dated_in_the_gap(self):
+        """No standing pose, no expected top height to fit to: the hips and knees
+        reaching their plateau date it (the bar's last frame seen read 0.33 s early)."""
+        errors = []
+        for body in BODIES:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.5)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed, approach_s=0.5, stance_s=0.5)
+                lost = [(rep.top_time - 0.3, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting(lost))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+
+    @pytest.mark.parametrize(
+        ("deficit_deg", "stance_s"), [(FAULTED_LOCKOUT_DEG, 1.5), (0.0, 0.5)],
+        ids=["soft_lockout", "no_standing_reference"],
+    )
+    def test_a_long_hold_lost_from_view_does_not_resume_on_keypoint_noise(self, deficit_deg: float, stance_s: float):
+        """A 1.5 s hold seen for 0.15 s, then lost until 0.2 s into the lowering:
+        nothing stalled, the hips and knees only wander with the noise. A resume
+        on them is decided once, over the whole gap."""
+        script = RepScript(pull_s=1.2, top_hold_s=1.5, lockout_deficit_deg=deficit_deg)
+        errors = []
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[script] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed,
+                                    approach_s=stance_s, stance_s=stance_s)
+                lost = _tracker_coasting([(rep.top_time + 0.15, rep.top_time + 1.7) for rep in simulate(scenario).reps])
+                noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO,
+                                          UNSEEN_HOLD_NOISE_SEED + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_then(lost, noise))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= 2.0 * GAP_TOP_MAX_ERROR_S, errors
+
+    def test_a_grind_stalled_near_lockout_and_lost_through_its_finish_mostly_resumes_under_noise(self):
+        """A stall 3 % short is finished by the hips by little more than the resume
+        deficit: the hips and knees together extending by twice it over the gap
+        resume it more often than not at 1.5 cm (a documented limit: the rest are
+        dated at the stall)."""
+        errors = []
+        for body_index, body in enumerate(BODIES[:3]):
+            for seed in range(3):
+                grind = RepScript(pull_s=1.6, stall_fraction=0.97, stall_s=0.6, finish_s=0.4)
+                scenario = Scenario(athlete=body, reps=[grind] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                lost = _tracker_coasting([(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps])
+                noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO,
+                                          NEAR_LOCKOUT_GRIND_NOISE_SEED + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_then(lost, noise))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        far = [error for error in errors if abs(error) > 2.0 * GAP_TOP_MAX_ERROR_S]
+        assert len(far) <= NEAR_LOCKOUT_GRIND_FAR_RATIO * len(errors), errors
 
     @pytest.mark.parametrize("stall_fraction", [0.93, 0.95, 0.97])
     def test_a_grind_lost_through_its_finish_and_hold_is_dated_and_judged_at_the_lockout(self, stall_fraction: float):

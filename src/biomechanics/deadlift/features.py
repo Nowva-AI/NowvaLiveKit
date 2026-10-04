@@ -120,9 +120,6 @@ class RepTrack:
         self.touch_and_go_out = False
         # A top that never held, lost from view across its peak: dated in the gap.
         self.top_unseen = False
-        # A stall resumed on the joints while the bar was unseen: its climb out
-        # of it went unseen.
-        self.climb_unseen = False
 
     def append(self, measure: FrameMeasure, velocity: float) -> None:
         self.frames.append(measure)
@@ -194,16 +191,15 @@ class _FinalClimb(NamedTuple):
     start_up: float
 
 
-# The hold's last LOCKOUT_WINDOW_S; all of a top's frames when they end in a gap
-# the bar was seen leaving more than LOCKOUT_WINDOW_S later (a top lost from
-# view, judged in the gap). A hold seen only before such a gap is unjudged: its
-# frames may be the bar's last crawl into the top.
+# The hold's last LOCKOUT_WINDOW_S; all of a top's frames when the bar went
+# unseen right after them and was seen leaving more than LOCKOUT_WINDOW_S later.
 def _lockout_frames(rep: RepTrack) -> list[FrameMeasure]:
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
     window = [frame for frame in rep.top_frames if leaving - frame.t <= LOCKOUT_WINDOW_S]
     if window or not rep.top_frames:
         return window
-    return rep.top_frames if not math.isfinite(rep.top_frames[-1].bar_up) else window
+    after = next((frame for frame in rep.frames if frame.t > rep.top_frames[-1].t), None)
+    return rep.top_frames if after is not None and not math.isfinite(after.bar_up) else window
 
 
 def _flexion_deg(frames: list[FrameMeasure]) -> float:
