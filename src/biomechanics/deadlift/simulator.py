@@ -98,9 +98,11 @@ class RepScript(BaseModel):
     setup_trunk_deg: float | None = None
     knee_pass_trunk_deg: float | None = None
     # A sticking point: the bar stops this fraction of the way up for stall_s,
-    # then the lifter grinds through it.
+    # then the lifter grinds through it (over finish_s, if set; else at the
+    # pull's pace).
     stall_fraction: float | None = None
     stall_s: float = 0.0
+    finish_s: float | None = None
 
 
 class Scenario(BaseModel):
@@ -566,7 +568,8 @@ class _Builder:
             return [_smooth(step / steps) for step in range(1, steps + 1)]
         stall = script.stall_fraction
         before = max(1, int(round(script.pull_s * stall * fps)))
-        after = max(1, int(round(script.pull_s * (1.0 - stall) * fps)))
+        finish_s = script.pull_s * (1.0 - stall) if script.finish_s is None else script.finish_s
+        after = max(1, int(round(finish_s * fps)))
         return (
             [stall * _smooth(step / before) for step in range(1, before + 1)]
             + [stall] * int(round(script.stall_s * fps))

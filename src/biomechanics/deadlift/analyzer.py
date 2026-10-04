@@ -72,11 +72,9 @@ TOP_PEAK_WINDOW_S = 0.1
 # The top hold: frames in TOP with the bar this close to its top height (or two
 # noise bands, on a noisier bar).
 TOP_HOLD_BAND_M = 0.02
-# A stall short of lockout ends when the bar's median height over the last
-# RESUME_WINDOW_S clears the hold before it by this much, or by the bar's noise
-# if wider (the hold band without a standing reference).
-RESUME_WINDOW_S = 0.2
-TOP_RESUME_BAND_M = 0.005
+# The lowering has begun once the bar's median over this many frames is below
+# the hold by the hold band.
+LEAVE_TOP_FRAMES = 5
 # The live bar-over-midfoot offset the foot guidance speaks from is the median
 # over this long, once it holds this many settled stance frames.
 LIVE_OFFSET_WINDOW_S = 1.0
@@ -737,7 +735,9 @@ class DeadliftRepAnalyzer:
             frames = [*rep.lead_in, *rep.frames]
             bar_line = np.sum([_horizontal_line(frame, frame.l_wrist, frame.r_wrist) for frame in frames], axis=0)
             if not np.any(bar_line):
-                # One wrist all rep: the hip line alone.
+                # One wrist all rep: the feet's line, independent of the hips'.
+                bar_line = np.sum([line.ankles for line in before], axis=0)
+            if not np.any(bar_line):
                 bar_line = hip_line
         if float(np.dot(bar_line, hip_line)) < 0.0:
             bar_line = -bar_line
@@ -863,13 +863,14 @@ class DeadliftRepAnalyzer:
         rise = rep.peak_up - rep.liftoff.bar_up
         if rise < cfg.failed_rep_min_rise_m:
             return False
+        # Leaning back past vertical the hips went through, legs straight: a
+        # lockout (D5 judges it), however low the bar hangs from shoulders pulled
+        # back. Knees not measured are not known to be straight.
+        over_extended = measure.trunk_deg <= -cfg.overextended_top_deg and self._legs_straight(measure)
         expected = self._expected_top_up()
         if math.isfinite(expected) and rep.peak_up < expected - cfg.top_margin_m:
-            # Leaning back past vertical the hips went through, legs straight: a
-            # lockout (D5 judges it), however low the bar hangs from shoulders
-            # pulled back. Knees not measured are not known to be straight.
-            return measure.trunk_deg <= -cfg.overextended_top_deg and self._legs_straight(measure)
-        return abs(measure.trunk_deg) <= cfg.top_max_trunk_deg
+            return over_extended
+        return abs(measure.trunk_deg) <= cfg.top_max_trunk_deg or over_extended
 
     def _step_pull(self, measure: FrameMeasure, velocity: float) -> None:
         cfg = self.config
@@ -888,13 +889,14 @@ class DeadliftRepAnalyzer:
             rep.top_frames = [frame for frame in rep.frames if frame.t >= rep.top_time]
             self._enter(DeadliftPhase.TOP, measure.t)
             return
-        if velocity < -cfg.lower_velocity_mps and self._top_reached(rep, rep.frames[rep.peak_index]):
-            # A top that never held still (a quick touch-and-go set): the peak was the top.
+        if self._left_top(rep, rep.peak_up, velocity) and self._top_reached(rep, rep.frames[rep.peak_index]):
+            # A top that never held still (a quick touch-and-go set, or the wrist
+            # proxy's noise): the peak was the top.
             peak = rep.frames[rep.peak_index]
             rep.top_time = self._top_arrival(rep)
             rep.top_up = rep.peak_up
             rep.top_frames = [frame for frame in rep.frames if abs(frame.t - peak.t) <= TOP_PEAK_WINDOW_S]
-            rep.lower_start = measure.t
+            rep.lower_start = self._lowering_start(rep, rep.peak_up, measure.t)
             self._enter(DeadliftPhase.LOWER, measure.t)
             return
         if self._back_on_floor(measure):
@@ -931,47 +933,37 @@ class DeadliftRepAnalyzer:
         shortening_m = self._standing_refs.get("leg_m", NAN) - float(np.linalg.norm(measure.hip_mid - measure.ankle_mid))
         return shortening_m <= cfg.overextended_max_leg_shortening_m
 
-    # How far short of standing the hips or knees held at the top (NaN without
-    # a standing reference).
+    # How far short of standing the hips or knees held at the top. Without a
+    # standing reference, how far they have extended since (over the last few
+    # frames): a stall finishes by extending them, a shrug lifts the bar on
+    # straight legs. NaN when neither is measured.
     def _held_deficit_deg(self, rep: RepTrack) -> float:
-        refs = self._standing_refs
         held = [frame for frame in rep.top_frames if frame.legs_measured] or rep.top_frames
+        refs = self._standing_refs
+        recent = [frame for frame in rep.frames[-LEAVE_TOP_FRAMES:] if frame.legs_measured]
+        hip_now = refs.get("hip_flex_deg", NAN) if refs else _median([frame.hip_flex_deg for frame in recent])
+        knee_now = refs.get("knee_flex_deg", NAN) if refs else _median([frame.knee_flex_deg for frame in recent])
         deficits = [
-            _median([frame.hip_flex_deg for frame in held]) - refs.get("hip_flex_deg", NAN),
-            _median([frame.knee_flex_deg for frame in held]) - refs.get("knee_flex_deg", NAN),
+            _median([frame.hip_flex_deg for frame in held]) - hip_now,
+            _median([frame.knee_flex_deg for frame in held]) - knee_now,
         ]
         finite = [deficit for deficit in deficits if math.isfinite(deficit)]
         return max(finite) if finite else NAN
 
-    # The bar has risen clear of the top it held, which was a stall short of
-    # lockout: a grind a few cm from it, or a hitch read as a top with no
-    # standing height to expect it at. Medians, so the wrist proxy's noise does
-    # not decide it; and only from a stall, so a shrug or a lockout settling
-    # upward does not move the top (a resume from a stall that noise triggers
-    # only re-enters TOP). Without a standing reference to tell a stall from a
-    # lockout, the bar must clear the hold band.
+    # The bar has risen clear of the hold band above the top it held, which was
+    # a stall short of lockout: a hitch read as a top with no standing height to
+    # expect it at, or a grind further from lockout than the band. Only from a
+    # stall: a shrug or a lockout settling upward rises too. (A grind inside the
+    # band stays in TOP: features.py times the top and judges the lockout from
+    # the bar's last climb.)
     def _above_held_top(self, rep: RepTrack, measure: FrameMeasure) -> bool:
-        recent = _median([frame.bar_up for frame in rep.frames if measure.t - frame.t <= RESUME_WINDOW_S + 1e-6])
         deficit = self._held_deficit_deg(rep)
-        if math.isnan(deficit):
-            return recent > rep.top_up + self._hold_band_m()
         if deficit < self.config.resume_min_deficit_deg:
             return False
-        return recent > self._held_up(rep, measure.t) + max(TOP_RESUME_BAND_M, self._rest_noise_m)
+        return measure.bar_up > rep.top_up + self._hold_band_m()
 
-    # The level the bar held at the top before the last RESUME_WINDOW_S.
-    def _held_up(self, rep: RepTrack, t: float) -> float:
-        held = _median([frame.bar_up for frame in rep.top_frames if t - frame.t > RESUME_WINDOW_S + 1e-6])
-        return held if math.isfinite(held) else rep.top_up
-
-    # The pull goes on; its top is timed on the climb from the bar's last frame
-    # at the stall's level, so the stall's frames neither date the top nor enter
-    # the lockout (D6).
+    # The pull goes on, and its top comes later.
     def _resume_pull(self, rep: RepTrack, measure: FrameMeasure) -> None:
-        stall_up = self._held_up(rep, measure.t)
-        rep.climb_start = next(
-            (frame.t for frame in reversed(rep.frames) if frame.bar_up <= stall_up), rep.climb_start,
-        )
         rep.top_time = NAN
         rep.top_up = NAN
         rep.top_frames = []
@@ -991,9 +983,23 @@ class DeadliftRepAnalyzer:
         # not the hold.
         if math.isfinite(measure.bar_up) and abs(measure.bar_up - rep.top_up) <= self._hold_band_m():
             rep.top_frames.append(measure)
-        if velocity < -self.config.lower_velocity_mps:
-            rep.lower_start = measure.t
+        held_up = _median([frame.bar_up for frame in rep.top_frames]) if rep.top_frames else rep.top_up
+        if self._left_top(rep, held_up, velocity):
+            rep.lower_start = self._lowering_start(rep, held_up, measure.t)
+            rep.top_frames = [frame for frame in rep.top_frames if frame.t <= rep.lower_start]
             self._enter(DeadliftPhase.LOWER, measure.t)
+
+    # The lowering takes the bar down out of the top (its median over the last
+    # few frames below the hold band): a shrug coming back down onto the
+    # lockout, or the wrist proxy's noise, only moves it.
+    def _left_top(self, rep: RepTrack, top_up: float, velocity: float) -> bool:
+        recent_up = _median([frame.bar_up for frame in rep.frames[-LEAVE_TOP_FRAMES:]])
+        return velocity < -self.config.lower_velocity_mps and recent_up < top_up - self._hold_band_m()
+
+    # The lowering began at the bar's last frame at the top.
+    def _lowering_start(self, rep: RepTrack, top_up: float, t: float) -> float:
+        band_m = self._event_band_m()
+        return next((frame.t for frame in reversed(rep.frames) if frame.bar_up >= top_up - band_m), t)
 
     # Dead stop: on the rest and not moving for a few frames, or on the rest long
     # enough.

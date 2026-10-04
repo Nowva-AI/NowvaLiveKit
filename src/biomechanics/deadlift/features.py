@@ -47,10 +47,26 @@ MIN_SHOULDER_RISE_M = 0.01
 # Plausible segment lengths for the setup model (m); outside them the keypoints are wrong.
 MIN_SEGMENT_M = 0.15
 MAX_SEGMENT_M = 0.90
-# The lockout (D6) and lean-back (D5) are judged on the hold's most extended
-# stretch this long: a stall short of lockout inside the hold, or the knees
-# unlocking as the lowering begins, is not the lockout.
-TOP_JUDGE_WINDOW_S = 0.3
+# The lockout is the hold's last stretch this long before the lowering: its
+# level, and the frames the lockout (D6) and lean-back (D5) are judged on. After a
+# grind's stall short of lockout the hold ends locked out; chosen by time, never
+# by the angles judged.
+LOCKOUT_WINDOW_S = 0.5
+# A stall short of the lockout: the bar's running median over STALL_MEDIAN_FRAMES
+# flat (within the event band) over the last STALL_MIN_S and below the lockout's
+# level by more than the band, with the hips and knees STALL_MIN_FLEXION_DEG more
+# bent than at the lockout: a dip of the noise is not flat for that long, a
+# slow approach rises, and a shrug lifts the bar off a lockout as straight as
+# the rest of it.
+STALL_MEDIAN_FRAMES = 5
+STALL_MIN_S = 0.3
+STALL_MIN_FLEXION_DEG = 12.0
+# On the wrist proxy the top is the hips and knees reaching the lockout: their
+# flexion within LOCKOUT_REACHED_DEG of the lockout's. The joints are still
+# clearly bent (a stall, the pull's last stretch) PROXY_BENT_DEG above it, wider
+# than the angles' slow wander over a long hold at 1.5 cm keypoint noise.
+LOCKOUT_REACHED_DEG = 5.0
+PROXY_BENT_DEG = 20.0
 # Event timing: leaving or reaching a level with constant acceleration, the
 # distance from the level is c * (t - t0)^2 on one side of the event t0 and zero
 # on the other. Fitted on the frames within this distance of the level, by a grid
@@ -91,9 +107,6 @@ class RepTrack:
         self.lead_in: list[FrameMeasure] = []
         # The rep ended in a touch-and-go: its floor is the low point itself.
         self.touch_and_go_out = False
-        # The bar's last climb to the top began here: after a stall short of the
-        # top, the top is timed on the frames from there.
-        self.climb_start = liftoff.t
 
     def append(self, measure: FrameMeasure, velocity: float) -> None:
         self.frames.append(measure)
@@ -157,28 +170,99 @@ def liftoff_time(rep: RepTrack, rest_up: float, band_m: float) -> float:
     return estimate if math.isfinite(estimate) else rep.liftoff.t
 
 
+class _FinalClimb(NamedTuple):
+    level: float
+    start_t: float
+    start_up: float
+
+
+def _lockout_frames(rep: RepTrack) -> list[FrameMeasure]:
+    leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
+    return [frame for frame in rep.top_frames if leaving - frame.t <= LOCKOUT_WINDOW_S]
+
+
+def _flexion_deg(frames: list[FrameMeasure]) -> float:
+    measured = [frame for frame in frames if frame.legs_measured] or frames
+    return _median([frame.hip_flex_deg for frame in measured]) + _median([frame.knee_flex_deg for frame in measured])
+
+
+# The level the bar ended its top at, and where its last climb to it began: the
+# end of its last stall short of the lockout (liftoff when it never stalled).
+def _final_climb(rep: RepTrack, band_m: float) -> _FinalClimb:
+    lockout = _lockout_frames(rep)
+    level = _median([frame.bar_up for frame in lockout]) if lockout else rep.top_up
+    climb = _FinalClimb(level, rep.liftoff.t, rep.liftoff.bar_up)
+    if not lockout:
+        return climb
+    smoothed = _running_median([frame.bar_up for frame in rep.frames], STALL_MEDIAN_FRAMES)
+    lockout_flexion = _flexion_deg(lockout)
+    first = 0
+    for index, frame in enumerate(rep.frames):
+        while frame.t - rep.frames[first].t > STALL_MIN_S + 1e-6:
+            first += 1
+        if frame.t >= lockout[0].t or not smoothed[index] < level - band_m:
+            continue
+        if frame.t - rep.frames[first].t < STALL_MIN_S - 1e-6:
+            continue
+        heights = smoothed[first:index + 1]
+        if max(heights) - min(heights) > band_m:
+            continue
+        if _flexion_deg(rep.frames[first:index + 1]) - lockout_flexion >= STALL_MIN_FLEXION_DEG:
+            climb = _FinalClimb(level, frame.t, smoothed[index])
+    return climb
+
+
+# On the wrist proxy the bar's height cannot date the top: through the wrists'
+# noise a stall a few cm short of the lockout, and a slow pull's last
+# centimetres, look like the hold. The hips and knees reaching the lockout date
+# it instead, from the bar's arrival at its level; no later than
+# EVENT_MAX_SHIFT_S after the bar's own top or the joints' last clearly bent
+# frame before the lockout window, so the angles' slow wander over a long hold
+# does not move it.
+def _joints_locked_time(rep: RepTrack, arrival: float, bar_top: float, leaving: float) -> float:
+    lockout = _lockout_frames(rep)
+    frames = [frame for frame in rep.frames if frame.legs_measured and arrival <= frame.t <= leaving]
+    if not lockout or not frames:
+        return bar_top
+    lockout_flexion = _flexion_deg(lockout)
+    flexion = _running_median([frame.hip_flex_deg + frame.knee_flex_deg for frame in frames], STALL_MEDIAN_FRAMES)
+    bent = [
+        frame.t for frame, degrees in zip(frames, flexion)
+        if frame.t < lockout[0].t and degrees - lockout_flexion >= PROXY_BENT_DEG
+    ]
+    latest = max([bar_top, *bent[-1:]])
+    return next(
+        (
+            frame.t for frame, degrees in zip(frames, flexion)
+            if frame.t <= latest + EVENT_MAX_SHIFT_S and degrees - lockout_flexion <= LOCKOUT_REACHED_DEG
+        ),
+        latest,
+    )
+
+
 def top_time(rep: RepTrack, band_m: float) -> float:
-    """The bar's arrival at its top: the level it held just after it arrived (or
-    its peak, for a top that never held), reached after the first frame inside
-    the band, on the bar's last climb."""
-    level = _median([frame.bar_up for frame in rep.top_frames]) if rep.top_frames else rep.top_up
+    """The bar's arrival at its top: the level it ended the top at (or its peak,
+    for a top that never held), reached on its last climb, fitted from below (a
+    shrug above the level is no approach to it) over the climb's upper half,
+    where it slows into the top (a climb out of a stall starts flat). On the
+    wrist proxy, the hips and knees reaching the lockout."""
+    level, start_t, start_up = _final_climb(rep, band_m)
     if not math.isfinite(level):
         return rep.top_time
     arrival = next(
-        (frame.t for frame in rep.frames if frame.t >= rep.climb_start and frame.bar_up >= level - band_m),
+        (frame.t for frame in rep.frames if frame.t >= start_t and frame.bar_up >= level - band_m),
         rep.top_time,
     )
-    if rep.climb_start > rep.liftoff.t:
-        # After a stall the bar climbs its last centimetres in a few frames: no
-        # parabola to fit, the arrival is the top.
-        return arrival
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
-    # Reaching the level from below: frames above it (a shrug) are no approach.
     frames = [
-        frame for frame in rep.frames if rep.climb_start <= frame.t <= leaving and frame.bar_up <= level + band_m
+        frame for frame in rep.frames
+        if start_t <= frame.t <= leaving and (level + start_up) / 2.0 <= frame.bar_up <= level + band_m
     ]
     estimate = _event_time(frames, level, band_m, arrival, min(arrival + EVENT_MAX_SHIFT_S, leaving), leaving=False)
-    return estimate if math.isfinite(estimate) else arrival
+    bar_top = estimate if math.isfinite(estimate) else arrival
+    if any(frame.bar_source == BAR_SOURCE_WRIST_PROXY for frame in rep.frames):
+        return _joints_locked_time(rep, arrival, bar_top, leaving)
+    return bar_top
 
 
 def floor_time(rep: RepTrack, rest_up: float, band_m: float) -> float:
@@ -402,27 +486,11 @@ def _bar_path_features(pull: list[FrameMeasure], hold: list[FrameMeasure], featu
     features.bar_low_side = "left" if _median(tilts) < 0.0 else "right"
 
 
-# The window of TOP_JUDGE_WINDOW_S with the least hip and knee flexion.
-def _most_extended(frames: list[FrameMeasure]) -> list[FrameMeasure]:
-    windows = [
-        [frame for frame in frames[start:] if frame.t - frames[start].t <= TOP_JUDGE_WINDOW_S + 1e-6]
-        for start in range(len(frames))
-        if frames[-1].t - frames[start].t >= TOP_JUDGE_WINDOW_S - 1e-6 or start == 0
-    ]
-
-    def flexion(window: list[FrameMeasure]) -> float:
-        hip = _median([f.hip_flex_deg for f in window])
-        knee = _median([f.knee_flex_deg for f in window])
-        return (hip if math.isfinite(hip) else 0.0) + (knee if math.isfinite(knee) else 0.0)
-
-    return min(windows, key=flexion)
-
-
 def _top_features(rep: RepTrack, refs: dict[str, float], features: DeadliftRepFeatures) -> None:
-    top = [f for f in rep.top_frames if f.legs_measured] or rep.top_frames
+    lockout = _lockout_frames(rep)
+    top = [f for f in lockout if f.legs_measured] or lockout
     if not top or not refs:
         return
-    top = _most_extended(top)
     features.hip_extension_deficit_deg = _median([f.hip_flex_deg for f in top]) - refs.get("hip_flex_deg", NAN)
     features.knee_extension_deficit_deg = _median([f.knee_flex_deg for f in top]) - refs.get("knee_flex_deg", NAN)
     features.lean_back_deg = refs.get("trunk_deg", NAN) - _median([f.trunk_deg for f in top])

@@ -357,7 +357,8 @@ class DeadliftConfig(BaseModel):
     overextended_max_leg_shortening_m: float = 0.06
     # TOP -> PULL: the bar rose past the top it held, which was a stall short of
     # lockout only if the hips or knees held this far short of standing (D6's
-    # mild threshold); a shrug or a settling lockout rises too.
+    # mild threshold) or, without a standing reference, have extended this much
+    # since; a shrug or a settling lockout rises too, on straight legs.
     resume_min_deficit_deg: float = 8.0
     # A pull that rose this far but never reached the top is a failed rep.
     failed_rep_min_rise_m: float = 0.10

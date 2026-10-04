@@ -90,6 +90,13 @@ class TestSetupRules:
 
 
 class TestPullAndTopRules:
+    def test_a_stall_resumes_only_from_a_hold_d6_would_judge(self):
+        """The analyser resumes a pull from a hold at least D6's mild threshold short
+        of standing: a lockout D6 calls clean is never a stall."""
+        config = BiomechanicsConfig()
+        mild_deg = FAULTS.deadlift_lockout.mild
+        assert config.deadlift.resume_min_deficit_deg == pytest.approx(mild_deg, abs=VALUE_TOLERANCE)
+
     @pytest.mark.parametrize(
         ("rep_ratio", "set_ratio"), [(1.2, 1.2), (1.35, math.nan)], ids=["the_set_agrees", "beyond_noise_alone"],
     )

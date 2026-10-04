@@ -61,6 +61,19 @@ SHIFT_SIZE_TOLERANCE_RATIO = 0.03
 SHRUG_TOP_SHIFT_MAX_S = 0.15
 # The wrist proxy's top event: bound by the wrists' noise, not the 100 ms gate.
 MAX_PROXY_TOP_ERROR_S = 0.3
+# A slow proxy pull's joints creep their last few degrees to the lockout over
+# ~0.25 s; its top is dated early by up to this.
+MAX_PROXY_SLOW_TOP_ERROR_S = 0.5
+PROXY_KEYPOINT_NOISE_M = 0.015
+# A noisier tracked bar than TRACKED_BAR_NOISE_M.
+NOISY_TRACKED_BAR_NOISE_M = 0.005
+# Correlation of the platform's frame-to-frame keypoint error (AR(1)).
+PLATFORM_NOISE_RHO = 0.8
+# A soft lockout's deficit under noise reads within this of its noise-free reading.
+MAX_LOCKOUT_BIAS_DEG = 1.0
+# A grind finishing its last 2.5 cm over 1 s: the last ~0.17 s move the bar
+# under 2 mm, inside a tracked bar's noise.
+SLOW_FINISH_MAX_MEDIAN_ERROR_S = 0.15
 # Keypoints a shrug at the top lifts with the bar.
 UPPER_BODY = (
     CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER, CK.LEFT_ELBOW, CK.RIGHT_ELBOW, CK.LEFT_WRIST, CK.RIGHT_WRIST,
@@ -644,6 +657,26 @@ class TestTempo:
             assert measured.top_time == pytest.approx(expected.top_time, abs=MAX_EVENT_ERROR_S)
             assert measured.floor_time == pytest.approx(expected.floor_time, abs=MAX_EVENT_ERROR_S)
 
+    def test_a_slow_pull_under_platform_noise_meets_the_event_gate(self):
+        errors = []
+        for seed in range(6):
+            scenario = Scenario(reps=[RepScript(pull_s=5.0)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+            noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 70 + seed)
+            sim, features, _, _ = _analyse(scenario, mutate=noise)
+            assert len(features) == len(sim.reps)
+            errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(abs(error) for error in errors) <= MAX_EVENT_ERROR_S
+
+    def test_a_grind_that_finishes_slowly_is_timed_at_its_top(self):
+        """The top is fitted on the last climb out of the stall, over its upper half."""
+        errors = []
+        for seed in range(4):
+            reps = [RepScript(pull_s=2.0, stall_fraction=0.95, stall_s=0.8, finish_s=1.0)] * 3
+            sim, features, _, _ = _analyse(Scenario(reps=reps, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+            assert len(features) == len(sim.reps)
+            errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert float(np.median(np.abs(errors))) <= SLOW_FINISH_MAX_MEDIAN_ERROR_S
+
 
 class TestModelFreeKinematics:
     """Poses scripted by trunk angle, not built by the setup model: the analyser's
@@ -880,6 +913,30 @@ class TestWristProxyAtPlatformNoise:
         assert reps == 24
         assert shifted <= reps // 10
 
+    def test_the_top_is_the_hips_and_knees_reaching_the_lockout(self):
+        """The wrists' height wanders through the hold; the joints finishing their
+        extension date the top."""
+        errors = []
+        for seed in range(6):
+            scenario = Scenario(track_bar=False, seed=seed)
+            noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 500 + seed)
+            sim, features, _, _ = _analyse(scenario, mutate=noise)
+            assert len(features) == len(sim.reps)
+            errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert float(np.median(errors)) <= MAX_EVENT_ERROR_S
+        assert max(errors) <= MAX_PROXY_TOP_ERROR_S
+
+    def test_a_slow_pull_is_dated_early_by_the_joints_last_creep(self):
+        errors = []
+        for seed in range(6):
+            scenario = Scenario(reps=[RepScript(pull_s=5.0)] * 3, track_bar=False, seed=seed)
+            noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 500 + seed)
+            sim, features, _, _ = _analyse(scenario, mutate=noise)
+            assert len(features) == len(sim.reps)
+            errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert float(np.median(errors)) <= MAX_PROXY_TOP_ERROR_S
+        assert max(errors) <= MAX_PROXY_SLOW_TOP_ERROR_S
+
 
 class TestHipShiftAlongTheLifter:
     """D8 is measured along the lifter's own left-right (hips and ankles, locked
@@ -961,6 +1018,21 @@ class TestHipShiftAlongTheLifter:
         habitual pelvic rotation, or 1.5 cm of front-back asymmetry between the
         two hip keypoints): the hip line leaks, the bar's axis does not."""
         _, features, _, _ = _analyse(Scenario(), mutate=_hip_line_turned(4.0))
+        assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
+
+    def test_a_hip_line_turned_against_the_legs_with_one_wrist_hidden_is_no_hip_shift(self):
+        """On the wrist proxy with one wrist never seen, the hands give no bar line:
+        the feet's line stands in for it, not the hip line a second time."""
+        hip_line_turned = _hip_line_turned(4.0)
+
+        def one_wrist_hidden(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+            points, confidences, bar = hip_line_turned(index, frame)
+            confidences = confidences.copy()
+            confidences[CK.RIGHT_WRIST] = 0.0
+            return points, confidences, bar
+
+        sim, features, _, _ = _analyse(Scenario(track_bar=False), mutate=one_wrist_hidden)
+        assert len(features) == len(sim.reps)
         assert all(abs(f.hip_shift_ratio) < CLEAN_SHIFT_MAX_RATIO for f in features)
 
     def test_a_pelvis_twist_without_sideways_travel_is_no_hip_shift(self):
@@ -1071,29 +1143,80 @@ class TestSetBehaviour:
         assert all("deadlift_lockout" not in cued for cued in _cued(features))
 
     def test_a_grind_short_of_lockout_on_the_wrist_proxy_is_not_judged_as_the_lockout(self):
-        """The proxy's noise: the stall ends on medians of the bar's height, and the
-        lockout is judged on the hold's most extended stretch."""
-        lockout_cues = late_tops = reps = 0
+        """A stall ~3 cm short sits inside the proxy's noise bands: the lockout is
+        judged on the hold's last 0.5 s, and the top is the hips and knees reaching
+        it, not the bar reaching the stall."""
+        lockout_cues = off_tops = reps = 0
         for seed in range(6):
             scenario = Scenario(reps=[RepScript(pull_s=2.5, stall_fraction=0.95, stall_s=0.8)] * 3, track_bar=False, seed=seed)
-            sim, features, _, _ = _analyse(scenario, mutate=_correlated_noise(0.015, 0.8, 40 + seed))
+            noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 40 + seed)
+            sim, features, _, _ = _analyse(scenario, mutate=noise)
             assert len(features) == len(sim.reps)
             reps += len(features)
-            late_tops += sum(abs(f.top_time - truth.top_time) > MAX_PROXY_TOP_ERROR_S for f, truth in zip(features, sim.reps))
+            off_tops += sum(abs(f.top_time - truth.top_time) > MAX_PROXY_TOP_ERROR_S for f, truth in zip(features, sim.reps))
             lockout_cues += sum("deadlift_lockout" in cued for cued in _cued(features))
         assert lockout_cues <= reps // 10
-        assert late_tops <= reps // 10
+        assert off_tops <= reps // 10
 
-    def test_a_shrug_at_the_top_is_not_a_slower_rep(self):
-        """A shrug lifts the bar off a lockout: no stall to resume from, so the top
-        stays near where the bar arrived (the shrug's first centimetres sit in
-        the hold) and no velocity loss is read."""
-        scenario = Scenario(reps=[RepScript(top_hold_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M)
+    @pytest.mark.parametrize("stance_s", [0.5, 1.5], ids=["no_standing_reference", "standing_reference"])
+    def test_a_shrug_at_the_top_is_not_a_slower_rep(self, stance_s: float):
+        """A shrug lifts the bar off a lockout on straight legs: no stall to resume
+        from (held short of standing or, with no standing reference, the hips and
+        knees extending as the bar rises), so the top stays near where the bar
+        arrived and no velocity loss is read."""
+        scenario = Scenario(reps=[RepScript(top_hold_s=1.2)] * 4, approach_s=stance_s, stance_s=stance_s,
+                            bar_noise_m=TRACKED_BAR_NOISE_M)
         sim = simulate(scenario)
         _, features, _, _ = _analyse(scenario, mutate=_shrugged(sim, 0.025, rep_index=3))
         assert len(features) == len(sim.reps)
         assert features[3].top_time == pytest.approx(sim.reps[3].top_time, abs=SHRUG_TOP_SHIFT_MAX_S)
         assert "deadlift_velocity_loss" not in _judge(features)[3]
+
+    def test_a_moderate_soft_lockout_is_cued_under_platform_noise(self):
+        """The lockout is the hold's last 0.5 s, chosen by time: a window chosen by
+        the angles it judges selects the noise and reads the lockout straighter."""
+        cued = reps = 0
+        for seed in range(6):
+            scenario = Scenario(reps=[RepScript(top_hold_s=2.0, lockout_deficit_deg=14.0)] * 3,
+                                bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+            noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 700 + seed)
+            sim, features, _, _ = _analyse(scenario, mutate=noise)
+            assert len(features) == len(sim.reps)
+            reps += len(features)
+            cued += sum("deadlift_lockout" in rep_cues for rep_cues in _cued(features))
+        assert cued >= reps - reps // 10
+
+    def test_the_lockout_deficit_is_not_read_low_under_noise(self):
+        noisy, noise_free = [], []
+        for seed in range(6):
+            scenario = Scenario(reps=[RepScript(top_hold_s=1.0, lockout_deficit_deg=12.0)] * 3,
+                                bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+            noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 700 + seed)
+            _, features, _, _ = _analyse(scenario, mutate=noise)
+            noisy += [f.hip_extension_deficit_deg for f in features]
+            _, features, _, _ = _analyse(scenario)
+            noise_free += [f.hip_extension_deficit_deg for f in features]
+        assert float(np.median(noisy)) == pytest.approx(float(np.median(noise_free)), abs=MAX_LOCKOUT_BIAS_DEG)
+
+    @pytest.mark.parametrize(
+        ("track_bar", "bar_noise_m", "keypoint_noise_m"),
+        [(False, 0.0, PROXY_KEYPOINT_NOISE_M), (True, NOISY_TRACKED_BAR_NOISE_M, PLATFORM_KEYPOINT_NOISE_M)],
+        ids=["wrist_proxy", "noisy_tracked_bar"],
+    )
+    def test_noise_does_not_resume_a_soft_lockout(self, track_bar: bool, bar_noise_m: float, keypoint_noise_m: float):
+        """A soft lockout opens the resume's deficit gate; the bar must still clear
+        the hold band, frame by frame, so the noise does not re-date its top later
+        in the hold."""
+        errors = []
+        for seed in range(6):
+            scenario = Scenario(reps=[RepScript(top_hold_s=2.0, lockout_deficit_deg=12.0)] * 3,
+                                track_bar=track_bar, bar_noise_m=bar_noise_m, seed=seed)
+            noise = _correlated_noise(keypoint_noise_m, PLATFORM_NOISE_RHO, 900 + seed)
+            sim, features, _, _ = _analyse(scenario, mutate=noise)
+            assert len(features) == len(sim.reps)
+            errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert float(np.median(errors)) <= MAX_EVENT_ERROR_S
+        assert max(errors) <= MAX_PROXY_TOP_ERROR_S
 
     @pytest.mark.parametrize("lean_back_deg", [25.0, 40.0])
     def test_an_over_extended_lockout_with_the_knees_hidden_is_counted(self, lean_back_deg: float):
@@ -1144,6 +1267,15 @@ class TestSetBehaviour:
         assert len(features) == 2
         assert analyzer.failed_reps == 0
         assert all(verdict.get("deadlift_lean_back") == "severe" for verdict in _judge(features))
+
+    @pytest.mark.parametrize("lean_back_deg", [25.0, 40.0])
+    def test_an_over_extended_lockout_with_no_top_to_expect_is_counted(self, lean_back_deg: float):
+        """No standing reference and no earlier top: the legs straight still say
+        a trunk leaning back is a lockout."""
+        scenario = Scenario(reps=[RepScript(lean_back_deg=lean_back_deg)] * 2, approach_s=0.5, stance_s=0.5)
+        sim, features, analyzer, _ = _analyse(scenario)
+        assert len(features) == len(sim.reps)
+        assert analyzer.failed_reps == 0
 
     def test_feet_hidden_at_setup_still_judge_the_bar_over_midfoot(self):
         def hide_feet_from_the_setup(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
