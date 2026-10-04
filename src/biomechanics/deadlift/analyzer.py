@@ -67,11 +67,21 @@ MAX_VELOCITY_WINDOW_S = 0.4
 MIN_NOISE_FRAMES = 5
 # The top event is the bar's arrival this close to its peak height.
 TOP_ARRIVAL_BAND_M = 0.005
-# Frames either side of the peak that stand in for a top that never held still.
+# Frames either side of the peak that stand in for a top that never held still:
+# TOP_PEAK_WINDOW_S, or TOP_PEAK_WINDOW_RATIO of a quicker pull (on a 0.6 s pull
+# the knees are still bending 0.1 s either side of the top).
 TOP_PEAK_WINDOW_S = 0.1
+TOP_PEAK_WINDOW_RATIO = 0.11
 # On the wrist proxy that peak is the vertex of a parabola through the bar's
-# height this far either side of its highest frame.
+# height (its running median over PEAK_MEDIAN_FRAMES) this far either side of
+# its highest frame, refined within PEAK_REFINE_S (on a PEAK_GRID_STEP_S grid)
+# with each side's own curvature, the faster side at most
+# PEAK_MAX_CURVATURE_RATIO times the slower's.
 PEAK_FIT_S = 0.3
+PEAK_MEDIAN_FRAMES = 5
+PEAK_REFINE_S = 0.1
+PEAK_GRID_STEP_S = 0.005
+PEAK_MAX_CURVATURE_RATIO = 8.0
 # The top hold: frames in TOP with the bar this close to its top height (or two
 # noise bands, on a noisier bar).
 TOP_HOLD_BAND_M = 0.02
@@ -184,6 +194,27 @@ def _same_heading(lines: list[_HeadingLines]) -> list[_HeadingLines]:
 def _median(values: list[float]) -> float:
     finite = [value for value in values if math.isfinite(value)]
     return float(np.median(finite)) if finite else NAN
+
+
+# The vertex of a peak whose two sides fall away with their own curvature (their
+# ratio at most PEAK_MAX_CURVATURE_RATIO), on a grid within PEAK_REFINE_S of a
+# first estimate: least squares in height.
+def _two_sided_vertex_s(offsets_s: np.ndarray, heights_m: np.ndarray, estimate_s: float) -> float:
+    best_s, best_residual = estimate_s, math.inf
+    for vertex_s in np.arange(estimate_s - PEAK_REFINE_S, estimate_s + PEAK_REFINE_S + 1e-9, PEAK_GRID_STEP_S):
+        before = np.where(offsets_s < vertex_s, (offsets_s - vertex_s) ** 2, 0.0)
+        after = np.where(offsets_s >= vertex_s, (offsets_s - vertex_s) ** 2, 0.0)
+        if np.count_nonzero(before) < 2 or np.count_nonzero(after) < 2:
+            continue
+        design = np.column_stack([np.ones_like(offsets_s), -before, -after])
+        coefficients = np.linalg.lstsq(design, heights_m, rcond=None)[0]
+        rising, falling = coefficients[1], coefficients[2]
+        if rising <= 0.0 or falling <= 0.0 or max(rising / falling, falling / rising) > PEAK_MAX_CURVATURE_RATIO:
+            continue
+        residual = float(np.sum((design @ coefficients - heights_m) ** 2))
+        if residual < best_residual:
+            best_s, best_residual = float(vertex_s), residual
+    return best_s
 
 
 # Least-squares slope and its standard error. The noise behind the error is the
@@ -906,9 +937,10 @@ class DeadliftRepAnalyzer:
             rep.top_time = self._top_arrival(rep)
             rep.top_up = rep.peak_up
             rep.lower_start = max(peak_t, self._lowering_start(rep, rep.peak_up, measure.t))
+            window_s = min(TOP_PEAK_WINDOW_S, TOP_PEAK_WINDOW_RATIO * (peak_t - rep.liftoff.t))
             rep.top_frames = [
                 frame for frame in rep.frames
-                if abs(frame.t - peak_t) <= TOP_PEAK_WINDOW_S and frame.t <= rep.lower_start
+                if abs(frame.t - peak_t) <= window_s and frame.t <= rep.lower_start
             ]
             self._enter(DeadliftPhase.LOWER, measure.t)
             return
@@ -926,7 +958,9 @@ class DeadliftRepAnalyzer:
 
     # When a top that never held peaked. On the wrist proxy the highest frame is
     # the highest of the wrists' noise, up to ~0.15 s off the top with the knees
-    # still bent: there, the vertex of a parabola through the heights around it.
+    # still bent: there, the vertex of a parabola through the (smoothed) heights
+    # around it, refined with each side's own curvature (a lowering faster than
+    # the pull would pull a symmetric parabola's vertex into the end of the rise).
     @staticmethod
     def _peak_time(rep: RepTrack) -> float:
         peak = rep.frames[rep.peak_index]
@@ -936,10 +970,14 @@ class DeadliftRepAnalyzer:
         if len(near) < MIN_NOISE_FRAMES:
             return peak.t
         offsets_s = np.asarray([frame.t for frame in near]) - peak.t
-        curvature, slope, _ = np.polyfit(offsets_s, [frame.bar_up for frame in near], 2)
+        raw_m = [frame.bar_up for frame in near]
+        half = PEAK_MEDIAN_FRAMES // 2
+        heights_m = np.asarray([_median(raw_m[max(0, i - half):i + half + 1]) for i in range(len(raw_m))])
+        curvature, slope, _ = np.polyfit(offsets_s, heights_m, 2)
         if curvature >= 0.0:
             return peak.t
-        return peak.t + float(np.clip(-slope / (2.0 * curvature), -PEAK_FIT_S, PEAK_FIT_S))
+        vertex_s = float(np.clip(-slope / (2.0 * curvature), -PEAK_FIT_S, PEAK_FIT_S))
+        return peak.t + _two_sided_vertex_s(offsets_s, heights_m, vertex_s)
 
     # The top event: the bar's first arrival within TOP_ARRIVAL_BAND_M of its peak.
     @staticmethod
