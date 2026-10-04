@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v16).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v17).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -49,14 +49,14 @@ of bar noise when the bar is tracked.
 | 2.0 cm i.i.d. | 12/12 | median 16 ms, p95 67 ms | 0 / 36 |
 | 2.0 cm AR(0.8) | 12/12 | median 18 ms, p95 66 ms | 0 / 36 |
 | 2.5 cm i.i.d. | 12/12 | median 16 ms, p95 67 ms | 0 / 36 |
-| 2.5 cm AR(0.8) | 12/12 | median 19 ms, p95 66 ms | 3 / 36 |
+| 2.5 cm AR(0.8) | 12/12 | median 19 ms, p95 66 ms | 1 / 36 |
 
 **Tracked bar, touch-and-go.** Sets of 4 touch-and-go reps plus one dead stop (12 per row):
 
 | Keypoint noise | Rep counting | Event error | Cued on clean reps |
 |---|---|---|---|
 | none | 12/12 | median 15 ms, p95 67 ms | 0 / 60 |
-| 2.0 cm AR(0.8) | 12/12 | median 17 ms, p95 67 ms | 2 / 60 |
+| 2.0 cm AR(0.8) | 12/12 | median 17 ms, p95 67 ms | 1 / 60 |
 
 Also counted exactly on the tracked bar:
 - 5-rep touch-and-go sets at 2–5 mm bar noise (25 random tempos per noise level);
@@ -73,11 +73,13 @@ quick re-pull instead of a touch-and-go, but no rep is lost.
 | 1.0 cm i.i.d. | 12/12, median 67 ms (p95 228), 0 / 36 | 12/12, median 66 ms (p95 433), 0 / 60 |
 | 1.0 cm AR(0.8) | 12/12, median 67 ms (p95 345), 0 / 36 | — |
 | 2.0 cm i.i.d. | 12/12, median 133 ms (p95 567), 0 / 36 | — |
-| 2.0 cm AR(0.8) | 12/12, median 100 ms (p95 500), 0 / 36 | 12/12, median 133 ms (p95 533), 6 / 60 |
+| 2.0 cm AR(0.8) | 12/12, median 100 ms (p95 500), 1 / 36 | 12/12, median 133 ms (p95 533), 5 / 60 |
 
-The cues on clean reps at 2–2.5 cm AR(0.8), on either bar source, are mostly D8 (hip shift: 3 of
-the 6 proxy touch-and-go cues, 2 of the 3 tracked) and D9: one rep's hip-shift ratio scatters
-~0.08 at that noise. They stay within the `VALIDATION.md` gate of 1 false correction per 10 reps.
+The cues on clean reps at 2–2.5 cm AR(0.8) are D9 (bent arms) on the tracked bar, and on the
+proxy's touch-and-go sets D8 (2 of 5), D8b, D9 and D6, one each. They stay within the
+`VALIDATION.md` gate of 1 false correction per 10 reps. D8's own noise floor, 24 sets of 3
+clean reps with four bodies: 2 of 72 tracked reps cued at 2 cm AR(0.8), 4 of 72 at 2.5 cm, 1 of
+72 on the proxy at 2 cm.
 
 **Fast touch-and-go on the wrist proxy.** Six-rep sets (5 touch-and-go, 0.4 s lowerings, 0.2 s
 tops), 10 seeds per row: every rep counted at 0.5, 0.6 and 0.8 s pulls, at both 2 cm AR(0.8)
@@ -102,12 +104,17 @@ tracked-bar result. Two proxy limits are documented in `KNOWLEDGE.md` §7:
 - **Tempo:** 0.45 s to 5 s pulls with 3 mm bar noise, all events within 100 ms. A
   0.8 s sticking point mid-pull is ground through and counted. A hitch 90 % of the way up
   is not taken for the top, with or without a standing reference (top within 100 ms; it
-  was ~1 s early).
+  was ~1 s early). A grind 2.3–5.8 cm short of lockout for 0.4–0.8 s is timed at the real
+  top within 0.1 s, with no lockout fault (it was 0.75–0.93 s early with a false moderate
+  D6). A stall inside the 2 cm hold band (~1 cm short) is dated at the stall.
 - **Re-setups at the floor:** feet shuffled 5 cm toward the bar while hinged are judged where
   they now stand (D1 6 → 1 cm measured 6 → 1 cm, at 0 and 2 cm noise); feet the plates hide
   keep the stance's lock.
-- **Stance off square:** lower body turned 5° and 8° from the bar (hands square to it): no hip
-  shift noise-free, and no D8 cue at 2 cm AR(0.8) (it was 32 of 48 reps at 8°).
+- **Stance off square, staggered, or turned:** the same noise gives the same hip shift (within
+  0.03) on a square stance as on one turned 8° from the bar (hands square to it; 32 of 48 reps
+  were cued at 8° in round 3) and as on one with the left foot 6 cm ahead (10 of 24 cued in
+  round 4). A lifter who stands turned 20° for 2 s and then squares up in place, or who turns
+  5–10° at the floor between reps, is cued 0 times in 24 reps at 1.5 cm AR(0.8).
 - **Occlusion:**
   - Plates hiding the feet whenever the bar is off the floor, also through the pipeline.
   - Feet hidden from the setup on: the counting holds and D1 is still judged.
@@ -119,7 +126,7 @@ tracked-bar result. Two proxy limits are documented in `KNOWLEDGE.md` §7:
 - **Lockouts:**
   - Over-extended lockouts (25–40° behind vertical) are counted and judged by D5.
   - A lockout 30° short is a failed rep, and so is a pull that leans back 40° from mid-thigh
-    with the knees still bent ~60°.
+    with the knees still bent ~60°, or with the knees hidden.
 
 **Faults:**
 - **Injected faults:** with noise-free keypoints, every injected fault (D1–D10) fires at
@@ -143,9 +150,8 @@ tracked-bar result. Two proxy limits are documented in `KNOWLEDGE.md` §7:
 vertical, the same set fakes more than 2 cm of drift.
 
 **Compute (x86):**
-- Analyser, at 1.5 cm keypoint noise: 0.3 ms median and 0.6 ms p95 per frame, and at most
-  about 3.3 ms on the frames that start a rep (the left-right lock over up to 8 s of frames)
-  or complete one (event fits and features). The first frames
+- Analyser, at 1.5 cm keypoint noise: 0.3 ms median and 0.5 ms p95 per frame, and about
+  3 ms on the frames that complete a rep (event fits, features, the hip-line axis). The first frames
   of a process pay numpy's warm-up once (~12 ms).
 - Bar association and tracking: about 0.6–1.1 ms.
 - The Jetson numbers are still to be measured (J1).
@@ -292,6 +298,29 @@ vertical, the same set fakes more than 2 cm of drift.
     different setups moved the lifter 25 cm in one frame. `hips_shoot_deg` is removed (D2 is
     injected with the model-free trunk angles), and each rep is now lowered into the next
     rep's setup.
+
+23. **D8's axis is the hip line, not the hip and ankle lines** (review, round 4). A staggered
+    stance turns the ankle line (13° for a foot 6 cm ahead) while the hips stay square: 10 of
+    24 reps falsely cued, and −0.15 noise-free through the real pipeline. The 8 s window also
+    kept the stance frames from before a lifter squared up (8 of 12 cued after standing 20°
+    off). The axis is now the hip line over the frames at the bar since the heading last
+    turned (a 1.5 s block turning more than 6° ends them), plus the rep's own frames. Those
+    extra frames pay for most of the shorter line: on clean reps at 2 cm AR(0.8), 2 of 72
+    tracked and 1 of 72 proxy reps cued, as with the ankles; at 2.5 cm, 4 of 72 against 2.
+
+24. **A grind short of lockout is a stall, not the top.** The 5 cm rise that resumed a hitch
+    left grinds 2–5 cm short of lockout taken as the top, with a false moderate D6 on lifters
+    who then locked out. The pull now resumes once the bar clears the 2 cm hold band, and the
+    top is timed on the climb from the bar's last still frame at the stall.
+
+25. **Hidden knees are not straight knees.** The over-extended lockout's knee gate passed a
+    lean-back failed pull when the plates hid the knees. Unmeasured knees now fail it.
+
+26. **Considered and not done.** Telling a stand-up off the bar from a pull on the wrist proxy
+    by the hands' separation (on the bar vs hanging): about 8 cm apart against 2.8 cm of
+    per-frame noise, and person-dependent, so it needs real data first. Analyser windows
+    counted in frames (rest, midfoot lock, live offset) are sized for the pipeline's fixed
+    30 fps analysis rate (`pipeline.target_fps`); the left-right lock is in seconds.
 
 ## Deferred: needs data, hardware or keys (not code)
 

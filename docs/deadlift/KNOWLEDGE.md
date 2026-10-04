@@ -35,9 +35,9 @@ lifts (`docs/deadlift/VALIDATION.md`).
     offset. The offset is 7.5 cm by default, and is learned per lifter (clipped to 4–12 cm)
     from any set where the bar was tracked.
   - A set never mixes the two sources.
-  - Without a bar axis, the lifter's left-right is locked per set from up to 2 s of settled
-    stance and setup frames (hips, ankles and wrists together). Rebuilt from the noisy hip line
-    every frame, it turned forward travel into sideways hip shift.
+  - Without a bar axis, the lifter's left-right is locked from the frames at the bar (hips,
+    ankles and wrists together; §3, "The lifter's left-right"). Rebuilt from the noisy hip
+    line every frame, it turned forward travel into sideways hip shift.
 
 ## 2. Phases (`deadlift/analyzer.py`)
 
@@ -49,8 +49,8 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
 | STANCE | Standing at the bar, feet planted. The closed-loop foot guidance runs here | **SETUP:** hands on the bar for 0.3 s. **PULL:** liftoff. **APPROACH:** away or turned away for 0.5 s |
 | SETUP | Hinged, hands on the bar | **PULL:** liftoff. **STANCE/APPROACH:** stands up without the bar for 0.3 s |
 | PULL | Liftoff to the top | **TOP:** see below. **LOWER:** the bar falls from a peak that reached the top. **FLOOR:** a failed rep |
-| TOP | Holding the top | **LOWER:** the bar falls faster than 0.10 m/s. **PULL:** the bar rises past the top it held (a hitch) |
-| LOWER | Lowering | **FLOOR:** dead stop, and the rep is counted. **PULL:** touch-and-go, and the rep is counted; or the bar rises past the top it held (a hitch) |
+| TOP | Holding the top | **LOWER:** the bar falls faster than 0.10 m/s. **PULL:** the bar rises clear of the top it held (a stall, not a top) |
+| LOWER | Lowering | **FLOOR:** dead stop, and the rep is counted. **PULL:** touch-and-go, and the rep is counted; or the bar rises clear of the top it held (a stall, not a top) |
 | FLOOR | Bar back on the floor | **SETUP:** hands on the still bar for 0.3 s. **PULL:** quick re-pull. **STANCE/APPROACH:** stands up |
 
 **What each condition means:**
@@ -80,13 +80,18 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   - The expected top height is the standing mid-wrist height minus the wrist-to-bar offset.
     Without a standing reference, it is the median top of the set's earlier reps.
   - The 8 cm margin lets soft lockouts count; D6 then judges them. A trunk 10° or more
-    behind vertical, with the knees bent no more than 40°, is an over-extended lockout and
-    counts at any bar height (D5 judges it). Leaning back from mid-thigh with the knees still
-    bent (~60°) is a failed pull, not a lockout. A lockout short by 30° or more is a failed rep.
-  - **A hitch is not a top.** A bar that stalls a few cm short of the top (or anywhere, with
-    no standing reference to expect the top at) can read as a top. If the bar then rises more
-    than 5 cm (or the hold band, if wider) above it, the pull resumes and the real top comes
-    later.
+    behind vertical, with the knees measured and bent no more than 40°, is an over-extended
+    lockout and counts at any bar height (D5 judges it). Leaning back from mid-thigh with the
+    knees still bent (~60°), or with the knees hidden, is a failed pull, not a lockout. A
+    lockout short by 30° or more is a failed rep.
+  - **A stall is not a top.** A bar that stalls a few cm short of lockout (a grind), or
+    anywhere with no standing reference to expect the top at (a hitch), can read as a top.
+    Once the bar rises clear of the hold band above it (2 cm on a tracked bar, 2 noise bands
+    if wider), the pull resumes: the real top is timed on the climb from the bar's last still
+    frame at the stall, and the stall's frames never enter the lockout (D6). Grinds 2.3–5.8 cm
+    short are timed within 0.1 s. A stall inside the hold band (~1 cm short) is the top: its
+    event is dated at the stall.
+  - A shrug at the top that lifts the bar past the hold band moves the top to the shrug.
 - **Dead stop:** within 2 cm of the rest, and either still for 3 frames or there for 0.3 s.
 - **Touch-and-go:**
   - The low point is within 5 cm of the rest.
@@ -162,14 +167,21 @@ NaN means "not measured", never 0.
     measured. A lifter cued "bar over midfoot" who shuffles the feet without standing up is
     then judged where they now stand (6 → 1 cm measured 6 → 1 cm). Feet hidden by the plates
     throughout keep the old lock.
-- **The lifter's left-right:** the sum of the hip and ankle lines (horizontal) over up to 8 s
-  of frames at the bar: settled STANCE, SETUP and FLOOR with the hands on the bar. It is
-  locked at setup and re-locked at each liftoff after one. D8 is measured along it on either
-  bar source. The bar's own axis is not the lifter's: a stance 5–8° off square to the bar
-  leaked the hips' ~45 cm of forward travel into "sideways" (13 of 18 reps falsely cued at
-  8°). Each degree of error reads ~0.03 of shift, so the lock needs seconds of frames under
-  correlated noise (about 1.2° from 4 s). Without a tracked bar, the wrists' line is added
-  for the proxy's sagittal frame.
+- **The lifter's left-right (D8's axis):** the hip line (horizontal), on either bar source.
+  The hips travel ~45 cm forward square to the pelvis, and each degree of axis error reads
+  ~0.03 of shift. The bar's axis is not the pelvis's: a stance 5–8° off square to the bar
+  leaked that travel into "sideways" (13 of 18 reps falsely cued at 8°). Nor is the ankle
+  line: a foot 6 cm ahead of the other turns it 13° (10 of 24 falsely cued).
+  - Summed over the frames at the bar from the last 15 s (settled STANCE, SETUP and FLOOR
+    with the hands on the bar) and the rep's own frames: a sideways shift moves the hips, it
+    does not turn their line. The hip line is short (~24 cm), so it needs those seconds of
+    frames under correlated noise.
+  - Older frames count only while the heading holds. Going back 1.5 s at a time, a block
+    whose hip and ankle lines turn more than 6° from the newer frames' ends them: a turn in
+    place leaves the hips and shoulders still, so a lifter who stood turned toward the device
+    and then squared up reads settled throughout.
+  - Without a tracked bar, the same frames' hip, ankle and wrist lines give the proxy's
+    sagittal frame, locked at each liftoff after a setup.
 
 ## 4. Thresholds and why
 
@@ -271,9 +283,12 @@ Outside it:
   the setup without lifting the bar (a re-setup), or out of a hinge with the hands below the
   knees (loading plates), is a pull: 5 reps counted for 3 with two re-setups. The tracked bar
   does not move, so it counts 3.
-- **A lifter who turns in place at the floor** is followed only partly: the left-right lock
-  holds 8 s of frames, so a 2 s re-setup moves it about a third of the way. After a 10° turn
-  without standing up, 9 of 24 later proxy reps (4 of 24 tracked) were falsely cued with hip
-  shift at 1.5 cm AR(0.8) noise; up to 7° turns, at most 1 of 24. Standing up re-locks it.
+- **A lifter who turns in place by less than ~6°** between reps is not re-locked: the
+  heading scan cannot tell so small a turn from noise. Its leak is at most ~0.18 of shift
+  per 6°, and in the simulator turns of 5–10° at the floor cued nothing (0 of 24 reps at
+  1.5 cm AR(0.8)).
+- **D8's noise floor:** the hip line is 24 cm long, so its heading from a few seconds of
+  noisy frames carries a few degrees of error over 45 cm of forward travel: 2 of 72 clean
+  tracked reps cued at 2 cm AR(0.8), 4 of 72 at 2.5 cm.
 - **Fast touch-and-go on the proxy:** see the tested tempos in `IMPLEMENTATION.md`.
 - **Back rounding:** proxies only (PLAN.md §2.10).
