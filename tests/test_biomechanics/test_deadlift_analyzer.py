@@ -121,6 +121,15 @@ SHORT_GAPS_NOISE_SEED = 1400
 # A 1.5 cm AR(0.8) draw whose expected top heights put the bar's fit alone early on
 # 2 s pulls with the knees hidden: the climb's bent knees, judged, cued D6 on 7 of 45.
 EARLY_FIT_NOISE_SEED = 4900
+# Failed reps this far short of the full rise (past the top margin), the bar and the
+# knees hidden this long either side of their peak, at 1.5 cm AR(0.8).
+FAILED_SHORT_OF_TOP_M = (0.10, 0.12)
+FAILED_HIDDEN_HALF_S = {1.2: 0.3, 2.0: 0.4}
+FAILED_HIDDEN_NOISE_SEED = 5900
+# Lockouts leaned back this far (deg), past the over-extended top's 10 deg.
+OVER_EXTENDED_LEANS_DEG = (25.0, 40.0)
+# The share of a lost top's gap, from its start, the knees are hidden over.
+PARTLY_HIDDEN_SHARE = 0.55
 # A no-pause top lost from view reads its lockout within this of straight,
 # noise-free (seen: within 3 deg), short of D6's mild threshold.
 LOST_TOP_MAX_DEFICIT_DEG = 6.0
@@ -391,6 +400,27 @@ def _then(first: FrameMutation, second: FrameMutation) -> FrameMutation:
         return second(index, frame._replace(points=points, confidences=confidences, bar=bar))
 
     return mutate
+
+
+# The windows the simulator's plates hide the feet in: the pipeline marks those
+# frames' legs unmeasured.
+def _feet_hidden_windows(sim: SimulatedSet) -> list[tuple[float, float]]:
+    windows: list[tuple[float, float]] = []
+    for frame, after in zip(sim.frames, sim.frames[1:]):
+        if frame.confidences[[CK.LEFT_ANKLE, CK.RIGHT_ANKLE]].max() > 0.0:
+            continue
+        if windows and abs(windows[-1][1] - frame.timestamp) < 1e-9:
+            windows[-1] = (windows[-1][0], after.timestamp)
+        else:
+            windows.append((frame.timestamp, after.timestamp))
+    return windows
+
+
+# The bar's full rise for a body: its highest point above the rest, seen.
+def _full_rise_m(body: SimAthlete) -> float:
+    sim = simulate(Scenario(athlete=body, reps=[RepScript()]))
+    heights = [-frame.bar.centre[1] for frame in sim.frames]
+    return max(heights) - heights[0]
 
 
 # The given keypoints unseen (confidence 0) in the windows.
@@ -1232,6 +1262,97 @@ class TestOcclusionAndDropouts:
                 assert len(features) == len(sim.reps)
                 cued += sum("deadlift_lockout" in rep for rep in _cued(features))
         assert cued == 0
+
+    @pytest.mark.parametrize("feet", ["seen", "under_the_plates"])
+    def test_a_no_pause_top_lost_just_after_it_is_judged_on_both_sides(self, feet: str):
+        """The bar lost from 0.03 s after a no-pause top (0.8 / 0.6 s): dated at the
+        last frame seen, the top keeps the climb's side of its window (judged on the
+        lowering alone, D6 was cued on 12 of 75 clean reps). With the plates hiding
+        the feet, the hips and knees still measure the gap."""
+        cued = 0
+        for body in BODIES:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=_no_pause_touch_and_go(0.8, 0.6), bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed, plates_hide_feet_above_m=0.03 if feet == "under_the_plates" else None)
+                sim = simulate(scenario)
+                lost = [(rep.top_time + 0.03, rep.top_time + 0.4) for rep in sim.reps]
+                unmeasured = _feet_hidden_windows(sim) if feet == "under_the_plates" else None
+                sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting(lost), legs_unmeasured=unmeasured)
+                assert len(features) == len(sim.reps)
+                cued += sum("deadlift_lockout" in rep for rep in _cued(features))
+        assert cued == 0
+
+    def test_plates_hiding_the_feet_leave_the_hips_and_knees_to_date_a_lost_top(self):
+        """The pipeline marks the legs unmeasured when the plates hide the feet, but
+        the hips and knees are seen: they check the bar's fit, which overshoots a
+        quick pull (alone, +0.45 to +0.59 s on 0.6 s pulls lost from 0.3 s before)."""
+        errors = []
+        for body in BODIES:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=0.6)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed, plates_hide_feet_above_m=0.03)
+                sim = simulate(scenario)
+                lost = [(rep.top_time - 0.3, rep.top_time + 0.8) for rep in sim.reps]
+                sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting(lost),
+                                               legs_unmeasured=_feet_hidden_windows(sim))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+
+    def test_a_failed_rep_with_the_knees_and_bar_hidden_is_not_a_rep(self):
+        """With the knees hidden, standing is read on running medians of the trunk
+        and the legs' length, within 3 cm of standing's: one noisy frame within the
+        over-extended lockout's 6 cm (~40 deg of knee bend) made a failed rep 10-12 cm
+        short a rep (16 of 60)."""
+        counted = 0
+        for body_index, body in enumerate(BODIES):
+            full_rise_m = _full_rise_m(body)
+            for pull_s, half_s in FAILED_HIDDEN_HALF_S.items():
+                for short_m in FAILED_SHORT_OF_TOP_M:
+                    failed = RepScript(pull_s=pull_s, fail_rise_m=full_rise_m - short_m)
+                    for seed in range(3):
+                        scenario = Scenario(athlete=body, reps=[RepScript(), failed, RepScript()],
+                                            bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                        peak_t = simulate(scenario).reps[1].liftoff_time + pull_s
+                        hidden = [(peak_t - half_s, peak_t + half_s)]
+                        noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO,
+                                                  FAILED_HIDDEN_NOISE_SEED + 100 * body_index + 10 * seed
+                                                  + int(100 * pull_s) + int(1000 * short_m))
+                        mutate = _then(_then(_tracker_coasting(hidden), _hidden_keypoints(hidden, KNEES)), noise)
+                        _, features, _, _ = _analyse(scenario, mutate=mutate)
+                        counted += len(features) - 2
+        assert counted == 0
+
+    @pytest.mark.parametrize("lean_back_deg", OVER_EXTENDED_LEANS_DEG)
+    def test_an_over_extended_lockout_lost_from_view_is_counted_and_judged(self, lean_back_deg: float):
+        """Leaned back past the over-extended top, the bar hangs well short of the
+        expected top: lost from view before it, the lifter seen leaned back on
+        straight legs while it was unseen makes it a top (0 of 30 counted)."""
+        for body in BODIES:
+            for seed in range(2):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.2, lean_back_deg=lean_back_deg)] * 3,
+                                    bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                lost = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting(lost))
+                assert len(features) == len(sim.reps)
+                assert all("deadlift_lean_back" in rep for rep in _cued(features))
+
+    def test_knees_seen_late_in_the_gap_do_not_veto_the_fit(self):
+        """The knees hidden over the gap's first 55 %: the stall check reads the
+        joints only within 0.15 s of the fitted top (the nearest frame, the climb's,
+        vetoed it and dated the top +0.3 s late)."""
+        errors = []
+        for body in BODIES:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.2)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed)
+                lost = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                hidden = [(start, start + PARTLY_HIDDEN_SHARE * (end - start)) for start, end in lost]
+                sim, features, _, _ = _analyse(scenario, mutate=_then(_tracker_coasting(lost),
+                                                                       _hidden_keypoints(hidden, KNEES)))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
 
     def test_knees_and_bar_hidden_across_the_top_lose_no_rep(self):
         """Seen standing is the lifter's top when the bar is lost across it; with the
