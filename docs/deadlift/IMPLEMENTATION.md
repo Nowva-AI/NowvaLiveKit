@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v26).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v27).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -204,6 +204,12 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
     within 0.08 s, none resumed (on da89661, at 2 cm: up to 9 of 45 resumed, up to +0.96 s).
   - No standing reference, every top of 1.5 s pulls lost from 0.3 s before it: median 0.03 s,
     1 of 45 beyond 0.3 s (+0.4 s).
+  - The knees hidden with the bar from 0.2–0.3 s before the top until the lowering (1.2 and
+    2 s pulls, five bodies × seeds 0–2): every rep counted, tops within 0.23 s, no cue on 180
+    clean reps (on acf0e31: dated at the last frame seen, D6 on every rep; failed reps on a
+    tall lifter).
+  - The bar lost for 0.1 s every 0.25 s through a 1.5 s hold, no standing reference, 2.5 cm:
+    every top within 0.05 s (on acf0e31 a review read holds resumed, up to +1.37 s).
   - A 15 Hz detector, every other frame the tracker's prediction (five bodies × seeds 0–2):
     0.6, 1.2 and 5 s pulls and no-pause touch-and-go 1.2 / 1.0 s, every top within 0.1 s, no
     cue.
@@ -886,9 +892,10 @@ vertical, the same set fakes more than 2 cm of drift.
     −0.78 s) or reached it more than 0.15 s before (the fit overshoots). The veto reads the
     joints at the fitted top, not over the 0.15 s after it: after a no-pause top they bend
     with the lowering, and the veto dated those tops 0.1 s early, onto the climb. The rule
-    was chosen on 3,059 lost tops not seen arriving, at 0–2 cm (holds 0.6–2.5 s, faulted lockouts, no standing
-    reference, grinds, no-pause tops): the joints alone put 43 beyond 0.3 s, the fit unless
-    they disagree either way 44, this rule 19; noise-free, none. A top seen arriving is
+    was chosen with a development probe (not in the repository) over the [gaps] cases at
+    0–2 cm, against the joints alone and the fit unless the two disagree either way: it put
+    about half as many tops beyond 0.3 s as either, and none noise-free. The reproducible
+    measure is [gaps] and the tests below. A top seen arriving is
     dated there: the joints are at their plateau at the anchor (a check sending such tops to
     the seen path, tried, changed no maximum and one median, 0.05 against 0.12 s, and was
     dropped). Without a standing reference there is no
@@ -913,9 +920,9 @@ vertical, the same set fakes more than 2 cm of drift.
     AR(0.8): 8 of 45 soft lockouts and 9 of 45 holds without a standing reference resumed,
     tops up to +0.96 s late). Now, when the bar is seen again after a gap, the hips and knees'
     medians over the whole gap against the hold's resume the pull if they extended by twice
-    the resume deficit together (16°). Requiring the deficit of each, as seen, resumed 97 %
-    grinds on 12 of 27 at 1.5 cm (the hips finish a stall 3 % short by 8.5–9°); the sum, 22
-    of 27, and 1 false resume in about 100 long holds at 2 cm. [gaps]: long holds seen then
+    the resume deficit together (16°). Requiring the deficit of each, as seen, resumed fewer
+    97 % grinds (the hips finish a stall 3 % short by 8.5–9°: the test's draw at 1.5 cm, 19
+    of 27 beyond 0.3 s against 10 with the sum). [gaps]: long holds seen then
     lost at 1.5 and 2 cm, none resumed; 97 % grinds, 10 of 27 never resume (6 frame by frame,
     which also resumed the noise). Tests: soft
     lockouts and no standing reference, 2 cm, none beyond 0.3 s (frame by frame, 0.33–1.04 s
@@ -953,7 +960,49 @@ vertical, the same set fakes more than 2 cm of drift.
     frames. (5) The fit's expected top height is the standing pose's: a lockout that ends
     higher (the shoulders drawn back further than standing) reaches it early, one that ends
     lower (soft, leaned back) never; the joints check bounds both, at the cost of their own
-    noise (1.2 s pulls lost from 0.4 s before, −0.07 to +0.17 s).
+    noise (1.2 s pulls lost from 0.4 s before, −0.07 to +0.17 s). (6) At 2 cm the joints'
+    wander can read as a stall at a fitted top that was right, and they date it late (round
+    14's review: 1 of 45, +0.43 s).
+
+83. **A lost top with the hips and knees unmeasured is dated by the bar's fit alone**
+    (review, round 14). Finding 77 read the joints' plateau in the gap; the pipeline marks a
+    frame's legs unmeasured when any hip, knee or ankle is missing from its triangulation
+    (the plates hiding the feet do it for the whole pull), and the pose tracker's carried
+    frames are unmeasured too. The plateau of the few frames left at the gap's start put the
+    top at the last frame seen (0.2–0.37 s early) and judged the climb's bent knees: D6
+    severe on every clean rep (the review: 90 of 90 legs carried, 180 of 180 knees hidden,
+    18 of 18 through the pipeline). With the joints measured on fewer than half the gap's
+    frames the fit alone dates it, as da89661 did. The fit alone carries the expected top
+    height's noise, and on a slow pull it can date the top early; a top dated in the gap is
+    now judged on no frame from before the gap (the climb seen, knees bent: 2 s pulls, knees
+    and bar hidden from 0.2 s before the top, 1.5 cm, D6 on 8 of 45 clean reps; now none).
+    [gaps], knees and bar hidden from 0.2–0.3 s before the top to 0.8 s after, 1.2 and 2 s
+    pulls (five bodies × seeds 0–2, 1.5 cm): every rep counted, tops within 0.23 s, no cue.
+    Tests: legs carried and knees hidden through the gap, 1.2 and 2 s pulls, within 0.15 s,
+    no D6; the early fit's draw at 1.5 cm, no D6; through the pipeline, the plates hiding the
+    feet and every top lost, within 0.15 s, no D6.
+
+84. **A resume on the joints needs a gap of 0.3 s** (review, round 14). Finding 79 decides
+    once per gap, but a hold the bar drops out of for a few frames again and again is many
+    decisions on a few frames' medians: without a standing reference at 2.5 cm, holds
+    resumed and read up to 1.4 s late. A gap shorter than 0.3 s (the shortest stall the
+    analyser holds) resumes nothing; a grind lost through its finish is lost for longer.
+    [gaps]: the bar lost 0.1 s every 0.25 s through 1.5 s holds without a standing
+    reference, 2.5 cm: every top within 0.05 s. Test: the bar dropped 0.1 s every 0.25 s through 1.5 s holds, 2.5 cm, none
+    beyond 0.3 s.
+
+85. **Seen standing with the knees hidden** (review, round 14; pre-existing). A top lost from
+    view short of the expected height is a top when the lifter was seen standing while the
+    bar was unseen; with the knees hidden too, no frame read standing (it needs the knee
+    angle), and every rep of a tall lifter was a failed rep. Upright on legs as long as
+    standing's (the leg-length test the analyser uses for straight legs) now reads standing
+    there. Test: knees and bar hidden from 0.3 s before every top, every rep counted.
+
+86. **Housekeeping** (review, round 14): the envelope's long-hold rows draw their noise
+    keyed by its level too (the 1.5 and 2 cm rows had shared one draw); PLAN's PULL → LOWER
+    row no longer names the removed walk. Long lines in the tests and the script stay: the
+    repository has no line-length rule (the code this branch builds on has 127 lines over
+    120), and wrapping them by the formatter rewrites ~800 lines of the script.
 
 ## Deferred: needs data, hardware or keys (not code)
 
