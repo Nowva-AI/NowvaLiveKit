@@ -80,18 +80,28 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   - The expected top height is the standing mid-wrist height minus the wrist-to-bar offset.
     Without a standing reference, it is the median top of the set's earlier reps.
   - The 8 cm margin lets soft lockouts count; D6 then judges them. A trunk 10° or more
-    behind vertical, with the knees measured and bent no more than 40°, is an over-extended
-    lockout and counts at any bar height (D5 judges it). Leaning back from mid-thigh with the
-    knees still bent (~60°), or with the knees hidden, is a failed pull, not a lockout. A
-    lockout short by 30° or more is a failed rep.
+    behind vertical with straight legs is an over-extended lockout and counts at any bar
+    height (D5 judges it). Straight: the knees bent no more than 40°, or, the knees hidden,
+    the hips no more than 6 cm closer to the ankles than standing (leaning back pushes the
+    hips forward and down but leaves the legs' length). Leaning back from mid-thigh with the
+    knees bent ~60° (the leg ~12 cm shorter) is a failed pull. A lockout short by 30° or more
+    is a failed rep.
   - **A stall is not a top.** A bar that stalls a few cm short of lockout (a grind), or
     anywhere with no standing reference to expect the top at (a hitch), can read as a top.
-    Once the bar rises clear of the hold band above it (2 cm on a tracked bar, 2 noise bands
-    if wider), the pull resumes: the real top is timed on the climb from the bar's last still
-    frame at the stall, and the stall's frames never enter the lockout (D6). Grinds 2.3–5.8 cm
-    short are timed within 0.1 s. A stall inside the hold band (~1 cm short) is the top: its
-    event is dated at the stall.
-  - A shrug at the top that lifts the bar past the hold band moves the top to the shrug.
+    The pull resumes when the hips or knees held at least 8° short of standing (D6's mild
+    threshold) and the bar's median height over the last 0.2 s clears the hold's before it by
+    0.5 cm, or by its noise if wider. Medians, so the wrist proxy's noise does not decide it;
+    the deficit, so a shrug or a lockout settling upward never moves the top. Without a
+    standing reference the bar must clear the 2 cm hold band. The real top is then the
+    arrival on the climb from the stall's level.
+  - **Judging the lockout:** D6 and D5 are read on the hold's most extended 0.3 s (least hip
+    plus knee flexion), so frames of a stall inside the hold, or knees unlocking as the
+    lowering begins, are not the lockout.
+  - Tested: grinds 2.3–5.8 cm short on the tracked bar are timed within one frame; on the
+    proxy, grinds 3–5 cm short at 1–2 cm noise draw no false lockout cue and are timed within
+    0.3 s on 14–18 of 18 reps. A stall about 1 cm short reads its knees inside D6's mild
+    threshold and is the top: its event is dated at the stall, without a lockout cue. A
+    2.5 cm shrug moves the top about 0.1 s, with no velocity loss read.
 - **Dead stop:** within 2 cm of the rest, and either still for 3 frames or there for 0.3 s.
 - **Touch-and-go:**
   - The low point is within 5 cm of the rest.
@@ -167,21 +177,24 @@ NaN means "not measured", never 0.
     measured. A lifter cued "bar over midfoot" who shuffles the feet without standing up is
     then judged where they now stand (6 → 1 cm measured 6 → 1 cm). Feet hidden by the plates
     throughout keep the old lock.
-- **The lifter's left-right (D8's axis):** the hip line (horizontal), on either bar source.
-  The hips travel ~45 cm forward square to the pelvis, and each degree of axis error reads
-  ~0.03 of shift. The bar's axis is not the pelvis's: a stance 5–8° off square to the bar
-  leaked that travel into "sideways" (13 of 18 reps falsely cued at 8°). Nor is the ankle
-  line: a foot 6 cm ahead of the other turns it 13° (10 of 24 falsely cued).
-  - Summed over the frames at the bar from the last 15 s (settled STANCE, SETUP and FLOOR
-    with the hands on the bar) and the rep's own frames: a sideways shift moves the hips, it
-    does not turn their line. The hip line is short (~24 cm), so it needs those seconds of
-    frames under correlated noise.
-  - Older frames count only while the heading holds. Going back 1.5 s at a time, a block
-    whose hip and ankle lines turn more than 6° from the newer frames' ends them: a turn in
-    place leaves the hips and shoulders still, so a lifter who stood turned toward the device
-    and then squared up reads settled throughout.
-  - Without a tracked bar, the same frames' hip, ankle and wrist lines give the proxy's
-    sagittal frame, locked at each liftoff after a setup.
+- **D8's two axes.** The hips travel ~45 cm forward in a pull, and an axis a degree off
+  square to that travel reads ~0.03 of shift. No single line is square to it for every
+  lifter: the bar's axis is not on a stance 5–8° off square to the bar (13 of 18 reps
+  falsely cued at 8°), the ankle line is not on a staggered stance (a foot 6 cm ahead turns
+  it 13°: 10 of 24 cued), the hip line is not on a pelvis turned against the legs or a hip
+  keypoint biased front-to-back (4° read −0.09). So the shift is read on two independent
+  axes and D8 keeps the smaller reading, none when they disagree on the side: a real shift
+  reads on both, a misaligned axis leaks into one.
+  - **The hip line before the rep**, summed over the frames at the bar from the last 15 s
+    (settled STANCE, SETUP and FLOOR with the hands on the bar): a pelvis twisting during the
+    pull cannot turn it. Older frames count only while the heading holds: going back 1.5 s
+    at a time, a block whose hip and ankle lines turn more than 6° from the newer frames'
+    ends them (a turn in place leaves the hips and shoulders still, so a lifter who stood
+    turned toward the device and then squared up reads settled throughout).
+  - **The bar's line**: the tracked bar's resting axis; on the wrist proxy, the hands on the
+    bar over the rep (a twisting pelvis does not turn the hands).
+  - Without a tracked bar, the same at-bar frames' hip, ankle and wrist lines give the
+    proxy's sagittal frame, locked at each liftoff after a setup.
 
 ## 4. Thresholds and why
 
@@ -287,8 +300,9 @@ Outside it:
   heading scan cannot tell so small a turn from noise. Its leak is at most ~0.18 of shift
   per 6°, and in the simulator turns of 5–10° at the floor cued nothing (0 of 24 reps at
   1.5 cm AR(0.8)).
-- **D8's noise floor:** the hip line is 24 cm long, so its heading from a few seconds of
-  noisy frames carries a few degrees of error over 45 cm of forward travel: 2 of 72 clean
-  tracked reps cued at 2 cm AR(0.8), 4 of 72 at 2.5 cm.
+- **D8's recall:** the smaller of two readings is biased low under noise. At 2 cm AR(0.8),
+  over five bodies, a shift of 0.20 of ankle separation is cued on 26 of 45 tracked reps
+  (median reading 0.16) and 19 of 45 proxy reps (0.13); 0.25 on 38 and 27 of 45. Clean
+  reps: 1–3 of 45 cued at 2–2.5 cm, on either bar source, whatever the stance or pelvis.
 - **Fast touch-and-go on the proxy:** see the tested tempos in `IMPLEMENTATION.md`.
 - **Back rounding:** proxies only (PLAN.md §2.10).
