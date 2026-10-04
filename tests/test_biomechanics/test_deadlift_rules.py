@@ -163,6 +163,21 @@ class TestPullAndTopRules:
         assert fault.details["side"] == "left"
         assert fault.severity.value == "moderate"
 
+    @pytest.mark.parametrize(
+        ("set_tilt_cm", "expected_cm"), [(11.0, 11.0), (-11.0, None), (math.nan, None), (8.0, 8.0)],
+        ids=["the_set_agrees", "the_set_tilts_the_other_way", "first_rep", "the_set_tilts_less"],
+    )
+    def test_bar_tilt_on_the_wrist_proxy_needs_the_set_to_agree(self, set_tilt_cm: float, expected_cm: float | None):
+        """The left end above the right (a positive set tilt) is a low right end."""
+        rule = DeadliftBarTiltRule(FAULTS.deadlift_bar_tilt)
+        features = _features(bar_tilt_cm=12.0, bar_low_side="right", set_bar_tilt_cm=set_tilt_cm,
+                             bar_source=BAR_SOURCE_WRIST_PROXY)
+        fault = _judge(rule, features)
+        if expected_cm is None:
+            assert fault is None
+        else:
+            assert fault.details["value"] == pytest.approx(expected_cm, abs=VALUE_TOLERANCE)
+
     def test_bent_arms_start_cueing_at_mild(self):
         fault = _judge(DeadliftBentArmsRule(FAULTS.deadlift_bent_arms), _features(elbow_flexion_deg=18.0))
         assert fault.severity.value == "mild"

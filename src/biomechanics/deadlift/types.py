@@ -101,6 +101,9 @@ class DeadliftRepFeatures(BaseModel):
     bar_tilt_cm: float = NAN
     # "left" / "right": the end that sat lower; "" when not measured.
     bar_low_side: str = ""
+    # The left end above the right (cm, signed), median over this set's last reps
+    # (up to 3, this one included); NaN until two reps measured it.
+    set_bar_tilt_cm: float = NAN
     elbow_flexion_deg: float = NAN
     concentric_velocity_mps: float = NAN
     velocity_loss_pct: float = NAN

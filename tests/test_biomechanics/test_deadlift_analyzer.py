@@ -49,6 +49,7 @@ BAR_MIDFOOT_GUIDANCE_ARM_CM = 3.0
 BAR_MIDFOOT_GUIDANCE_TOLERANCE_CM = 2.0
 # The plates hide the knees from the cameras with the bar this far off the floor.
 KNEES_HIDDEN_ABOVE_M = 0.15
+KNEES = (CK.LEFT_KNEE, CK.RIGHT_KNEE)
 # A re-setup at the floor: the lifter shuffles the feet this far toward the bar.
 FEET_MOVED_AT_THE_FLOOR_M = 0.05
 # Hip shift a stance leaks into D8 beyond the same seed's square stance.
@@ -88,6 +89,19 @@ LOWER_BODY = (
     CK.LEFT_HEEL, CK.RIGHT_HEEL, CK.LEFT_FOOT_INDEX, CK.RIGHT_FOOT_INDEX,
 )
 FAULTS = BiomechanicsConfig().faults
+# Five bodies: default, short, tall, narrow hips on a wide stance, long femurs.
+BODIES = (
+    SimAthlete(),
+    SimAthlete(tibia_m=0.38, femur_m=0.40, torso_m=0.47, upper_arm_m=0.27, forearm_m=0.26,
+               hip_half_width_m=0.10, stance_half_width_m=0.11, shoulder_half_width_m=0.17, grip_half_width_m=0.24),
+    SimAthlete(tibia_m=0.48, femur_m=0.50, torso_m=0.57, upper_arm_m=0.33, forearm_m=0.31,
+               hip_half_width_m=0.14, stance_half_width_m=0.15, shoulder_half_width_m=0.21, grip_half_width_m=0.28),
+    SimAthlete(hip_half_width_m=0.095, stance_half_width_m=0.17, grip_half_width_m=0.29),
+    SimAthlete(tibia_m=0.40, femur_m=0.52, torso_m=0.48),
+)
+# A grind finishing its last centimetres in a few frames: the hold must not pull
+# its fitted top late.
+QUICK_FINISH_MAX_ERROR_S = 0.2
 # Kinematic truth vs measurement on noise-free model-free poses.
 # One frame (the first after the bar passes the knees) of trunk motion.
 TRUNK_CHANGE_TOLERANCE_DEG = 2.0
@@ -226,29 +240,51 @@ def _pelvis_twisting(sim: SimulatedSet, degrees: float) -> FrameMutation:
     return mutate
 
 
-# A shrug of rise_m at the top of one rep: shoulders, arms and bar up, then down.
-def _shrugged(sim: SimulatedSet, rise_m: float, rep_index: int) -> FrameMutation:
-    start = sim.reps[rep_index].top_time + 0.25
-    up_end, hold_end, down_end = start + 0.25, start + 0.55, start + 0.8
+# A shrug of rise_m at the top of each of the reps: shoulders, arms and bar up,
+# then down. Then the next mutation (noise, occlusion), if any.
+def _shrugged(
+    sim: SimulatedSet, rise_m: float, rep_indices: tuple[int, ...], then: FrameMutation | None = None,
+) -> FrameMutation:
+    starts = [sim.reps[rep_index].top_time + 0.25 for rep_index in rep_indices]
+
+    def lift_m(t: float) -> float:
+        for start in starts:
+            up_end, hold_end, down_end = start + 0.25, start + 0.55, start + 0.8
+            if start <= t < up_end:
+                return rise_m * (t - start) / (up_end - start)
+            if up_end <= t < hold_end:
+                return rise_m
+            if hold_end <= t < down_end:
+                return rise_m * (1.0 - (t - hold_end) / (down_end - hold_end))
+        return 0.0
 
     def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
-        t = frame.timestamp
-        lift = 0.0
-        if start <= t < up_end:
-            lift = rise_m * (t - start) / (up_end - start)
-        elif up_end <= t < hold_end:
-            lift = rise_m
-        elif hold_end <= t < down_end:
-            lift = rise_m * (1.0 - (t - hold_end) / (down_end - hold_end))
-        if lift <= 0.0:
-            return frame.points, frame.confidences, frame.bar
-        points = frame.points.copy()
-        points[list(UPPER_BODY), 1] -= lift
-        left, right = list(frame.bar.left_end_m), list(frame.bar.right_end_m)
-        left[1] -= lift
-        right[1] -= lift
-        bar = frame.bar.model_copy(update={"left_end_m": tuple(left), "right_end_m": tuple(right)})
-        return points, frame.confidences, bar
+        lift = lift_m(frame.timestamp)
+        if lift > 0.0:
+            points = frame.points.copy()
+            points[list(UPPER_BODY), 1] -= lift
+            left, right = list(frame.bar.left_end_m), list(frame.bar.right_end_m)
+            left[1] -= lift
+            right[1] -= lift
+            bar = frame.bar.model_copy(update={"left_end_m": tuple(left), "right_end_m": tuple(right)})
+            frame = frame._replace(points=points, bar=bar)
+        return (frame.points, frame.confidences, frame.bar) if then is None else then(index, frame)
+
+    return mutate
+
+
+# The knees at confidence 0 while the bar is more than KNEES_HIDDEN_ABOVE_M off
+# the floor: the plates hide them from the side views.
+def _knees_hidden_off_the_floor(sim: SimulatedSet) -> FrameMutation:
+    first = sim.frames[0].bar
+    floor_bar_up = -(first.left_end_m[1] + first.right_end_m[1]) / 2.0
+
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        confidences = frame.confidences
+        if -(frame.bar.left_end_m[1] + frame.bar.right_end_m[1]) / 2.0 - floor_bar_up > KNEES_HIDDEN_ABOVE_M:
+            confidences = confidences.copy()
+            confidences[list(KNEES)] = 0.0
+        return frame.points, confidences, frame.bar
 
     return mutate
 
@@ -508,9 +544,11 @@ class TestFaultScenarios:
         for verdict in verdicts:
             assert verdict.get(fault_type) in ("moderate", "severe")
 
-    def test_a_tilted_bar_fires_on_the_wrist_proxy_at_its_wider_thresholds(self):
-        _, features, _, _ = _analyse(Scenario(track_bar=False, reps=[RepScript(bar_tilt_m=0.09)] * 2))
-        for faults in _faults(features):
+    def test_a_tilted_bar_fires_on_the_wrist_proxy_at_its_wider_thresholds_from_the_second_rep(self):
+        _, features, _, _ = _analyse(Scenario(track_bar=False, reps=[RepScript(bar_tilt_m=0.09)] * 3))
+        verdicts = _faults(features)
+        assert all(fault.fault_type != "deadlift_bar_tilt" for fault in verdicts[0])
+        for faults in verdicts[1:]:
             tilt = next(fault for fault in faults if fault.fault_type == "deadlift_bar_tilt")
             assert tilt.severity.value == "moderate"
             assert tilt.details["bar_source"] == BAR_SOURCE_WRIST_PROXY
@@ -628,6 +666,18 @@ class TestOcclusionAndDropouts:
         assert len(features) == len(sim.reps)
         assert {f.bar_source for f in features} == {BAR_SOURCE_BAR}
 
+    @pytest.mark.parametrize("probability", [0.1, 0.2])
+    def test_random_bar_dropouts_do_not_move_the_top(self, probability: float):
+        """A dropped bar frame is no height: not a flat stretch of the climb."""
+        errors = []
+        for body in BODIES[:3]:
+            for seed in range(4):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=2.5)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_bar_dropout(probability, seed=50 + seed))
+                assert len(features) == len(sim.reps)
+                errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert max(errors) <= MAX_EVENT_ERROR_S
+
     def test_a_bar_tracked_at_half_the_frame_rate_stays_the_bar(self):
         def every_other(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
             return frame.points, frame.confidences, frame.bar if index % 2 == 0 else None
@@ -666,6 +716,17 @@ class TestTempo:
             assert len(features) == len(sim.reps)
             errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
         assert max(abs(error) for error in errors) <= MAX_EVENT_ERROR_S
+
+    def test_a_grind_that_finishes_quickly_is_not_dated_late(self):
+        """Its climb's upper half is a few frames against the hold: the fit keeps
+        0.2 s of the hold, and reads a frame above the level as arrived."""
+        errors = []
+        for seed in range(8):
+            reps = [RepScript(pull_s=1.6, stall_fraction=0.95, stall_s=0.8, finish_s=0.3)] * 3
+            sim, features, _, _ = _analyse(Scenario(reps=reps, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+            assert len(features) == len(sim.reps)
+            errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert max(errors) <= QUICK_FINISH_MAX_ERROR_S
 
     def test_a_grind_that_finishes_slowly_is_timed_at_its_top(self):
         """The top is fitted on the last climb out of the stall, over its upper half."""
@@ -912,6 +973,13 @@ class TestWristProxyAtPlatformNoise:
             shifted += sum(abs(f.hip_shift_ratio) >= FAULTS.deadlift_hip_shift.moderate for f in features)
         assert reps == 24
         assert shifted <= reps // 10
+
+    def test_the_bar_speed_is_not_measured(self):
+        """Its top is the joints', its rise and liftoff the wrists': no speed for the
+        recap, the spoken summary or the diagnosis (D10 is off here too)."""
+        sim, features, _, _ = _analyse(Scenario(track_bar=False))
+        assert len(features) == len(sim.reps)
+        assert all(math.isnan(f.concentric_velocity_mps) for f in features)
 
     def test_the_top_is_the_hips_and_knees_reaching_the_lockout(self):
         """The wrists' height wanders through the hold; the joints finishing their
@@ -1167,7 +1235,7 @@ class TestSetBehaviour:
         scenario = Scenario(reps=[RepScript(top_hold_s=1.2)] * 4, approach_s=stance_s, stance_s=stance_s,
                             bar_noise_m=TRACKED_BAR_NOISE_M)
         sim = simulate(scenario)
-        _, features, _, _ = _analyse(scenario, mutate=_shrugged(sim, 0.025, rep_index=3))
+        _, features, _, _ = _analyse(scenario, mutate=_shrugged(sim, 0.025, rep_indices=(3,)))
         assert len(features) == len(sim.reps)
         assert features[3].top_time == pytest.approx(sim.reps[3].top_time, abs=SHRUG_TOP_SHIFT_MAX_S)
         assert "deadlift_velocity_loss" not in _judge(features)[3]
@@ -1217,6 +1285,70 @@ class TestSetBehaviour:
             errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
         assert float(np.median(errors)) <= MAX_EVENT_ERROR_S
         assert max(errors) <= MAX_PROXY_TOP_ERROR_S
+
+    def test_the_lowering_is_dated_where_the_bar_leaves_the_hold_on_the_wrist_proxy(self):
+        """An event band of the wrists' noise reaches well into the lowering, and
+        the lockout window would judge its frames."""
+        errors = []
+        for seed in range(6):
+            sim, features, _, _ = _analyse(
+                Scenario(track_bar=False, seed=seed),
+                mutate=_correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 900 + seed),
+            )
+            assert len(features) == len(sim.reps)
+            hold_s = RepScript().top_hold_s
+            errors += [
+                (measured.floor_time - measured.lower_time_s) - (expected.top_time + hold_s)
+                for measured, expected in zip(features, sim.reps)
+            ]
+        assert float(np.median(errors)) <= MAX_EVENT_ERROR_S
+
+    def test_a_mild_soft_lockout_is_cued_no_more_often_on_the_wrist_proxy(self):
+        """A 10 deg lockout reads 9.7 deg noise-free: mild, never cued. D6 is not
+        a bar-measured rule, so the wrist proxy must not cue it more."""
+        cued = {True: 0, False: 0}
+        reps = 0
+        for track_bar in (True, False):
+            for body in BODIES:
+                for seed in range(4):
+                    scenario = Scenario(athlete=body, reps=[RepScript(lockout_deficit_deg=10.0)] * 3, track_bar=track_bar,
+                                        bar_noise_m=TRACKED_BAR_NOISE_M if track_bar else 0.0, seed=seed)
+                    noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 900 + seed)
+                    _, features, _, _ = _analyse(scenario, mutate=noise)
+                    reps += len(features) if track_bar else 0
+                    cued[track_bar] += sum("deadlift_lockout" in rep_cues for rep_cues in _cued(features))
+        assert reps == 60
+        assert cued[False] <= cued[True] + reps // 10
+
+    def test_a_shrug_with_the_knees_hidden_is_not_a_slower_rep(self):
+        """With the knees hidden nothing tells a stall from a shrug: the pull does
+        not resume."""
+        scenario = Scenario(reps=[RepScript(top_hold_s=1.2)] * 4, bar_noise_m=TRACKED_BAR_NOISE_M)
+        sim = simulate(scenario)
+        mutate = _shrugged(sim, 0.025, rep_indices=(3,), then=_knees_hidden_off_the_floor(sim))
+        _, features, _, _ = _analyse(scenario, mutate=mutate)
+        assert len(features) == len(sim.reps)
+        assert features[3].top_time == pytest.approx(sim.reps[3].top_time, abs=SHRUG_TOP_SHIFT_MAX_S)
+        assert "deadlift_velocity_loss" not in _judge(features)[3]
+
+    def test_keypoint_noise_does_not_resume_a_shrug_without_a_standing_reference(self):
+        """Without a standing reference the hips and the knees must both extend as
+        the bar rises: noise moves one joint at a time."""
+        late = {0.0: 0, 0.025: 0}
+        for noise_m in late:
+            for body in BODIES[:3]:
+                for seed in range(4):
+                    scenario = Scenario(athlete=body, reps=[RepScript(top_hold_s=1.2)] * 3, approach_s=0.5, stance_s=0.5,
+                                        bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                    sim = simulate(scenario)
+                    noise = _correlated_noise(noise_m, PLATFORM_NOISE_RHO, 60 + seed) if noise_m else None
+                    _, features, _, _ = _analyse(scenario, mutate=_shrugged(sim, 0.04, rep_indices=(0, 1, 2), then=noise))
+                    assert len(features) == len(sim.reps)
+                    late[noise_m] += sum(
+                        measured.top_time - expected.top_time > MAX_PROXY_TOP_ERROR_S
+                        for measured, expected in zip(features, sim.reps)
+                    )
+        assert late[0.025] <= late[0.0] + 2
 
     @pytest.mark.parametrize("lean_back_deg", [25.0, 40.0])
     def test_an_over_extended_lockout_with_the_knees_hidden_is_counted(self, lean_back_deg: float):

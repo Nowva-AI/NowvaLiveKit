@@ -73,14 +73,20 @@ TOP_PEAK_WINDOW_S = 0.1
 # noise bands, on a noisier bar).
 TOP_HOLD_BAND_M = 0.02
 # The lowering has begun once the bar's median over this many frames is below
-# the hold by the hold band.
+# the hold by the hold band. On the wrist proxy it is dated against the level of
+# the hold's last HOLD_END_WINDOW_S.
 LEAVE_TOP_FRAMES = 5
+HOLD_END_WINDOW_S = 0.3
+# Without a standing reference, a stall resumes once the hips and knees have
+# extended over this many frames.
+RESUME_EXTENSION_FRAMES = 5
 # The live bar-over-midfoot offset the foot guidance speaks from is the median
 # over this long, once it holds this many settled stance frames.
 LIVE_OFFSET_WINDOW_S = 1.0
 LIVE_OFFSET_MIN_FRAMES = 10
-# D2's set-level evidence: the median rise ratio over this many recent reps.
-SET_RISE_RATIO_REPS = 3
+# Set-level evidence (D2's rise ratio, the wrist proxy's D8b tilt): the median
+# over this many recent reps.
+SET_EVIDENCE_REPS = 3
 # The lifter's left-right is locked from the frames at the bar (settled stance,
 # setup, the floor between reps) over this long, or from this much history when
 # there are none. The hips travel ~45 cm forward in a pull, so each degree off
@@ -275,6 +281,7 @@ class DeadliftRepAnalyzer:
         self._set_top_heights: list[float] = []
         self._set_predicted_change_deg = NAN
         self._set_rise_ratios: list[float] = []
+        self._set_tilts_cm: list[float] = []
         self._stance_bar_midfoot_cm = NAN
         self._top_still_frames = 0
         self._dead_stop_frames = 0
@@ -895,8 +902,11 @@ class DeadliftRepAnalyzer:
             peak = rep.frames[rep.peak_index]
             rep.top_time = self._top_arrival(rep)
             rep.top_up = rep.peak_up
-            rep.top_frames = [frame for frame in rep.frames if abs(frame.t - peak.t) <= TOP_PEAK_WINDOW_S]
-            rep.lower_start = self._lowering_start(rep, rep.peak_up, measure.t)
+            rep.lower_start = max(peak.t, self._lowering_start(rep, rep.peak_up, measure.t))
+            rep.top_frames = [
+                frame for frame in rep.frames
+                if abs(frame.t - peak.t) <= TOP_PEAK_WINDOW_S and frame.t <= rep.lower_start
+            ]
             self._enter(DeadliftPhase.LOWER, measure.t)
             return
         if self._back_on_floor(measure):
@@ -933,32 +943,39 @@ class DeadliftRepAnalyzer:
         shortening_m = self._standing_refs.get("leg_m", NAN) - float(np.linalg.norm(measure.hip_mid - measure.ankle_mid))
         return shortening_m <= cfg.overextended_max_leg_shortening_m
 
-    # How far short of standing the hips or knees held at the top. Without a
-    # standing reference, how far they have extended since (over the last few
-    # frames): a stall finishes by extending them, a shrug lifts the bar on
-    # straight legs. NaN when neither is measured.
+    # How far short of standing the hips or knees held at the top (NaN without
+    # a standing reference).
     def _held_deficit_deg(self, rep: RepTrack) -> float:
-        held = [frame for frame in rep.top_frames if frame.legs_measured] or rep.top_frames
         refs = self._standing_refs
-        recent = [frame for frame in rep.frames[-LEAVE_TOP_FRAMES:] if frame.legs_measured]
-        hip_now = refs.get("hip_flex_deg", NAN) if refs else _median([frame.hip_flex_deg for frame in recent])
-        knee_now = refs.get("knee_flex_deg", NAN) if refs else _median([frame.knee_flex_deg for frame in recent])
+        held = [frame for frame in rep.top_frames if frame.legs_measured] or rep.top_frames
         deficits = [
-            _median([frame.hip_flex_deg for frame in held]) - hip_now,
-            _median([frame.knee_flex_deg for frame in held]) - knee_now,
+            _median([frame.hip_flex_deg for frame in held]) - refs.get("hip_flex_deg", NAN),
+            _median([frame.knee_flex_deg for frame in held]) - refs.get("knee_flex_deg", NAN),
         ]
         finite = [deficit for deficit in deficits if math.isfinite(deficit)]
         return max(finite) if finite else NAN
 
+    # How far the hips and the knees have both extended since the hold, over
+    # the last RESUME_EXTENSION_FRAMES (NaN unless both are measured): a stall
+    # finishes that way, a shrug lifts the bar on straight legs.
+    def _extended_since_hold_deg(self, rep: RepTrack) -> float:
+        held = [frame for frame in rep.top_frames if frame.legs_measured]
+        recent = [frame for frame in rep.frames[-RESUME_EXTENSION_FRAMES:] if frame.legs_measured]
+        hip_deg = _median([frame.hip_flex_deg for frame in held]) - _median([frame.hip_flex_deg for frame in recent])
+        knee_deg = _median([frame.knee_flex_deg for frame in held]) - _median([frame.knee_flex_deg for frame in recent])
+        return min(hip_deg, knee_deg) if math.isfinite(hip_deg + knee_deg) else NAN
+
     # The bar has risen clear of the hold band above the top it held, which was
     # a stall short of lockout: a hitch read as a top with no standing height to
     # expect it at, or a grind further from lockout than the band. Only from a
-    # stall: a shrug or a lockout settling upward rises too. (A grind inside the
-    # band stays in TOP: features.py times the top and judges the lockout from
-    # the bar's last climb.)
+    # stall, shown by the joints (held short of standing or, without a standing
+    # reference, extending as the bar rises): a shrug or a lockout settling
+    # upward rises too, and with the knees hidden nothing tells them apart. (A
+    # grind inside the band stays in TOP: features.py times the top and judges
+    # the lockout from the bar's last climb.)
     def _above_held_top(self, rep: RepTrack, measure: FrameMeasure) -> bool:
-        deficit = self._held_deficit_deg(rep)
-        if deficit < self.config.resume_min_deficit_deg:
+        stall_deg = self._held_deficit_deg(rep) if self._standing_refs else self._extended_since_hold_deg(rep)
+        if not stall_deg >= self.config.resume_min_deficit_deg:
             return False
         return measure.bar_up > rep.top_up + self._hold_band_m()
 
@@ -996,10 +1013,25 @@ class DeadliftRepAnalyzer:
         recent_up = _median([frame.bar_up for frame in rep.frames[-LEAVE_TOP_FRAMES:]])
         return velocity < -self.config.lower_velocity_mps and recent_up < top_up - self._hold_band_m()
 
-    # The lowering began at the bar's last frame at the top.
+    # The lowering began at the bar's last frame at the top. On the wrist proxy
+    # an event band (3-5 cm) reaches well into the lowering, and the lockout
+    # window would judge its frames: there, the last frame whose running median
+    # sat within one noise sigma of the level the hold ended at.
     def _lowering_start(self, rep: RepTrack, top_up: float, t: float) -> float:
         band_m = self._event_band_m()
-        return next((frame.t for frame in reversed(rep.frames) if frame.bar_up >= top_up - band_m), t)
+        start = next((frame.t for frame in reversed(rep.frames) if frame.bar_up >= top_up - band_m), t)
+        if rep.frames[-1].bar_source != BAR_SOURCE_WRIST_PROXY:
+            return start
+        level = _median([frame.bar_up for frame in rep.frames if start - HOLD_END_WINDOW_S <= frame.t <= start])
+        sigma_m = band_m / EVENT_NOISE_BANDS
+        heights = [frame.bar_up for frame in rep.frames]
+        half = LEAVE_TOP_FRAMES // 2
+        for index in range(len(rep.frames) - 1, -1, -1):
+            if rep.frames[index].t > start:
+                continue
+            if _median(heights[max(0, index - half):index + half + 1]) >= level - sigma_m:
+                return rep.frames[index].t
+        return start
 
     # Dead stop: on the rest and not moving for a few frames, or on the rest long
     # enough.
@@ -1103,9 +1135,14 @@ class DeadliftRepAnalyzer:
         )
         if math.isfinite(features.hip_shoulder_rise_ratio):
             self._set_rise_ratios.append(features.hip_shoulder_rise_ratio)
-            recent = self._set_rise_ratios[-SET_RISE_RATIO_REPS:]
+            recent = self._set_rise_ratios[-SET_EVIDENCE_REPS:]
             if len(recent) >= 2:
                 features.set_rise_ratio = float(np.median(recent))
+        if math.isfinite(features.bar_tilt_cm):
+            self._set_tilts_cm.append(features.bar_tilt_cm if features.bar_low_side == "right" else -features.bar_tilt_cm)
+            recent = self._set_tilts_cm[-SET_EVIDENCE_REPS:]
+            if len(recent) >= 2:
+                features.set_bar_tilt_cm = float(np.median(recent))
         self._completed.append(_CompletedRep(
             features=features,
             start_time=features.liftoff_time,

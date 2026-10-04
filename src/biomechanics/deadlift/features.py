@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -72,6 +73,8 @@ PROXY_BENT_DEG = 20.0
 # on the other. Fitted on the frames within this distance of the level, by a grid
 # over t0 (least squares in height, where the noise is uniform).
 EVENT_FIT_SPAN_M = 0.04
+# The top's fit keeps this much of the hold after the bar's arrival in its band.
+TOP_FIT_HOLD_S = 0.2
 EVENT_FIT_MIN_FRAMES = 3
 EVENT_GRID_STEP_S = 0.002
 # The fitted event stays within this of the frame that detected it (the
@@ -204,8 +207,9 @@ def _final_climb(rep: RepTrack, band_m: float) -> _FinalClimb:
             continue
         if frame.t - rep.frames[first].t < STALL_MIN_S - 1e-6:
             continue
-        heights = smoothed[first:index + 1]
-        if max(heights) - min(heights) > band_m:
+        # A dropped bar frame is no height, flat or otherwise.
+        heights = [height for height in smoothed[first:index + 1] if math.isfinite(height)]
+        if not heights or max(heights) - min(heights) > band_m:
             continue
         if _flexion_deg(rep.frames[first:index + 1]) - lockout_flexion >= STALL_MIN_FLEXION_DEG:
             climb = _FinalClimb(level, frame.t, smoothed[index])
@@ -242,10 +246,10 @@ def _joints_locked_time(rep: RepTrack, arrival: float, bar_top: float, leaving: 
 
 def top_time(rep: RepTrack, band_m: float) -> float:
     """The bar's arrival at its top: the level it ended the top at (or its peak,
-    for a top that never held), reached on its last climb, fitted from below (a
-    shrug above the level is no approach to it) over the climb's upper half,
-    where it slows into the top (a climb out of a stall starts flat). On the
-    wrist proxy, the hips and knees reaching the lockout."""
+    for a top that never held), reached on its last climb, fitted from below
+    over the climb's upper half, where it slows into the top (a climb out of a
+    stall starts flat). On the wrist proxy, the hips and knees reaching the
+    lockout."""
     level, start_t, start_up = _final_climb(rep, band_m)
     if not math.isfinite(level):
         return rep.top_time
@@ -254,9 +258,12 @@ def top_time(rep: RepTrack, band_m: float) -> float:
         rep.top_time,
     )
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
+    # A frame above the level has arrived (a shrug, or the noise, is no
+    # approach to it); and past TOP_FIT_HOLD_S the hold's noise would outweigh
+    # the few frames of a short last climb.
     frames = [
-        frame for frame in rep.frames
-        if start_t <= frame.t <= leaving and (level + start_up) / 2.0 <= frame.bar_up <= level + band_m
+        frame._replace(bar_up=min(frame.bar_up, level)) for frame in rep.frames
+        if start_t <= frame.t <= min(leaving, arrival + TOP_FIT_HOLD_S) and frame.bar_up >= (level + start_up) / 2.0
     ]
     estimate = _event_time(frames, level, band_m, arrival, min(arrival + EVENT_MAX_SHIFT_S, leaving), leaving=False)
     bar_top = estimate if math.isfinite(estimate) else arrival
@@ -442,9 +449,15 @@ def _coordination_features(rep: RepTrack, features: DeadliftRepFeatures) -> None
         features.hip_shoulder_rise_ratio = hip_rise / shoulder_rise
 
 
+# Centred, over the frames there are at the ends; NaN (a dropped frame) is no
+# value, and a window of nothing but NaN is NaN.
 def _running_median(values: list[float], frames: int) -> list[float]:
     half = frames // 2
-    return [float(np.median(values[max(0, i - half):i + half + 1])) for i in range(len(values))]
+    padded = np.pad(np.asarray(values, dtype=float), half, constant_values=NAN)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmedian(windows, axis=1).tolist()
 
 
 # Left end above the right end (cm) at the plate hubs: measured there on the
@@ -577,7 +590,9 @@ def rep_features(
     pull_time = end_t - start_t
     features.bar_rise_cm = rise_m * 100.0
     features.pull_time_s = pull_time
-    if pull_time > 0.0:
+    # The bar's speed is a tracked bar's: on the wrist proxy the top is the
+    # joints', and the wrists' noise sets its rise and liftoff.
+    if pull_time > 0.0 and bar_source == BAR_SOURCE_BAR:
         features.concentric_velocity_mps = rise_m / pull_time
     if math.isfinite(rep.lower_start) and math.isfinite(features.floor_time):
         features.lower_time_s = features.floor_time - rep.lower_start
