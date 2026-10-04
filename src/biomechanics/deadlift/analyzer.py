@@ -72,22 +72,25 @@ TOP_PEAK_WINDOW_S = 0.1
 # The top hold: frames in TOP with the bar this close to its top height (or two
 # noise bands, on a noisier bar).
 TOP_HOLD_BAND_M = 0.02
-# A bar this far above the top it held (or the hold band, if wider) was stalled
-# at a hitch, not at the top: the pull goes on.
-TOP_RESUME_RISE_M = 0.05
 # The live bar-over-midfoot offset the foot guidance speaks from is the median
 # over this long, once it holds this many settled stance frames.
 LIVE_OFFSET_WINDOW_S = 1.0
 LIVE_OFFSET_MIN_FRAMES = 10
 # D2's set-level evidence: the median rise ratio over this many recent reps.
 SET_RISE_RATIO_REPS = 3
-# The lifter's left-right is locked from up to this many frames at the bar (8 s:
-# stance, setup, and the floor between reps), or from this much history when
+# The lifter's left-right is locked from the frames at the bar (settled stance,
+# setup, the floor between reps) over this long, or from this much history when
 # there are none. The hips travel ~45 cm forward in a pull, so each degree off
-# reads ~0.03 of hip shift: under correlated keypoint noise the hip and ankle
-# lines need seconds of frames (1.2 deg from 4 s, 2 deg from 1 s).
-LATERAL_LOCK_FRAMES = 240
+# reads ~0.03 of hip shift: under correlated keypoint noise the lines need
+# seconds of frames.
+LATERAL_LOCK_S = 15.0
 LATERAL_LOCK_WINDOW_S = 0.5
+# Older frames count only while the heading holds: a block of frames whose hip
+# and ankle lines turn this far from the newer ones' (a lifter who stood turned,
+# then squared up, or turned at the floor) ends the lock's frames there. Over
+# 1.5 s the heading scatters ~2 deg under correlated 2 cm keypoint noise.
+LATERAL_BLOCK_S = 1.5
+LATERAL_TURN_DEG = 6.0
 # Rest height is the median of this many recent still frames of the bar (1 s):
 # the first, still-slow frames of a grind never move it.
 REST_FRAMES = 30
@@ -111,23 +114,59 @@ class _CompletedRep(NamedTuple):
     end_frame: int
 
 
-# The lifter's left-to-right on one frame, horizontal: hips and ankles, plus the
-# wrists when asked (the widest baseline, the hands on the bar, then weighs most).
-def _lateral_line(measure: FrameMeasure, with_wrists: bool) -> np.ndarray:
-    line = measure.points[CK.RIGHT_HIP] - measure.points[CK.LEFT_HIP]
-    pairs = [(measure.l_ankle, measure.r_ankle)]
-    if with_wrists:
-        pairs.append((measure.l_wrist, measure.r_wrist))
-    for left, right in pairs:
-        if left is not None and right is not None:
-            line = line + (right - left)
-    up = measure.frame.up
-    return line - float(np.dot(line, up)) * up
+# One frame's left-to-right lines, horizontal (zero when a side is missing).
+class _HeadingLines(NamedTuple):
+    t: float
+    hips: np.ndarray
+    ankles: np.ndarray
+    wrists: np.ndarray
 
 
-def _locked_axis(frames: list[FrameMeasure], with_wrists: bool) -> np.ndarray:
-    line = np.sum([_lateral_line(frame, with_wrists) for frame in frames], axis=0)
-    return line / float(np.linalg.norm(line))
+def _horizontal_line(measure: FrameMeasure, left: np.ndarray | None, right: np.ndarray | None) -> np.ndarray:
+    if left is None or right is None:
+        return np.zeros(3)
+    line = right - left
+    return line - float(np.dot(line, measure.frame.up)) * measure.frame.up
+
+
+def _heading_lines(measure: FrameMeasure) -> _HeadingLines:
+    return _HeadingLines(
+        t=measure.t,
+        hips=_horizontal_line(measure, measure.points[CK.LEFT_HIP], measure.points[CK.RIGHT_HIP]),
+        ankles=_horizontal_line(measure, measure.l_ankle, measure.r_ankle),
+        wrists=_horizontal_line(measure, measure.l_wrist, measure.r_wrist),
+    )
+
+
+def _unit(vector: np.ndarray) -> np.ndarray:
+    return vector / float(np.linalg.norm(vector))
+
+
+def _angle_deg(first: np.ndarray, second: np.ndarray) -> float:
+    cosine = float(np.dot(first, second)) / float(np.linalg.norm(first) * np.linalg.norm(second))
+    return math.degrees(math.acos(min(1.0, max(-1.0, cosine))))
+
+
+# The newest lines whose heading holds, a block at a time back from the newest:
+# a turn in place leaves the hips and shoulders still, so a turned stance reads
+# settled. The hip and ankle lines detect the turn (a staggered stance turns the
+# ankle line, but not from one second to the next).
+def _same_heading(lines: list[_HeadingLines]) -> list[_HeadingLines]:
+    kept: list[_HeadingLines] = []
+    newer: np.ndarray | None = None
+    end = len(lines)
+    while end > 0:
+        start = end - 1
+        while start > 0 and lines[end - 1].t - lines[start - 1].t <= LATERAL_BLOCK_S:
+            start -= 1
+        block = lines[start:end]
+        heading = np.sum([line.hips + line.ankles for line in block], axis=0)
+        if newer is not None and _angle_deg(newer, heading) > LATERAL_TURN_DEG:
+            break
+        newer = heading if newer is None else newer + heading
+        kept = block + kept
+        end = start
+    return kept
 
 
 def _median(values: list[float]) -> float:
@@ -216,14 +255,10 @@ class DeadliftRepAnalyzer:
         self._last_bar_t = -math.inf
         self._planted_feet: dict[int, np.ndarray] = {}
         self._stance_midfoots: deque[np.ndarray] = deque(maxlen=self.config.midfoot_lock_frames)
-        # Frames at the bar the lifter's left-right is locked from.
-        self._lateral_frames: deque[FrameMeasure] = deque(maxlen=LATERAL_LOCK_FRAMES)
+        # Lines of the frames at the bar the lifter's left-right is locked from.
+        self._heading: deque[_HeadingLines] = deque()
         # Hips, ankles and wrists: the sagittal frame's left-right without a bar axis.
         self._locked_lateral: np.ndarray | None = None
-        # Hips and ankles: the axis sideways hip shift (D8) is measured along, on
-        # either bar source (the bar's own axis turns forward travel into
-        # sideways when the stance is a few degrees off square to it).
-        self._locked_body_lateral: np.ndarray | None = None
         # Midfoots of feet measured since the last dead stop; None outside a
         # re-setup at the floor.
         self._floor_midfoots: deque[np.ndarray] | None = None
@@ -556,10 +591,9 @@ class DeadliftRepAnalyzer:
         if phase == DeadliftPhase.APPROACH:
             self._planted_feet = {}
             self._stance_midfoots.clear()
-            self._lateral_frames.clear()
+            self._heading.clear()
             self._stance_bar_offsets.clear()
             self._locked_lateral = None
-            self._locked_body_lateral = None
         if phase == DeadliftPhase.FLOOR:
             # A re-setup at the floor may move the feet: the next liftoff locks
             # the midfoot afresh from what follows.
@@ -634,7 +668,7 @@ class DeadliftRepAnalyzer:
         if measure.midfoot is not None and measure.feet_measured and measure.legs_measured and self._is_settled:
             self._stance_midfoots.append(measure.midfoot)
         if measure.legs_measured and self._is_settled:
-            self._lateral_frames.append(measure)
+            self._record_heading(measure)
         if (
             measure.midfoot is not None and measure.bar_centre is not None
             and measure.bar_source == BAR_SOURCE_BAR and self._is_settled
@@ -663,15 +697,31 @@ class DeadliftRepAnalyzer:
         self._stance_bar_midfoot_cm = _median([offset for _, offset in self._stance_bar_offsets])
         self._lock_lateral(measure)
 
-    # The lifter's left-right from the frames at the bar, or the last half
-    # second's: for D8 always, and for the sagittal frame when no bar axis gives it.
+    def _record_heading(self, measure: FrameMeasure) -> None:
+        self._heading.append(_heading_lines(measure))
+        while measure.t - self._heading[0].t > LATERAL_LOCK_S:
+            self._heading.popleft()
+
+    # The sagittal frame's left-right when no bar axis gives it: the frames at the
+    # bar since the heading last turned, or the last half second's.
     def _lock_lateral(self, measure: FrameMeasure) -> None:
-        frames = list(self._lateral_frames) or [
-            frame for frame in self._history if measure.t - frame.t <= LATERAL_LOCK_WINDOW_S
+        if self._rest_axis is not None:
+            return
+        lines = _same_heading(list(self._heading)) or [
+            _heading_lines(frame) for frame in self._history if measure.t - frame.t <= LATERAL_LOCK_WINDOW_S
         ]
-        self._locked_body_lateral = _locked_axis(frames, with_wrists=False)
-        if self._rest_axis is None:
-            self._locked_lateral = _locked_axis(frames, with_wrists=True)
+        self._locked_lateral = _unit(np.sum([line.hips + line.ankles + line.wrists for line in lines], axis=0))
+
+    # The axis D8 measures sideways hip shift along: the hip line over the frames
+    # at the bar since the heading last turned and over the rep's own frames (a
+    # sideways shift moves the hips; it does not turn their line). The hips travel
+    # ~45 cm forward square to the pelvis: the bar's axis read that travel as
+    # sideways on a stance off square to the bar, and the ankle line on a
+    # staggered stance.
+    def _rep_hip_axis(self, rep: RepTrack) -> np.ndarray:
+        hips = [line.hips for line in _same_heading(list(self._heading))]
+        hips += [_heading_lines(frame).hips for frame in rep.frames]
+        return _unit(np.sum(hips, axis=0))
 
     # A re-setup at the floor: the midfoot of the feet measured since the dead
     # stop, if any, and the lifter's left-right with the floor frames added.
@@ -704,7 +754,7 @@ class DeadliftRepAnalyzer:
         near, facing = self._near_and_facing(measure)
         self._enter(DeadliftPhase.STANCE if near and facing else DeadliftPhase.APPROACH, measure.t)
         self._stance_midfoots.clear()
-        self._lateral_frames.clear()
+        self._heading.clear()
         self._stance_bar_offsets.clear()
         self._locked_midfoot = None
         self._locked_lateral = None
@@ -712,7 +762,7 @@ class DeadliftRepAnalyzer:
 
     def _record_at_bar(self, measure: FrameMeasure) -> None:
         if measure.hands_on_bar and measure.legs_measured:
-            self._lateral_frames.append(measure)
+            self._record_heading(measure)
         if self._floor_midfoots is not None and measure.feet_measured and measure.midfoot is not None:
             self._floor_midfoots.append(measure.midfoot)
 
@@ -797,10 +847,10 @@ class DeadliftRepAnalyzer:
         if math.isfinite(expected) and rep.peak_up < expected - cfg.top_margin_m:
             # Leaning back past vertical the hips went through, legs straight: a
             # lockout (D5 judges it), however low the bar hangs from shoulders
-            # pulled back.
+            # pulled back. Knees not measured are not known to be straight.
             return (
                 measure.trunk_deg <= -cfg.overextended_top_deg
-                and not measure.knee_flex_deg > cfg.overextended_max_knee_deg
+                and measure.knee_flex_deg <= cfg.overextended_max_knee_deg
             )
         return abs(measure.trunk_deg) <= cfg.top_max_trunk_deg
 
@@ -853,24 +903,36 @@ class DeadliftRepAnalyzer:
     def _hold_band_m(self) -> float:
         return max(TOP_HOLD_BAND_M, 2.0 * self._event_band_m())
 
-    # A bar well above the top the rep held was stalled at a hitch (without a
-    # standing reference, a still bar and an upright-enough trunk read as a
-    # top): the pull resumes, and its top comes later.
-    def _resume_pull(self, rep: RepTrack, measure: FrameMeasure) -> bool:
-        if not measure.bar_up > rep.top_up + max(TOP_RESUME_RISE_M, self._hold_band_m()):
-            return False
+    # A bar risen clear of the hold band above the top it held was stalled short
+    # of the top: a grind a few cm from lockout, or a hitch read as a top with no
+    # standing height to expect it at.
+    def _above_held_top(self, rep: RepTrack, measure: FrameMeasure) -> bool:
+        return measure.bar_up > rep.top_up + self._hold_band_m()
+
+    # The pull goes on; its top is timed on the climb from the bar's last still
+    # frame at the stall, so the stall's frames neither date the top nor enter
+    # the lockout (D6).
+    def _resume_pull(self, rep: RepTrack, measure: FrameMeasure) -> None:
+        stall_up = rep.top_up + self._event_band_m()
+        rep.climb_start = next(
+            (
+                frame.t for frame, velocity in zip(reversed(rep.frames), reversed(rep.velocities))
+                if abs(velocity) < self.config.top_still_speed_mps and frame.bar_up <= stall_up
+            ),
+            rep.climb_start,
+        )
         rep.top_time = NAN
         rep.top_up = NAN
         rep.top_frames = []
         rep.lower_start = NAN
         rep.floor_time = NAN
         self._enter(DeadliftPhase.PULL, measure.t)
-        return True
 
     def _step_top(self, measure: FrameMeasure, velocity: float) -> None:
         rep = self._rep
         rep.append(measure, velocity)
-        if self._resume_pull(rep, measure):
+        if self._above_held_top(rep, measure):
+            self._resume_pull(rep, measure)
             return
         # The hold is where the bar sits, not where its velocity reads still: a
         # noisy bar (the wrist proxy) rarely reads still frame by frame.
@@ -897,7 +959,8 @@ class DeadliftRepAnalyzer:
     def _step_lower(self, measure: FrameMeasure, velocity: float) -> None:
         rep = self._rep
         rep.append(measure, velocity)
-        if self._resume_pull(rep, measure):
+        if self._above_held_top(rep, measure):
+            self._resume_pull(rep, measure)
             return
         if math.isnan(rep.floor_time) and measure.bar_up - self._rest_up <= self._event_band_m():
             # Touchdown: back on the rest itself, not just inside the dead-stop band.
@@ -977,7 +1040,7 @@ class DeadliftRepAnalyzer:
             rep.setup = {"predicted_trunk_change_deg": self._set_predicted_change_deg}
         features = rep_features(
             rep, self.rep_count, self._rest_up, self._event_band_m(), self._locked_midfoot,
-            self._locked_body_lateral, self._athlete(), self.gravity_source, self._grip,
+            self._rep_hip_axis(rep), self._athlete(), self.gravity_source, self._grip,
         )
         if math.isfinite(features.hip_shoulder_rise_ratio):
             self._set_rise_ratios.append(features.hip_shoulder_rise_ratio)

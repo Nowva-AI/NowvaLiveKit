@@ -87,6 +87,9 @@ class RepTrack:
         self.lead_in: list[FrameMeasure] = []
         # The rep ended in a touch-and-go: its floor is the low point itself.
         self.touch_and_go_out = False
+        # The bar's last climb to the top began here: after a stall short of the
+        # top, the top is timed on the frames from there.
+        self.climb_start = liftoff.t
 
     def append(self, measure: FrameMeasure, velocity: float) -> None:
         self.frames.append(measure)
@@ -152,15 +155,17 @@ def liftoff_time(rep: RepTrack, rest_up: float, band_m: float) -> float:
 
 def top_time(rep: RepTrack, band_m: float) -> float:
     """The bar's arrival at its top: the level it held there (or its peak, for a
-    top that never held), reached after the first frame inside the band."""
+    top that never held), reached after the first frame inside the band, on the
+    bar's last climb."""
     level = _median([frame.bar_up for frame in rep.top_frames]) if rep.top_frames else rep.top_up
     if not math.isfinite(level):
         return rep.top_time
     arrival = next(
-        (frame.t for frame in rep.frames if frame.bar_up >= level - band_m), rep.top_time,
+        (frame.t for frame in rep.frames if frame.t >= rep.climb_start and frame.bar_up >= level - band_m),
+        rep.top_time,
     )
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
-    frames = [frame for frame in rep.frames if frame.t <= leaving]
+    frames = [frame for frame in rep.frames if rep.climb_start <= frame.t <= leaving]
     estimate = _event_time(frames, level, band_m, arrival, min(arrival + EVENT_MAX_SHIFT_S, leaving), leaving=False)
     return estimate if math.isfinite(estimate) else arrival
 
@@ -396,10 +401,11 @@ def _top_features(rep: RepTrack, refs: dict[str, float], features: DeadliftRepFe
 
 
 # The hips' sideways position over the second half of the pull against where
-# they started, as a fraction of ankle separation, along the lifter's own
-# left-right (PLAN.md §2.5: the ankle axis; the bar's axis leaks forward travel
-# into sideways on a stance a few degrees off square). Medians over many frames:
-# a hip keypoint jitters by more than a real shift's first centimetres.
+# they started, as a fraction of ankle separation, along the pelvis's left-right
+# (the hip line): the hips travel ~45 cm forward square to it, which the bar's
+# axis read as sideways on a stance off square to the bar, and the ankle line on
+# a staggered stance. Medians over many frames: a hip keypoint jitters by more
+# than a real shift's first centimetres.
 def _hip_shift_feature(
     pull: list[FrameMeasure],
     locked_midfoot: np.ndarray | None,
@@ -433,8 +439,8 @@ def rep_features(
     gravity_source: str,
     grip: str,
 ) -> DeadliftRepFeatures:
-    """body_lateral: the lifter's horizontal left-to-right unit vector, locked for
-    the set (hips and ankles), that sideways hip shift is measured along."""
+    """body_lateral: the pelvis's horizontal left-to-right unit vector (the hip
+    line) that sideways hip shift is measured along."""
     pull = [frame for frame in rep.frames if frame.t <= rep.top_time]
     liftoff = rep.liftoff
     setup = rep.setup
