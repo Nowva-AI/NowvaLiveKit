@@ -33,6 +33,7 @@ SAG_M = 0.015
 LOST_BEFORE_TOP_S = 0.3
 LOST_AFTER_TOP_S = 0.5
 FRAME_S = 1.0 / 30.0
+TRACKER_WARM_UP_FRAMES = 4
 SCRIPT_TIMEOUT_S = 300
 
 
@@ -131,6 +132,25 @@ class TestOneSet:
         assert coasting and all(bar.predicted for _, bar in coasting)
         assert max(t for t, _ in coasting) - start <= envelope.TRACKER_CONFIG.max_prediction_s + FRAME_S
         assert in_gap[-1][1] is None
+
+    def test_a_15_hz_detector_leaves_every_other_frame_a_prediction(self):
+        sim = simulate(Scenario(reps=[RepScript()] * 2))
+        mutate = envelope._half_rate()
+        # Once the tracker has two detections to carry a velocity on.
+        bars = [mutate(frame).bar for frame in sim.frames][TRACKER_WARM_UP_FRAMES:]
+        predicted = [bar.predicted for bar in bars]
+        assert predicted[::2] == [predicted[0]] * len(predicted[::2])
+        assert predicted[1::2] == [not predicted[0]] * len(predicted[1::2])
+
+    def test_hidden_wrists_have_no_confidence_and_the_rest_is_untouched(self):
+        sim = simulate(Scenario(reps=[RepScript()] * 2, track_bar=False))
+        top = sim.reps[0].top_time
+        mutate = envelope._wrists_hidden([(top - LOST_BEFORE_TOP_S, top + LOST_AFTER_TOP_S)])
+        hidden = next(frame for frame in sim.frames if frame.timestamp >= top)
+        seen = sim.frames[0]
+        assert list(mutate(hidden).confidences[[CK.LEFT_WRIST, CK.RIGHT_WRIST]]) == [0.0, 0.0]
+        assert mutate(hidden).points == pytest.approx(hidden.points, abs=HEIGHT_TOLERANCE_M)
+        assert mutate(seen).confidences == pytest.approx(seen.confidences, abs=HEIGHT_TOLERANCE_M)
 
 
 class TestCommandLine:

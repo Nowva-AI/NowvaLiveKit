@@ -106,7 +106,8 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       quicker than ~0.9 s, whose knees still bend 0.1 s from the top), chosen by time and
       never by the angles judged (a window chosen as the most extended selects the noise: a
       14° soft lockout read ~4° straighter at 2 cm noise). After a grind the hold ends locked
-      out.
+      out. A top whose bar went unseen right after its frames and was seen leaving more than
+      0.5 s later (a hold unseen until the lowering) is judged on all of them.
     - **A peak on the wrist proxy:** its highest frame is only the highest of the wrists'
       noise, so the peak is the vertex of a parabola through the bar's 5-frame running median
       within 0.3 s of it, refined within 0.1 s with each side's own curvature (the steeper at
@@ -123,7 +124,9 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
     - **The lockout's level** is the window's lowest plateau: the median of its frames whose
       5-frame running median sits within the event band of the lowest. A shrug inside the
       hold band only adds frames above it, which a plain median followed up (a 1.5 cm shrug
-      dated tops up to 0.6 s late).
+      dated tops up to 0.6 s late). With fewer than 5 measured heights (a 15 Hz detector's
+      few frames of a top that never held, or a hold mostly unseen) there is no plateau, and
+      the lowest is a side of the peak: the level is their median.
     - **A lockout that settled upward** (the shoulders drawn back on straight legs, 1–1.5 cm
       inside the hold band, until the lowering) puts the whole window on the raised plateau.
       Below that level by more than the band, a stretch flat for 0.2 s with the hips and
@@ -144,17 +147,22 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       knees, still seen, reaching the lockout date it. The top's heights are measured ones:
       a prediction carried over the gap is none of them. After a gap long
       enough to hide a stall (over 0.3 s), a bar seen again at its level had arrived by then:
-      the fit is bounded there too.
+      the fit is bounded there too. A bar seen again just short of its level (within a
+      second band: its noise, or its last millimetres) may have arrived in the gap all the
+      same.
     - **On the wrist proxy** the wrists' noise hides a stall a few cm short, and a slow
       pull's last centimetres, inside the hold. The top there is the hips and knees reaching
       the lockout: their summed flexion (5-frame running median) within 5° of the lockout's,
-      from the bar's arrival at its level. It is searched no later than 0.5 s after the bar's
+      from the bar's arrival at its level, or from the first frame of a gap just before it
+      (the wrists hidden as they arrived: the joints, still seen, reach the lockout in the
+      gap). It is searched no later than 0.5 s after the bar's
       own top, or after the joints' last frame still 20° more bent than the lockout before
       the lockout window, so the angles' slow wander over a long hold does not move it.
   - Tested (`scripts/tools/deadlift_envelope.py tops` and `shrug`; `IMPLEMENTATION.md` has
-    the rows): tracked grinds 4–6 % short are timed within one frame, one finishing its last
-    2.5 cm over 0.3 s within 0.1 s, over 1 s with a median of 0.07 s (its last 0.17 s move the
-    bar under 2 mm, inside its noise). Wrist-proxy tops: §7. A stall about 1 cm short, with
+    the rows): tracked grinds 4–6 % short with their default quick finish are timed within
+    one frame (one body), one finishing its last 2.5 cm over 0.3 s within 0.1 s, over 1 s with
+    a median of 0.07 s (its last 0.17 s move the bar under 2 mm, inside its noise); 3–4 %
+    short with a 1 s finish, early: §7. Wrist-proxy tops: §7. A stall about 1 cm short, with
     the knees inside D6's mild threshold of standing, is the top on the tracked bar and is
     dated at the stall, with no lockout cue. With a standing reference, a 1.5–4 cm shrug moves
     no top more than 0.18 s (one of 48 at 2.5 cm noise: +0.37 s), the knees seen or hidden,
@@ -180,14 +188,27 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   - A bar missing for up to 0.2 s is a tracking gap, not a lost bar. The last bar keeps its
     geometry (hands on the bar, facing) but gives no height.
   - The tracker carries a lost bar on at its last velocity for 0.15 s (predicted states). A
-    prediction keeps its height only on the frame between two detections of a 15 Hz
-    detector (0.05 s after the last measurement): coasting longer, it overshoots a bar that
-    stops at the top, and it is geometry only.
-  - **A top that never held, lost from view across its peak:** the highest frame seen is
-    on the climb. On the tracked bar the peak is where the hips and knees were most
-    extended among the frames the bar went unseen around its highest one; the lockout is
-    judged around it and the top dated there. If the highest frame seen sits short of the
-    expected top, the lifter seen standing while the bar was unseen makes it a top.
+    prediction is geometry only, with no height: coasting into a top, it overshoots a bar
+    that stops, even on the one frame between two detections of a 15 Hz detector.
+  - **A top lost from view across its peak** (the bar unseen for two frames or more beside
+    its highest one; a single unseen frame is a skipped detection): the highest frame seen
+    is on the climb, or on the lowering. If it sits short of the expected top, the lifter
+    seen standing while the bar was unseen makes it a top.
+    - On the tracked bar, lost on its way up (unseen right after its highest frame), the top
+      is where its last measured rise arrives: the mean of a parabola's vertex through the
+      last 0.3 s of the rise (alone, late: the deceleration grows into the top) and the last
+      speed slowing evenly into the expected top height (alone, scattered by that height's
+      noise), kept within the unseen frames. Where the hips and knees over the 0.15 s after
+      it are still 20° bent past their most extended (lost on its way into a stall), or the
+      bar was not slowing, the top is where they first came within 5° of their most
+      extended. Through a hold the joints are flat: their most extended frame alone could be
+      anywhere in it. The lockout is judged within 0.1 s of the top (0.11 of a quicker pull).
+    - Seen again higher (a gap before the highest frame), the bar arrived in or after the
+      gap, which the features date (Top, above); the lockout is judged where the hips and
+      knees were most extended while it was unseen.
+    - On the wrist proxy, lost either side of the wrists' highest frame, the lockout is
+      judged where the hips and knees were most extended while the wrists were unseen (in a
+      hold any of its frames is a lockout frame), and the joints date the top (Top, above).
   - Feet the plates hide keep their last measured position once the lifter is at the bar,
     since they do not move during a set.
 
@@ -423,7 +444,22 @@ noise.
   finding 50).
 - **A bar lost for a second on its way to the top** [gaps] (1.5 cm AR(0.8)): lost mid-pull
   through the top, its last speed finishes it late (+0.10 to +0.31 s on a 1.5 s pull); lost
-  through a grind's whole finish, the joints date it, up to +0.33 s on 2–3 of 27.
+  through a grind's whole finish, the joints date it, up to +0.33 s on 2–3 of 27. A 0.6 s
+  hold lost from 0.2 s before the top until the lowering (1.2 s pulls): +0.05 to +0.18 s, its
+  speed seen 0.2 s before the top finishing it late; no velocity loss.
+- **A grind 3–4 % short finishing over a second** [tops] (five bodies): its last centimetre
+  or two has too few frames clear of the noise band to fit, and the bar's first frame at its
+  level dates it: 0.4 s early on a median at 96 %, up to 0.67 s at 97 %. The fallbacks tried
+  each cost another grind (`IMPLEMENTATION.md`, finding 66).
+- **The wrists hidden across the top on the proxy** [gaps] (1.5 cm AR(0.8), five bodies ×
+  seeds 0–2): hidden through a 0.6 s hold until the lowering, 3 of 45 tops beyond 0.3 s
+  (max 0.33 s). The lockout is then judged where the hips and knees were most extended while
+  the wrists were unseen: a window chosen by the angles it judges reads straight, and a 15°
+  soft lockout is cued on 38 of 45 reps (45 of 45 seen). No false cue on 165 clean reps
+  hidden there, or 0.2 s either side of a no-pause top.
+- **Everything at 15 fps** (PLAN §9's second degraded mode) is untested: the analyser
+  counts frames in a few places tuned on a 30 fps pose stream (`IMPLEMENTATION.md`,
+  finding 67). Pose at 30 Hz with the bar detector at 15 Hz is tested.
 - **The bar lost at a touch-and-go low point:** 0.3 s of contiguous loss there loses reps
   (35 of 45 counted), 0.5 s most of them (review, round 7); random dropouts do not.
 - **Back rounding:** proxies only (PLAN.md §2.10).

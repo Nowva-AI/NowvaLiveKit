@@ -122,12 +122,14 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 - **Tempo:** 0.45 s to 5 s pulls with 3 mm bar noise, all events within 100 ms. A 0.8 s
   sticking point mid-pull is ground through and counted. A hitch 90 % of the way up is not
   taken for the top, with or without a standing reference (top within 100 ms; it was ~1 s
-  early). [tops]: grinds 4–6 % short for 0.4–0.8 s are timed within one frame, with no lockout
-  fault (they were 0.75–0.93 s early with a false moderate D6); a grind finishing its last
-  2.5 cm over 0.3 s within 0.1 s (24 reps), over 1 s with a median of 0.07 s (12 reps; max
-  0.37 s, its last 0.17 s moving the bar under 2 mm); 5 s pulls at 2 cm AR(0.8) over five bodies
-  within 0.1 s on 86 of 90 (max 0.41 s early; 88 of 90 without finding 50's settle rule, on
-  the same draw). On the wrist proxy see `KNOWLEDGE.md` §7.
+  early). [tops]: grinds 4–6 % short for 0.4–0.8 s with their default quick finish are timed
+  within one frame (one body), with no lockout fault (they were 0.75–0.93 s early with a false
+  moderate D6); a grind finishing its last 2.5 cm over 0.3 s within 0.1 s (24 reps), over 1 s
+  with a median of 0.07 s (12 reps; max 0.37 s, its last 0.17 s moving the bar under 2 mm).
+  Stalled 3–4 % short with a 1 s finish, the top is early (finding 66): 0.4 s on a median at
+  96 % (five bodies, 20 reps; max 0.5 s) and 0.42 s at 97 % (max 0.67 s). 5 s pulls at 2 cm
+  AR(0.8) over five bodies within 0.1 s on 86 of 90 (max 0.41 s early; 88 of 90 without
+  finding 50's settle rule, on the same draw). On the wrist proxy see `KNOWLEDGE.md` §7.
 - **Shrugs at the top** [shrug] (1.2 s holds, every rep shrugged, 4 bodies × seeds 0–3): with a
   standing reference, 1.5–4 cm shrugs move no top more than 0.18 s, the knees seen or hidden,
   except one of 48 at 2.5 cm AR(0.8) (+0.37 s), and read no velocity loss. Without one, a shrug
@@ -176,11 +178,24 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
   - Lost on the way into the stall (0.4 and 0.6 s stalls, from 0.1–0.2 s before them to
     0.1 s after the top): within 0.21 s, 1 of 27 beyond 0.1 s.
   - Touch-and-go tops with no pause, lost 0.2 s either side of reps 2–4's (1.2 / 1.0 s and
-    0.9 / 0.8 s, five bodies × seeds 0–3): every set counted, tops within 0.07 s, D6 cued on
-    1 and 2 of 60.
+    0.9 / 0.8 s, five bodies × seeds 0–3): every set counted, tops within 0.1 s, D6 cued on
+    none of 120.
+  - A 0.6 s hold never seen, the bar lost until the lowering (1.2 s pulls, 3 bodies × seeds
+    0–2): lost from 0.2 s before the top, +0.05 to +0.18 s (median 0.12 s: the speed seen
+    0.2 s before the top finishes it late); from 0.1 s before the top, or just after it
+    arrived, within 0.13 s; no velocity loss (on 536ad8a: up to +0.57 s, D10 in up to 15 of 15
+    sets).
+  - A 15 Hz detector, every other frame the tracker's prediction (five bodies × seeds 0–2):
+    0.6, 1.2 and 5 s pulls and no-pause touch-and-go 1.2 / 1.0 s, every top within 0.1 s, no
+    cue.
+  - The wrist proxy with the wrists hidden (five bodies × seeds 0–2): from 0.1 s before the
+    top to 0.3 s after, within 0.3 s; through a 0.6 s hold until the lowering, 3 of 45 beyond
+    0.3 s (max 0.33 s); 0.2 s either side of a no-pause top, within 0.1 s; no cue on any. A 15°
+    soft lockout hidden through its hold is cued on 38 of 45 reps, 45 of 45 seen (finding 65).
   Noise-free (test): losses from 0.5–0.9 s before the top of 1.2 s pulls, into and through a
-  grind's stall, across tops that never held and coasted over by the tracker, within 0.1–0.15 s,
-  with no false velocity loss or D6.
+  grind's stall, across tops that never held and coasted over by the tracker, and holds lost
+  until the lowering, within 0.1–0.15 s, with no false velocity loss or D6. Through the real
+  tracker at 15 Hz (test), every event within 0.1 s.
 - **Drops and failures:** dropped bars, with the lifter standing over the bar until the next
   setup; failed reps, including a stall at the knees, are events, not reps.
 - **Lockouts:**
@@ -215,9 +230,9 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 vertical, the same set fakes more than 2 cm of drift.
 
 **Compute (x86)** [compute], 1.5 cm keypoint noise:
-- Analyser: 0.27–0.31 ms median and 0.41–0.50 ms p95 per frame; frames that complete a rep
-  (event fits, the final climb, features, D8's two axes) 3.0–3.2 ms median on default pulls
-  and 4.7–4.9 ms (tracked) / 5.4 ms (proxy) on 5 s pulls with 2 s holds. The first frames of
+- Analyser: 0.30–0.33 ms median and 0.44–0.53 ms p95 per frame; frames that complete a rep
+  (event fits, the final climb, features, D8's two axes) 2.9–3.1 ms median on default pulls
+  and 4.6 ms (tracked) / 5.1 ms (proxy) on 5 s pulls with 2 s holds. The first frames of
   a process pay numpy's warm-up once (~12–18 ms).
 - Bar association and tracking: about 0.6–1.1 ms.
 - The Jetson numbers are still to be measured (J1).
@@ -646,7 +661,7 @@ vertical, the same set fakes more than 2 cm of drift.
     coasted frame inside the band had become the arrival, or moved the level, and grinds
     read 0.3–0.6 s late. The gap tests and the [gaps] rows now emulate the tracker's
     coasting, and read the same as with the bar dropped outright (test: within 0.1 s, no
-    D6).
+    D6). Round 12 dropped the one-frame exception (finding 62).
 
 58. **A bar lost on its way into a stall is dated by the joints** (review, round 10).
     Finding 51's speed estimate assumes the bar slows evenly into the top; lost while still
@@ -672,6 +687,91 @@ vertical, the same set fakes more than 2 cm of drift.
 
 60. **The analyser's median is a sort too**, as finding 54's (every feature identical on 30
     noisy sets).
+
+61. **A hold lost from view is dated by the bar's last rise** (review, round 11). Finding 55
+    made a gap no hold, so a top whose whole hold went unseen took finding 56's path, and the
+    joints' most extended frame dated it. Through a hold the joints are flat and that frame
+    can be anywhere in it: 0.6 s holds lost until the lowering read +0.23 to +0.57 s late,
+    with a velocity loss (D10) in up to 15 of 15 sets, and 0.6 s pulls with every other bar
+    frame dropped the same. Such a top is now dated where the bar's last measured rise
+    arrives: the mean of a parabola's vertex through the last 0.3 s of the rise (alone,
+    +0.11 to +0.19 s late: the deceleration grows into the top) and the last speed slowing
+    evenly into the expected top height, covering the rest in twice the time that speed
+    would (alone, scattered by that height's noise, to −0.2 s), kept within the frames it
+    went unseen on. Where the hips and knees over the 0.15 s after it are still 20° bent past
+    their most extended (lost on the way into a stall), or the bar was not slowing, the top
+    is where they first came within 5° of their most extended. A top counts as lost from view
+    after two unseen frames: one is a 15 Hz detector's skipped detection. [gaps], 1.5 cm
+    AR(0.8), 1.2 s pulls: lost from 0.2 s before the top to 0.2 s into the lowering,
+    +0.05 to +0.18 s (median 0.12 s; the speed seen 0.2 s before the top finishes it
+    late); lost from 0.1 s before, or from just after the arrival, within 0.13 s; no
+    velocity loss. Tests: noise-free within 0.15 s; 1 s losses at 1.5 cm AR(0.8) within
+    0.15 s on 1.5 s pulls; no D10.
+
+62. **No predicted bar state has a height** (review, round 11). Finding 57 kept a
+    prediction's height on the frame between two detections of a 15 Hz detector. Through the
+    real `BarTracker3D` at 15 Hz that frame overshoots a bar that stops by ~1 cm, became the
+    peak of tops that never held, and dated them 1–4 frames early (at 2 cm AR(0.8), 70 of 200
+    beyond 0.1 s). Every prediction is now geometry only. Finding 57's case for the exception
+    (with half the heights a 5 s pull's worst top went from 0.20 to 0.30 s) did not hold
+    through the tracker's coasting: [gaps], a 15 Hz detector at 1.5 cm AR(0.8), five bodies,
+    0.6, 1.2 and 5 s pulls and no-pause touch-and-go, every top within 0.1 s, no cue. With
+    half the heights, the lockout window of a top that never held has two to four, and the
+    lowest of them is a side of the peak: their "lowest plateau" dated tops early. With fewer
+    measured heights than the 5-frame running median takes, the level is now their median
+    (the peak, or their median within the band of the highest, sat high on a hold seen for
+    a few frames: a 93 % grind's top read 0.27 s late). Tests (`test_deadlift_bar_tracker.py`,
+    through the real tracker at 15 Hz): no-pause touch-and-go 1.2 / 1.0 s and held 0.45, 1.2
+    and 5 s pulls, every event within 0.1 s.
+
+63. **Seen again just short of its level, the bar may have arrived in the gap** (found
+    regenerating round 12's rows). A gap right before the bar's first frame at its level is
+    where the bar may have arrived; a first frame back a hair below that band (0.3 mm, on a
+    hold seen for its last frames) was not linked to the gap, and its top read 0.57–0.63 s
+    late. A bar seen again within a second band of the level now links the gap the same way.
+
+64. **A lockout is judged when the bar was first seen leaving late.** The lockout is judged
+    on the top's frames within 0.5 s of where the bar left the top. With the wrists hidden
+    through a hold and seen again on the lowering, the proxy dated the lowering after the
+    gap, that window held none of the top's frames, and the lockout went unjudged (no
+    deficit, so a soft lockout went uncued). When the bar went unseen right after the top's
+    frames, they are all judged. (Applied to any top with no frame in the window, it judged
+    a clean proxy rep whose wrists' noise had left the hold band, and cued it.)
+
+65. **The wrists lost beside their peak** (review, round 11). On the proxy with the wrists
+    hidden at 1.5 cm AR(0.8), a no-pause top hidden 0.2 s either side drew a false D6 on 21 of
+    75 reps and a held top hidden through its hold 9 of 45 (the review's draws, on 536ad8a
+    and before). A gap of two frames or more beside the wrists' highest frame, after it or
+    before it (seen again coming down higher than last seen going up), now puts the top in
+    the gap: the lockout is judged where the hips and knees were most extended while the
+    wrists were unseen (in a hold any of its frames is a lockout frame), the lifter seen
+    standing then makes it a top, and the joints date the arrival from the gap's start rather
+    than where the wrists were seen again (hidden from 0.1 s before the top to 0.3 s after,
+    15 of 45 tops had read beyond 0.3 s, up to 0.43 s). The window is chosen by the angles it
+    judges, which reads straight: a 15° soft lockout hidden through its hold is cued on 38–40
+    of 45 reps (43–45 seen). The review's probe now: no false D6 on 75 and 45 reps; 2 of 45
+    tops beyond 0.3 s.
+
+66. **Slow finishes out of a stall 3–4 % short stay a limit** (review, round 11; pre-existing).
+    A last climb of 1–2 cm over a second has too few frames clear of the noise band to fit,
+    and its top is the bar's first frame at its level: at 96–97 %, 0.4 s early on a median, up
+    to 0.67 s ([tops], five bodies). Three fallbacks were tried and dropped: a fit on the
+    whole climb (96 % median 0.09 s, but grinds 4–6 % short with a quick finish, timed within a
+    frame, read up to 0.11 s late); the hips and knees reaching the lockout (0.17–0.2 s
+    noise-free, but at 2 cm of keypoint noise a 95 % grind's top, within a frame, up to 0.3 s
+    late); the same for slow climbs only (no speed tells the crawl apart: its stall is read to
+    end late, leaving a climb of a centimetre or two). "Within one frame" in this document is
+    for grinds 4–6 % short with their default quick finish, one body.
+
+67. **Frame counts assume 30 fps.** The running medians (5 frames), the event fits' 3 frames
+    clear of the band, a lost top's 2 unseen frames and the dead stop's 3 count frames, tuned
+    on a 30 fps pose stream. The plan's first degraded mode (pose at 30 Hz, the bar detector at
+    15 Hz) is tested; its second, everything at 15 Hz, is not (a review read a 93 % grind
+    +0.43 s late there): it needs those counts in seconds first.
+
+68. **Housekeeping** (review, round 11): a pull resumed after a top lost from view clears its
+    unseen flag; the analyser imports the features' `median` and `running_median` instead of
+    keeping copies; long lines wrapped.
 
 ## Deferred: needs data, hardware or keys (not code)
 

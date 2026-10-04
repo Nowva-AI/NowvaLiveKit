@@ -26,7 +26,9 @@ from biomechanics.deadlift.analyzer import DeadliftFrameInput, DeadliftRepAnalyz
 from biomechanics.deadlift.bar_tracker_3d import DEFAULT_CONFIG as TRACKER_CONFIG  # noqa: E402
 from biomechanics.deadlift.rule_base import TIER_RANK  # noqa: E402
 from biomechanics.deadlift.session_reference import DeadliftSessionReference  # noqa: E402
-from biomechanics.deadlift.simulator import RepScript, Scenario, SimAthlete, SimFrame, SimulatedSet, simulate  # noqa: E402
+from biomechanics.deadlift.simulator import (  # noqa: E402
+    DEFAULT_FPS, RepScript, Scenario, SimAthlete, SimFrame, SimulatedSet, simulate,
+)
 from biomechanics.deadlift.types import GRAVITY_SOURCE_MEASURED, BarState3D, DeadliftRepFeatures  # noqa: E402
 from biomechanics.faults.rule_engine import RuleEngine  # noqa: E402
 from biomechanics.profiles.deadlift import DeadliftProfile  # noqa: E402
@@ -64,6 +66,8 @@ SAG_RAMP_S = 0.2
 SAG_UP_S = 0.6
 # The holds a settle or a sag happens in, and the lowering after them.
 HELD_TOP = RepScript(top_hold_s=1.2)
+# A soft lockout cued moderate or worse on every rep, noise-free.
+SOFT_LOCKOUT_DEG = 15.0
 
 Mutation = Callable[[SimFrame], SimFrame]
 
@@ -348,6 +352,29 @@ def _dropouts(probability: float, *key: object) -> Mutation:
     return _coasting(lambda t: bool(rng.random() < probability))
 
 
+# A 15 Hz detector under a 30 Hz pose: every other frame the tracker's prediction.
+def _half_rate() -> Mutation:
+    return _coasting(lambda t: round(t * DEFAULT_FPS) % 2 == 1)
+
+
+# The wrists unseen (confidence 0) in the windows: the wrist proxy's bar lost.
+def _wrists_hidden(windows: list[tuple[float, float]]) -> Mutation:
+    def mutate(frame: SimFrame) -> SimFrame:
+        if not any(start <= frame.timestamp < end for start, end in windows):
+            return frame
+        confidences = frame.confidences.copy()
+        confidences[[CK.LEFT_WRIST, CK.RIGHT_WRIST]] = 0.0
+        return frame._replace(confidences=confidences)
+
+    return mutate
+
+
+# Touch-and-go reps with no pause at the top, the last a dead stop.
+def _no_pause_touch_and_go(pull_s: float, lower_s: float) -> list[RepScript]:
+    script = RepScript(top_hold_s=0.0, pull_s=pull_s, lower_s=lower_s)
+    return [script.model_copy(update={"floor_hold_s": 0.0})] * 4 + [script]
+
+
 # ------------------------------------------------------------------------ sweeps
 
 def sweep_events() -> None:
@@ -497,6 +524,10 @@ def sweep_tops() -> None:
         True, TRACKED_BAR_NOISE_M, 0.0, 8, one)
     run("tracked grind 95%, 1 s finish", [RepScript(pull_s=2.0, stall_fraction=0.95, stall_s=0.8, finish_s=1.0)] * 3,
         True, TRACKED_BAR_NOISE_M, 0.0, 4, one)
+    for fraction in (0.96, 0.97):
+        run(f"tracked grind {fraction:.0%}, 1 s finish",
+            [RepScript(pull_s=2.0, stall_fraction=fraction, stall_s=0.8, finish_s=1.0)] * 2,
+            True, TRACKED_BAR_NOISE_M, 0.0, 2, tuple(BODIES))
     run("tracked 5 s pull, 2 cm AR", [RepScript(pull_s=5.0)] * 3, True, TRACKED_BAR_NOISE_M, 0.02, 6, tuple(BODIES))
     run("tracked soft lockout 12 deg held 2 s, 5 mm bar, 2 cm AR",
         [RepScript(top_hold_s=2.0, lockout_deficit_deg=12.0)] * 3, True, 0.005, 0.02, 6, tuple(BODIES))
@@ -606,7 +637,8 @@ def sweep_hip_shift() -> None:
 
 
 def sweep_gaps() -> None:
-    """Bar dropouts and a bar lost around the top as the tracker reports it (predicted, then none), tracked bar, 1.5 cm AR."""
+    """Bar dropouts and a bar lost around the top as the tracker reports it (predicted, then none), a 15 Hz
+    detector, and the wrist proxy's wrists hidden around the top; 1.5 cm AR."""
     for probability in (0.1, 0.2):
         errors: list[float] = []
         for body_name in ("default", "short", "tall"):
@@ -660,6 +692,58 @@ def sweep_gaps() -> None:
         lockout = sum("deadlift_lockout" in rep for rep in cues)
         print(f"no-pause touch-and-go {pull_s} / {lower_s} s, bar lost 0.2 s either side of reps 2-4's tops (5 bodies x "
               f"seeds 0-3): {exact}/{sets} sets exact; {_summary(errors)}; D6 cued on {lockout} of {len(cues)}")
+    # A 0.6 s hold never seen: the bar lost until the lowering.
+    for start_s, end_s in ((-0.2, 0.8), (-0.1, 0.7), (0.03, 0.75)):
+        errors = []
+        slowed = sets = 0
+        for body_name in ("default", "short", "tall"):
+            for seed in range(3):
+                sim = simulate(Scenario(athlete=BODIES[body_name], reps=[RepScript(pull_s=1.2)] * 3,
+                                        bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                lost = _bar_lost([(rep.top_time + start_s, rep.top_time + end_s) for rep in sim.reps])
+                features = _analyse(sim, lost, _noise("ar", 0.015, "gaps_hold", start_s, body_name, seed))
+                errors += _top_errors(sim, features)
+                sets += 1
+                slowed += any("deadlift_velocity_loss" in rep for rep in _judged(features))
+        print(f"1.2 s pulls held 0.6 s, bar lost from {start_s:+.2f} s to {end_s:+.2f} s of the top (3 bodies x seeds "
+              f"0-2): {_summary(errors)}; D10 judged in {slowed} of {sets} sets")
+    # A 15 Hz detector through the tracker.
+    for label, scripts in (("0.6 s pulls", [RepScript(pull_s=0.6)] * 3), ("1.2 s pulls", [RepScript(pull_s=1.2)] * 3),
+                           ("5 s pulls", [RepScript(pull_s=5.0)] * 3),
+                           ("no-pause touch-and-go 1.2 / 1.0 s", _no_pause_touch_and_go(1.2, 1.0))):
+        errors = []
+        cues = []
+        expected = 0
+        for body_name, body in BODIES.items():
+            for seed in range(3):
+                sim = simulate(Scenario(athlete=body, reps=scripts, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                features = _analyse(sim, _half_rate(), _noise("ar", 0.015, "half_rate", label, body_name, seed))
+                errors += _top_errors(sim, features)
+                cues += _cued(features)
+                expected += len(sim.reps)
+        print(f"15 Hz detector, every other frame predicted, {label} (5 bodies x seeds 0-2): {_summary(errors)}; "
+              f"{_cue_summary(cues)}{_not_counted(expected, cues)}")
+    # The wrist proxy with the wrists hidden around the top; a soft lockout's recall, hidden and seen.
+    held = [RepScript(pull_s=1.2)] * 3
+    soft = [RepScript(pull_s=1.2, lockout_deficit_deg=SOFT_LOCKOUT_DEG)] * 3
+    for label, scripts, start_s, end_s in (("held 0.6 s", held, -0.1, 0.3), ("held 0.6 s", held, -0.2, 0.8),
+                                           ("no-pause touch-and-go 1.2 / 1.0 s", _no_pause_touch_and_go(1.2, 1.0), -0.2, 0.2),
+                                           (f"{SOFT_LOCKOUT_DEG:.0f} deg soft lockout held 0.6 s", soft, -0.2, 0.8),
+                                           (f"{SOFT_LOCKOUT_DEG:.0f} deg soft lockout held 0.6 s", soft, 0.0, 0.0)):
+        errors = []
+        cues = []
+        expected = 0
+        for body_name, body in BODIES.items():
+            for seed in range(3):
+                sim = simulate(Scenario(athlete=body, reps=scripts, track_bar=False, seed=seed))
+                hidden = _wrists_hidden([(rep.top_time + start_s, rep.top_time + end_s) for rep in sim.reps])
+                features = _analyse(sim, hidden, _noise("ar", 0.015, "wrists_hidden", label, start_s, body_name, seed))
+                errors += _top_errors(sim, features)
+                cues += _cued(features)
+                expected += len(sim.reps)
+        where = f"wrists hidden from {start_s:+.1f} s to {end_s:+.1f} s of the top" if end_s > start_s else "wrists seen"
+        print(f"proxy {label}, {where} (5 bodies x seeds 0-2): {_summary(errors)}; {_cue_summary(cues)}"
+              f"{_not_counted(expected, cues)}")
 
 
 def sweep_counting() -> None:
