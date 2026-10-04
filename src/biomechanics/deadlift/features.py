@@ -189,11 +189,24 @@ def _flexion_deg(frames: list[FrameMeasure]) -> float:
     return _median([frame.hip_flex_deg for frame in measured]) + _median([frame.knee_flex_deg for frame in measured])
 
 
+# The bar's height in the lockout window, on its lowest plateau: the frames whose
+# running median sits within the band of the lowest. A shrug inside the hold
+# band adds frames above it, which a plain median would follow up.
+def _lockout_level(lockout: list[FrameMeasure], band_m: float) -> float:
+    heights = [frame.bar_up for frame in lockout]
+    smoothed = _running_median(heights, STALL_MEDIAN_FRAMES)
+    finite = [value for value in smoothed if math.isfinite(value)]
+    if not finite:
+        return NAN
+    lowest = min(finite)
+    return _median([height for height, value in zip(heights, smoothed) if value <= lowest + band_m])
+
+
 # The level the bar ended its top at, and where its last climb to it began: the
 # end of its last stall short of the lockout (liftoff when it never stalled).
 def _final_climb(rep: RepTrack, band_m: float) -> _FinalClimb:
     lockout = _lockout_frames(rep)
-    level = _median([frame.bar_up for frame in lockout]) if lockout else rep.top_up
+    level = _lockout_level(lockout, band_m) if lockout else rep.top_up
     climb = _FinalClimb(level, rep.liftoff.t, rep.liftoff.bar_up)
     if not lockout:
         return climb
@@ -253,10 +266,19 @@ def top_time(rep: RepTrack, band_m: float) -> float:
     level, start_t, start_up = _final_climb(rep, band_m)
     if not math.isfinite(level):
         return rep.top_time
-    arrival = next(
-        (frame.t for frame in rep.frames if frame.t >= start_t and frame.bar_up >= level - band_m),
-        rep.top_time,
+    arrival_index = next(
+        (index for index, frame in enumerate(rep.frames) if frame.t >= start_t and frame.bar_up >= level - band_m),
+        None,
     )
+    if arrival_index is None:
+        arrival = earliest = rep.top_time
+    else:
+        arrival = rep.frames[arrival_index].t
+        # A bar lost just before it arrived may have arrived in the gap.
+        first_unseen = arrival_index
+        while first_unseen > 0 and not math.isfinite(rep.frames[first_unseen - 1].bar_up):
+            first_unseen -= 1
+        earliest = rep.frames[first_unseen].t
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
     # A frame above the level has arrived (a shrug, or the noise, is no
     # approach to it); and past TOP_FIT_HOLD_S the hold's noise would outweigh
@@ -265,8 +287,9 @@ def top_time(rep: RepTrack, band_m: float) -> float:
         frame._replace(bar_up=min(frame.bar_up, level)) for frame in rep.frames
         if start_t <= frame.t <= min(leaving, arrival + TOP_FIT_HOLD_S) and frame.bar_up >= (level + start_up) / 2.0
     ]
-    estimate = _event_time(frames, level, band_m, arrival, min(arrival + EVENT_MAX_SHIFT_S, leaving), leaving=False)
-    bar_top = estimate if math.isfinite(estimate) else arrival
+    estimate = _event_time(frames, level, band_m, earliest, min(arrival + EVENT_MAX_SHIFT_S, leaving), leaving=False)
+    # With no fit, a bar that arrived unseen did so in the gap: its middle.
+    bar_top = estimate if math.isfinite(estimate) else (earliest + arrival) / 2.0
     if any(frame.bar_source == BAR_SOURCE_WRIST_PROXY for frame in rep.frames):
         return _joints_locked_time(rep, arrival, bar_top, leaving)
     return bar_top

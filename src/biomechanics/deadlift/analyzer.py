@@ -69,6 +69,9 @@ MIN_NOISE_FRAMES = 5
 TOP_ARRIVAL_BAND_M = 0.005
 # Frames either side of the peak that stand in for a top that never held still.
 TOP_PEAK_WINDOW_S = 0.1
+# On the wrist proxy that peak is the vertex of a parabola through the bar's
+# height this far either side of its highest frame.
+PEAK_FIT_S = 0.3
 # The top hold: frames in TOP with the bar this close to its top height (or two
 # noise bands, on a noisier bar).
 TOP_HOLD_BAND_M = 0.02
@@ -899,13 +902,13 @@ class DeadliftRepAnalyzer:
         if self._left_top(rep, rep.peak_up, velocity) and self._top_reached(rep, rep.frames[rep.peak_index]):
             # A top that never held still (a quick touch-and-go set, or the wrist
             # proxy's noise): the peak was the top.
-            peak = rep.frames[rep.peak_index]
+            peak_t = self._peak_time(rep)
             rep.top_time = self._top_arrival(rep)
             rep.top_up = rep.peak_up
-            rep.lower_start = max(peak.t, self._lowering_start(rep, rep.peak_up, measure.t))
+            rep.lower_start = max(peak_t, self._lowering_start(rep, rep.peak_up, measure.t))
             rep.top_frames = [
                 frame for frame in rep.frames
-                if abs(frame.t - peak.t) <= TOP_PEAK_WINDOW_S and frame.t <= rep.lower_start
+                if abs(frame.t - peak_t) <= TOP_PEAK_WINDOW_S and frame.t <= rep.lower_start
             ]
             self._enter(DeadliftPhase.LOWER, measure.t)
             return
@@ -920,6 +923,23 @@ class DeadliftRepAnalyzer:
         if measure.t - rep.liftoff.t > MAX_PULL_S:
             self._rep = None
             self._enter(DeadliftPhase.FLOOR, measure.t)
+
+    # When a top that never held peaked. On the wrist proxy the highest frame is
+    # the highest of the wrists' noise, up to ~0.15 s off the top with the knees
+    # still bent: there, the vertex of a parabola through the heights around it.
+    @staticmethod
+    def _peak_time(rep: RepTrack) -> float:
+        peak = rep.frames[rep.peak_index]
+        if peak.bar_source != BAR_SOURCE_WRIST_PROXY:
+            return peak.t
+        near = [frame for frame in rep.frames if abs(frame.t - peak.t) <= PEAK_FIT_S and math.isfinite(frame.bar_up)]
+        if len(near) < MIN_NOISE_FRAMES:
+            return peak.t
+        offsets_s = np.asarray([frame.t for frame in near]) - peak.t
+        curvature, slope, _ = np.polyfit(offsets_s, [frame.bar_up for frame in near], 2)
+        if curvature >= 0.0:
+            return peak.t
+        return peak.t + float(np.clip(-slope / (2.0 * curvature), -PEAK_FIT_S, PEAK_FIT_S))
 
     # The top event: the bar's first arrival within TOP_ARRIVAL_BAND_M of its peak.
     @staticmethod

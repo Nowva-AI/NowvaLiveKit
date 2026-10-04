@@ -678,6 +678,24 @@ class TestOcclusionAndDropouts:
                 errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
         assert max(errors) <= MAX_EVENT_ERROR_S
 
+    def test_a_bar_lost_as_it_arrives_at_the_top_dates_the_top_in_the_gap(self):
+        """The fit may date the arrival from the gap's first frame, not only from
+        the first frame the bar is seen again."""
+        errors = []
+        for seed in range(3):
+            scenario = Scenario(reps=[RepScript(pull_s=1.5)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+            sim = simulate(scenario)
+            gaps = [(rep.top_time - 0.1, rep.top_time + 0.3) for rep in sim.reps]
+
+            def lose_the_bar(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+                lost = any(start <= frame.timestamp < end for start, end in gaps)
+                return frame.points, frame.confidences, None if lost else frame.bar
+
+            _, features, _, _ = _analyse(scenario, mutate=lose_the_bar)
+            assert len(features) == len(sim.reps)
+            errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert max(errors) <= MAX_EVENT_ERROR_S
+
     def test_a_bar_tracked_at_half_the_frame_rate_stays_the_bar(self):
         def every_other(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
             return frame.points, frame.confidences, frame.bar if index % 2 == 0 else None
@@ -980,6 +998,31 @@ class TestWristProxyAtPlatformNoise:
         sim, features, _, _ = _analyse(Scenario(track_bar=False))
         assert len(features) == len(sim.reps)
         assert all(math.isnan(f.concentric_velocity_mps) for f in features)
+
+    def test_a_top_with_no_pause_draws_no_more_lockout_cues_than_on_the_tracked_bar(self):
+        """A touch-and-go top never holds: it is judged around its peak, which on
+        the wrist proxy is the vertex of the wrists' height, not their highest
+        noisy frame (up to ~0.15 s early, the knees still bent)."""
+        cued = {True: 0, False: 0}
+        severe = reps = 0
+        for track_bar in (True, False):
+            for body_index, body in enumerate(BODIES):
+                for seed in range(4):
+                    scripts = [RepScript(top_hold_s=0.0, floor_hold_s=0.0)] * 4 + [RepScript(top_hold_s=0.0)]
+                    scenario = Scenario(athlete=body, reps=scripts, track_bar=track_bar,
+                                        bar_noise_m=TRACKED_BAR_NOISE_M if track_bar else 0.0, seed=seed)
+                    noise = _correlated_noise(PLATFORM_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO, 5000 + 100 * body_index + seed)
+                    sim, features, _, _ = _analyse(scenario, mutate=noise)
+                    assert len(features) == len(sim.reps)
+                    reps += len(features) if track_bar else 0
+                    for faults in _faults(features):
+                        lockout = [f for f in faults if f.fault_type == "deadlift_lockout"
+                                   and TIER_RANK[f.severity.value] >= TIER_RANK[f.details["min_tier"]]]
+                        cued[track_bar] += bool(lockout)
+                        severe += any(f.severity.value == "severe" for f in lockout) and not track_bar
+        assert reps == 100
+        assert cued[False] <= cued[True] + reps // 20
+        assert severe == 0
 
     def test_the_top_is_the_hips_and_knees_reaching_the_lockout(self):
         """The wrists' height wanders through the hold; the joints finishing their
@@ -1319,6 +1362,19 @@ class TestSetBehaviour:
                     cued[track_bar] += sum("deadlift_lockout" in rep_cues for rep_cues in _cued(features))
         assert reps == 60
         assert cued[False] <= cued[True] + reps // 10
+
+    def test_a_shrug_inside_the_hold_band_does_not_move_the_top(self):
+        """A 1.5 cm shrug stays in the hold, and the lockout window catches its way
+        down: the lockout's level is the window's lowest plateau, not its median."""
+        errors = []
+        for body in BODIES[:3]:
+            for seed in range(4):
+                scenario = Scenario(athlete=body, reps=[RepScript(top_hold_s=1.2)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed)
+                sim = simulate(scenario)
+                _, features, _, _ = _analyse(scenario, mutate=_shrugged(sim, 0.015, rep_indices=(0, 1, 2)))
+                assert len(features) == len(sim.reps)
+                errors += [abs(measured.top_time - expected.top_time) for measured, expected in zip(features, sim.reps)]
+        assert max(errors) <= SHRUG_TOP_SHIFT_MAX_S
 
     def test_a_shrug_with_the_knees_hidden_is_not_a_slower_rep(self):
         """With the knees hidden nothing tells a stall from a shrug: the pull does

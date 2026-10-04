@@ -32,7 +32,7 @@ rep is counted: at the dead stop, or at the next liftoff for a touch-and-go rep.
 | D6 | `deadlift_lockout` | Incomplete lockout | worst of hip/knee extension deficit, deg; `joint`: `"hip"`/`"knee"` | `deadlift_lockout` | — | moderate | 25 |
 | D5 | `deadlift_lean_back` | Over-extension at the top | deg behind standing | `deadlift_finish_neutral` | — | moderate | 26 |
 | D8 | `deadlift_hip_shift` | Hips shift sideways | ratio of ankle separation; `side` = direction the hips moved | `deadlift_even_feet` | `deadlift_even_feet_left`, `deadlift_even_feet_right` | moderate | 27 |
-| D8b | `deadlift_bar_tilt` | Bar tilts; on the wrist proxy emitted only when the set's recent reps tilt the same way (never on a set's first rep) | cm height difference of the ends; `side` = low end | `deadlift_level_bar` | — | moderate | 28 |
+| D8b | `deadlift_bar_tilt` | Bar tilts | cm height difference of the ends; `side` = low end | `deadlift_level_bar` | — | moderate | 28 |
 | D9 | `deadlift_bent_arms` | Arms bend during the pull | deg elbow flexion vs standing | `deadlift_long_arms` | — | mild | 29 |
 | D10 | `deadlift_velocity_loss` | Bar slower than the set's two fastest reps | pct | — (never cued) | — | `recap` | 30 |
 
