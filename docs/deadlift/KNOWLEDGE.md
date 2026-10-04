@@ -213,12 +213,13 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       noise; a free parabola's vertex, by up to a second on slower pulls; the fit alone, up
       to 0.6 s on faulted lockouts and quick pulls.) No standing reference, no expected
       height: the joints alone. The hips and knees measured on fewer than half the gap's
-      frames (hidden, or carried by the pose tracker, as when the plates hide the feet): the
-      fit alone. A top dated in a gap has no bar speed, so no velocity loss.
+      frames (hidden, or carried by the pose tracker; one knee hidden makes the pipeline
+      mark the legs unmeasured): the fit alone. A top dated in a gap has no bar speed, so
+      no velocity loss.
       The lockout is judged within 0.1 s of the top (0.11 of a quicker pull), the frames
       after it up to where the hips and knees bend 20° past their most extended there (a
-      no-pause top's lowering, quicker than its pull). Dated by the fit alone (no knee
-      measured in the gap's frames), none from before the gap: the fit alone can date a
+      no-pause top's lowering, quicker than its pull). Dated by the fit alone (the joints
+      too little measured in the gap), none from before the gap: the fit alone can date a
       slow pull's top early, onto the climb seen. With the knees measured, a top dated at
       the last frame seen keeps the climb's side of its window. The plates hiding the feet
       leave the legs unmeasured, but the hips and knees (the feet planted, and kept)
@@ -462,6 +463,16 @@ noise.
 - **The knees hidden over part of a lost top's gap:** the joints' first frame seen is late
   for their plateau, and when the bar's fit fails too it dates the top (2 s pulls, knees
   hidden over the gap's first 60 %: 1 of 45 at +0.37 s, noise-free).
+- **The knees hidden through a stall, the bar seen again just after the top:** the joints
+  are too little measured in the gap, the fit alone lands in the stall, and the top is
+  dated there (−0.69 to −0.81 s; a review, round 16). With the bar lost until the
+  lowering, the joints' first frame after the fit (the finish's) catches it.
+- **Failed reps with the knees and bar hidden around their peak, at 2.5 cm:** standing,
+  read on medians within 3 cm of the standing leg length, still reads some as tops (8, 10
+  and 12 cm short: 5, 2 and 1 of 30; none at 1.5 cm).
+- **"Measured" is the pipeline's per-frame flag:** a frame with any foot keypoint missing
+  (the plates) keeps its hips and knees for the gap, Kalman-carried knees included; one
+  knee hidden leaves the legs unmeasured.
 - **No standing reference and the legs unmeasured through the gap:** no expected height
   for the fit, no joints: the top is the last frame seen (−0.23 to −0.40 s), and that rep's
   bar speed is still reported (a review, round 15).

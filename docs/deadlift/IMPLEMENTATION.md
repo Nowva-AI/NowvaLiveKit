@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v28).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v29).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -1011,11 +1011,12 @@ vertical, the same set fakes more than 2 cm of drift.
     (review, round 15). Finding 83 dropped every frame up to the bar's last frame seen from
     a top dated in the gap. A no-pause top lost a frame or two after it is dated at that
     last frame, and its window held the lowering alone: 0.8 / 0.6 s tops lost from 0.03 s
-    after, D6 on 12 of 75 clean reps noise-free and 22 of 75 at 1.5 cm (0 and 1 on acf0e31);
-    with the plates hiding the feet, 12 and 23. The climb is now dropped only when no knee
+    after, D6 on 12 of 75 clean reps noise-free and 22 of 75 at 1.5 cm (0 and 3 on acf0e31);
+    with the plates hiding the feet, 12 and 23 (0 and 1). The climb is now dropped only when no knee
     is measured in the gap's frames, the case of an early fit alone: 0 and 3 of 75; with
     the plates, 0 and 5. Test: no-pause tops lost from 0.03 s after, the feet seen or under
-    the plates, noise-free, no D6.
+    the plates, noise-free, no D6. (Its test for the fit alone is the dating's own since
+    finding 92.)
 
 88. **The plates hiding the feet leave the hips and knees to the lost top** (review, round
     15). The pipeline marks a frame's legs unmeasured when the feet are hidden, but the hips
@@ -1045,7 +1046,51 @@ vertical, the same set fakes more than 2 cm of drift.
     top read +0.27 to +0.37 s late on 45 of 45. It now reads only frames within 0.15 s of
     the fitted top: 1.2 s pulls within 0.05 s at every share hidden; on 2 s pulls one rep
     in 45, whose fit fails, is still dated by the joints' first frame seen (+0.37 s at
-    60 %). Test: the knees hidden over the gap's first 55 %, within 0.15 s.
+    60 %). Test: the knees hidden over the gap's first 55 %, within 0.15 s. (With no frame
+    within 0.15 s, the first after the fitted top is read: finding 93.)
+
+92. **The window drops the climb when the dating used the fit alone** (review, round 16).
+    Finding 87 dropped it when no knee was measured in the gap's window, but the dating
+    takes the fit alone whenever the hips and knees are measured on fewer than half the
+    gap's frames, and the two differ: with the legs carried by the pose tracker, or one knee
+    hidden (the pipeline then marks the legs unmeasured while the knee is read from the
+    other), the fit alone dated the top, early on a slow pull, and the window kept the
+    climb's bent knees (2 s pulls at 1.5 cm: D6 on 7 of 45, and 5–8 of 45 through the
+    pipeline with one knee hidden; 0–1 on 09bd1b5). One test, `_gap_flexion`, now decides
+    both. Tests: the early fit's draw with the knees hidden, the legs carried, or one knee
+    hidden, no D6; through the pipeline with one knee hidden, within the 1-in-10 gate.
+
+93. **The stall check reads the joints' first frame after the fitted top when none is
+    near it** (review, round 16). Finding 91 bounded it to frames within 0.15 s of the
+    fitted top. A grind lost on its way into its stall, the knees hidden through the stall
+    and seen for the finish, has its fit in the stall and no joint frame near it: unvetoed,
+    the top read 0.43–1.14 s early (93 % with a 0.6 s stall: −0.75 to −0.79 s on 45 of 45)
+    and a soft lockout after it went uncued (0 of 45). With no frame within 0.15 s, the
+    first frame after the fitted top (the finish's, bent) is read; frames further before it
+    (the climb's) still are not. Tests: such a grind, clean and with a 15° soft lockout,
+    within 0.15 s and cued on every soft one.
+
+94. **A rep with no leg frame measured no longer raises out of the analyser** (review, round
+    16; pre-existing). With every frame of a rep marked legs-unmeasured (one knee
+    untriangulated from before the setup: the pipeline extrapolates it) and the feet seen,
+    the joints' track was a running median of no frames, which raised out of `observe()`
+    and `process_frame()`; `pipeline_process`'s outer handler then ended the session. It
+    reached that with the top lost from view, on the tracked bar and on the wrist proxy
+    (the wrists hidden across the top). The track is now empty, and its callers already
+    treat that as no joints. Tests: the analyser with the legs unmeasured through the set
+    and every top lost; through the pipeline with one knee hidden from the setup, tracked
+    bar and wrist proxy, every rep counted.
+
+95. **Housekeeping and limits** (review, round 16). The standing leg shortening is a config
+    field (`standing_max_leg_shortening_m`, beside the over-extended lockout's), the legs'
+    shortening one helper, and the standing medians their own frame count. Tests read the
+    standing and over-extended recall at 1.5 cm too. Limits measured by the review:
+    "measured" is the pipeline's per-frame flag, and the plates' exception admits a frame
+    whenever any foot keypoint is missing, Kalman-carried knees included; with the knees
+    hidden through a stall and the bar seen again just after the top (the fit alone), the
+    top is the stall (−0.69 to −0.81 s, as on 09bd1b5); at 2.5 cm, failed reps 8, 10 and
+    12 cm short with the knees and bar hidden around their peak are counted on 5, 2 and 1 of
+    30.
 
 ## Deferred: needs data, hardware or keys (not code)
 
