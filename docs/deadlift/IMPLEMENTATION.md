@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v27).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v28).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -980,7 +980,8 @@ vertical, the same set fakes more than 2 cm of drift.
     pulls (five bodies × seeds 0–2, 1.5 cm): every rep counted, tops within 0.23 s, no cue.
     Tests: legs carried and knees hidden through the gap, 1.2 and 2 s pulls, within 0.15 s,
     no D6; the early fit's draw at 1.5 cm, no D6; through the pipeline, the plates hiding the
-    feet and every top lost, within 0.15 s, no D6.
+    feet and every top lost, within 0.15 s, no D6. (The window rule is narrowed in
+    finding 87.)
 
 84. **A resume on the joints needs a gap of 0.3 s** (review, round 14). Finding 79 decides
     once per gap, but a hold the bar drops out of for a few frames again and again is many
@@ -997,12 +998,54 @@ vertical, the same set fakes more than 2 cm of drift.
     angle), and every rep of a tall lifter was a failed rep. Upright on legs as long as
     standing's (the leg-length test the analyser uses for straight legs) now reads standing
     there. Test: knees and bar hidden from 0.3 s before every top, every rep counted.
+    (One noisy frame within 6 cm counted failed reps: finding 89 reads it on medians,
+    within 3 cm.)
 
 86. **Housekeeping** (review, round 14): the envelope's long-hold rows draw their noise
     keyed by its level too (the 1.5 and 2 cm rows had shared one draw); PLAN's PULL → LOWER
     row no longer names the removed walk. Long lines in the tests and the script stay: the
     repository has no line-length rule (the code this branch builds on has 127 lines over
     120), and wrapping them by the formatter rewrites ~800 lines of the script.
+
+87. **The climb is dropped from a gap-dated top's window only when the fit alone dated it**
+    (review, round 15). Finding 83 dropped every frame up to the bar's last frame seen from
+    a top dated in the gap. A no-pause top lost a frame or two after it is dated at that
+    last frame, and its window held the lowering alone: 0.8 / 0.6 s tops lost from 0.03 s
+    after, D6 on 12 of 75 clean reps noise-free and 22 of 75 at 1.5 cm (0 and 1 on acf0e31);
+    with the plates hiding the feet, 12 and 23. The climb is now dropped only when no knee
+    is measured in the gap's frames, the case of an early fit alone: 0 and 3 of 75; with
+    the plates, 0 and 5. Test: no-pause tops lost from 0.03 s after, the feet seen or under
+    the plates, noise-free, no D6.
+
+88. **The plates hiding the feet leave the hips and knees to the lost top** (review, round
+    15). The pipeline marks a frame's legs unmeasured when the feet are hidden, but the hips
+    and knees are seen (the planted feet are kept): finding 83 dated those tops by the fit
+    alone, which overshoots a quick pull (0.6 s pulls lost from 0.3 s before the top,
+    through the pipeline: +0.45 to +0.59 s on 18 of 18). The joints' track now keeps a
+    frame whose only unmeasured part is the feet. Test: 0.6 s pulls under the plates lost
+    from 0.3 s before, within 0.15 s.
+
+89. **Standing with the knees hidden, on medians within 3 cm** (review, round 15). Finding 85
+    read one frame upright within the over-extended lockout's 6 cm of leg shortening (~40°
+    of knee bend; the knees' standing limit, 20°, is ~1.3 cm): failed reps 10–12 cm short,
+    the bar and knees hidden around their peak at 1.5 cm, were reps on 16 of 60. Standing is
+    now read on 5-frame running medians of the trunk and the legs' length, within 3 cm.
+    Test: such failed reps, none counted.
+
+90. **An over-extended lockout seen while the bar was unseen is a top** (review, round 15;
+    pre-existing). A lockout leaned back 25–40° hangs the bar well short of the expected
+    top; lost from 0.2–0.3 s before it, its highest frame seen was on the climb, and only
+    an upright lifter made it a top: 0 of 60 counted, D5 never cued. Leaned back past the
+    over-extended top on straight legs, seen while the bar was unseen, is now a top too.
+    Test: 25° and 40° lean-backs lost from 0.2 s before, every rep counted and D5 cued.
+
+91. **The stall check reads the joints near the fitted top only** (review, round 15). It took
+    the joints' nearest frame to the fitted top however far off: the knees hidden over the
+    first 50–62 % of the gap, that frame was the climb's at the gap's start, bent, and the
+    top read +0.27 to +0.37 s late on 45 of 45. It now reads only frames within 0.15 s of
+    the fitted top: 1.2 s pulls within 0.05 s at every share hidden; on 2 s pulls one rep
+    in 45, whose fit fails, is still dated by the joints' first frame seen (+0.37 s at
+    60 %). Test: the knees hidden over the gap's first 55 %, within 0.15 s.
 
 ## Deferred: needs data, hardware or keys (not code)
 

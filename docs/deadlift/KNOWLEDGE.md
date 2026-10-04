@@ -194,8 +194,11 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   - **A top lost from view across its peak** (the bar unseen for two frames or more beside
     its highest one; a single unseen frame is a skipped detection): the highest frame seen
     is on the climb, or on the lowering. If it sits short of the expected top, the lifter
-    seen standing while the bar was unseen makes it a top (the knees hidden too: upright,
-    on legs as long as standing's).
+    seen standing while the bar was unseen makes it a top, and so does an over-extended
+    lockout (leaned back past 10° on straight legs, the bar hanging low). With the knees
+    hidden too, both are read on 5-frame running medians of the trunk and the legs' length:
+    upright within 3 cm of the standing length (the knees' own standing limit, 20°, is
+    ~1.3 cm), or leaned back within the over-extended lockout's 6 cm.
     - On the tracked bar, lost on its way up (unseen right after its highest frame), the
       top is where the hips and knees first come within 5° of their plateau in the gap (the
       20th percentile of their flexion there: through keypoint noise their least is a dip,
@@ -214,8 +217,12 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       fit alone. A top dated in a gap has no bar speed, so no velocity loss.
       The lockout is judged within 0.1 s of the top (0.11 of a quicker pull), the frames
       after it up to where the hips and knees bend 20° past their most extended there (a
-      no-pause top's lowering, quicker than its pull), and none from before the gap (the
-      climb seen: the fit alone can date a slow pull's top early).
+      no-pause top's lowering, quicker than its pull). Dated by the fit alone (no knee
+      measured in the gap's frames), none from before the gap: the fit alone can date a
+      slow pull's top early, onto the climb seen. With the knees measured, a top dated at
+      the last frame seen keeps the climb's side of its window. The plates hiding the feet
+      leave the legs unmeasured, but the hips and knees (the feet planted, and kept)
+      still date and check the top.
     - Seen again coming down higher than it was last seen going up (a gap before its highest
       frame), the top is dated the same way from the frame before the gap.
     - A grind lost through its finish: the stall is seen and taken for the top (TOP), and the
@@ -447,7 +454,17 @@ noise.
 - **A stall with the knees hidden is the top.** Nothing then tells it from a shrug (both hold
   the hips), so the pull does not resume; its top is dated between the stall and the
   lockout (a review measured −0.7 to +0.3 s from the lockout on 8–10 % stalls), with no
-  false cue.
+  false cue while the bar is seen. With the bar hidden too through the finish and the
+  hold, the stall is taken for the lockout and judged there: D6 on every such grind (a
+  review, round 15: 45 of 45).
+- **The knees hidden through a hold** leave D6 unjudged: a 15° soft lockout is counted but
+  not cued (a review, round 15: 0 of 45).
+- **The knees hidden over part of a lost top's gap:** the joints' first frame seen is late
+  for their plateau, and when the bar's fit fails too it dates the top (2 s pulls, knees
+  hidden over the gap's first 60 %: 1 of 45 at +0.37 s, noise-free).
+- **No standing reference and the legs unmeasured through the gap:** no expected height
+  for the fit, no joints: the top is the last frame seen (−0.23 to −0.40 s), and that rep's
+  bar speed is still reported (a review, round 15).
 - **A shrug before the top registers** [shrug] (in its first frames, before the bar has read
   still for 3 frames) becomes the top when there is no standing reference: with every rep
   shrugged, 0–4 of 48 reps +0.83–0.87 s late with the knees seen (at 2.5 cm; none
