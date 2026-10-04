@@ -692,21 +692,43 @@ def sweep_gaps() -> None:
         lockout = sum("deadlift_lockout" in rep for rep in cues)
         print(f"no-pause touch-and-go {pull_s} / {lower_s} s, bar lost 0.2 s either side of reps 2-4's tops (5 bodies x "
               f"seeds 0-3): {exact}/{sets} sets exact; {_summary(errors)}; D6 cued on {lockout} of {len(cues)}")
-    # A 0.6 s hold never seen: the bar lost until the lowering.
-    for start_s, end_s in ((-0.2, 0.8), (-0.1, 0.7), (0.03, 0.75)):
+    # A 0.6 s hold never seen: the bar lost until the lowering, by pull duration and
+    # when the loss began; then, on 1.2 s pulls, lost from just before the top or
+    # just after it arrived.
+    holds = [(pull_s, start_s, 0.8) for pull_s in (1.2, 1.5, 2.0, 2.5, 5.0) for start_s in (-0.4, -0.3, -0.2)]
+    for pull_s, start_s, end_s in holds + [(1.2, -0.1, 0.7), (1.2, 0.03, 0.75)]:
         errors = []
+        cues = []
         slowed = sets = 0
-        for body_name in ("default", "short", "tall"):
+        for body_name, body in BODIES.items():
             for seed in range(3):
-                sim = simulate(Scenario(athlete=BODIES[body_name], reps=[RepScript(pull_s=1.2)] * 3,
+                sim = simulate(Scenario(athlete=body, reps=[RepScript(pull_s=pull_s)] * 3,
                                         bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
                 lost = _bar_lost([(rep.top_time + start_s, rep.top_time + end_s) for rep in sim.reps])
-                features = _analyse(sim, lost, _noise("ar", 0.015, "gaps_hold", start_s, body_name, seed))
+                features = _analyse(sim, lost, _noise("ar", 0.015, "gaps_hold", pull_s, start_s, body_name, seed))
                 errors += _top_errors(sim, features)
+                cues += _cued(features)
                 sets += 1
                 slowed += any("deadlift_velocity_loss" in rep for rep in _judged(features))
-        print(f"1.2 s pulls held 0.6 s, bar lost from {start_s:+.2f} s to {end_s:+.2f} s of the top (3 bodies x seeds "
-              f"0-2): {_summary(errors)}; D10 judged in {slowed} of {sets} sets")
+        lockout = sum("deadlift_lockout" in rep for rep in cues)
+        print(f"{pull_s} s pulls held 0.6 s, bar lost from {start_s:+.2f} s to {end_s:+.2f} s of the top (5 bodies x "
+              f"seeds 0-2): {_summary(errors)}; D6 cued on {lockout} of {len(cues)}; D10 judged in {slowed} of {sets} sets")
+    # A grind lost through its finish and hold, as the hold rows lose it.
+    for fraction in (0.93, 0.95, 0.97):
+        grind = RepScript(pull_s=1.6, stall_fraction=fraction, stall_s=0.6, finish_s=0.4)
+        errors = []
+        cues = []
+        for body_name in ("default", "short", "tall"):
+            for seed in range(3):
+                sim = simulate(Scenario(athlete=BODIES[body_name], reps=[grind] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                        seed=seed))
+                lost = _bar_lost([(rep.top_time - 0.2, rep.top_time + 0.8) for rep in sim.reps])
+                features = _analyse(sim, lost, _noise("ar", 0.015, "gaps_grind_hold", fraction, body_name, seed))
+                errors += _top_errors(sim, features)
+                cues += _cued(features)
+        lockout = sum("deadlift_lockout" in rep for rep in cues)
+        print(f"grind {fraction:.0%} (stall 0.6 s, finish 0.4 s), bar lost from 0.2 s before the top to 0.8 s after "
+              f"(3 bodies x seeds 0-2): {_summary(errors)}; D6 cued on {lockout} of {len(cues)}")
     # A 15 Hz detector through the tracker.
     for label, scripts in (("0.6 s pulls", [RepScript(pull_s=0.6)] * 3), ("1.2 s pulls", [RepScript(pull_s=1.2)] * 3),
                            ("5 s pulls", [RepScript(pull_s=5.0)] * 3),

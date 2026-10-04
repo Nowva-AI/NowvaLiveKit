@@ -106,8 +106,9 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       quicker than ~0.9 s, whose knees still bend 0.1 s from the top), chosen by time and
       never by the angles judged (a window chosen as the most extended selects the noise: a
       14° soft lockout read ~4° straighter at 2 cm noise). After a grind the hold ends locked
-      out. A top whose bar went unseen right after its frames and was seen leaving more than
-      0.5 s later (a hold unseen until the lowering) is judged on all of them.
+      out. A top whose frames end in a gap the bar was seen leaving more than 0.5 s later (a
+      top lost from view) is judged on all of them; a hold seen only before such a gap is
+      unjudged (its frames may be the bar's last crawl into the top).
     - **A peak on the wrist proxy:** its highest frame is only the highest of the wrists'
       noise, so the peak is the vertex of a parabola through the bar's 5-frame running median
       within 0.3 s of it, refined within 0.1 s with each side's own curvature (the steeper at
@@ -194,18 +195,26 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
     its highest one; a single unseen frame is a skipped detection): the highest frame seen
     is on the climb, or on the lowering. If it sits short of the expected top, the lifter
     seen standing while the bar was unseen makes it a top.
-    - On the tracked bar, lost on its way up (unseen right after its highest frame), the top
-      is where its last measured rise arrives: the mean of a parabola's vertex through the
-      last 0.3 s of the rise (alone, late: the deceleration grows into the top) and the last
-      speed slowing evenly into the expected top height (alone, scattered by that height's
-      noise), kept within the unseen frames. Where the hips and knees over the 0.15 s after
-      it are still 20° bent past their most extended (lost on its way into a stall), or the
-      bar was not slowing, the top is where they first came within 5° of their most
-      extended. Through a hold the joints are flat: their most extended frame alone could be
-      anywhere in it. The lockout is judged within 0.1 s of the top (0.11 of a quicker pull).
-    - Seen again higher (a gap before the highest frame), the bar arrived in or after the
-      gap, which the features date (Top, above); the lockout is judged where the hips and
-      knees were most extended while it was unseen.
+    - On the tracked bar, lost on its way up (unseen right after its highest frame, or after
+      the frames that followed it within the noise band), the top is where its last measured
+      rise arrives: slowing evenly into the expected top height, the bar's height below that
+      top is a parabola in time, so its square root is a line; fitted through the last 0.3 s
+      of the rise, the line reaches zero at the top, kept within the gap. (Two frames' speed,
+      the same model, scattered ±20 % with 3 mm of bar noise; a free parabola's vertex, by up
+      to a second on slower pulls.) Where the hips and knees over the 0.15 s after it are
+      still 20° bent past their plateau in the gap (the 20th percentile of their flexion
+      there: through keypoint noise their least is a dip, against which a slow pull's last
+      extension read as a stall), lost on its way into a stall, the top is where they first
+      came within 5° of their most extended. A bar no longer rising
+      faster than a held one (0.05 m/s) when last seen had arrived: its top is the one seen.
+      A top dated in a gap has no bar speed, so no velocity loss. The lockout is judged within
+      0.1 s of the top (0.11 of a quicker pull).
+    - Seen again coming down higher than it was last seen going up (a gap before its highest
+      frame), the top is dated the same way from the frame before the gap.
+    - A grind lost through its finish: the stall is seen and taken for the top (TOP), and the
+      bar is unseen above it. With the bar unseen, the hips and knees extending by the resume
+      deficit (8°) out of the held stall resume the pull, and its top is where they first
+      come within 5° of their plateau in the gap.
     - On the wrist proxy, lost either side of the wrists' highest frame, the lockout is
       judged where the hips and knees were most extended while the wrists were unseen (in a
       hold any of its frames is a lockout frame), and the joints date the top (Top, above).
@@ -445,8 +454,19 @@ noise.
 - **A bar lost for a second on its way to the top** [gaps] (1.5 cm AR(0.8)): lost mid-pull
   through the top, its last speed finishes it late (+0.10 to +0.31 s on a 1.5 s pull); lost
   through a grind's whole finish, the joints date it, up to +0.33 s on 2–3 of 27. A 0.6 s
-  hold lost from 0.2 s before the top until the lowering (1.2 s pulls): +0.05 to +0.18 s, its
-  speed seen 0.2 s before the top finishing it late; no velocity loss.
+  hold lost from 0.2–0.4 s before the top until the lowering is dated by a fit of the bar's
+  last rise into the expected top height: on 1.2–2.5 s pulls, medians 0.03–0.13 s, none of
+  540 beyond 0.3 s; a 1.2 s pull lost from 0.4 s before its top is extrapolated, +0.04 to
+  +0.20 s. On a slow pull the fit can land 0.1–0.15 s early where the hips and knees,
+  wandering with the noise, still read clearly bent, and they then date it late (a review's
+  draws: 1 of 135 at +0.33 s). No velocity loss: a top dated in a gap has no speed.
+- **A 5 s pull's top lost from view** [gaps]: the crawl into it is held still before the gap,
+  so TOP is entered on the crawl and the top is the crawl's end: medians 0.24–0.43 s late or
+  early, up to 29 of 45 beyond 0.3 s, and D6 on 3 of 45 lost from 0.3–0.4 s before the top.
+- **A grind stalled 3 % short and lost through its finish and hold** [gaps]: the pull resumes
+  only on the hips and knees straightening 8° past the held stall while the bar is unseen; at
+  97 % they straighten less than that under 1.5 cm noise on 6 of 27 reps, which are dated at
+  the stall (a second early), and 2 of 27 draw D6. At 93–95 %, no D6.
 - **A grind 3–4 % short finishing over a second** [tops] (five bodies): its last centimetre
   or two has too few frames clear of the noise band to fit, and the bar's first frame at its
   level dates it: 0.4 s early on a median at 96 %, up to 0.67 s at 97 %. The fallbacks tried
