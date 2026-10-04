@@ -195,26 +195,31 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
     its highest one; a single unseen frame is a skipped detection): the highest frame seen
     is on the climb, or on the lowering. If it sits short of the expected top, the lifter
     seen standing while the bar was unseen makes it a top.
-    - On the tracked bar, lost on its way up (unseen right after its highest frame, or after
-      the frames that followed it within the noise band), the top is where its last measured
-      rise arrives: slowing evenly into the expected top height, the bar's height below that
-      top is a parabola in time, so its square root is a line; fitted through the last 0.3 s
-      of the rise, the line reaches zero at the top, kept within the gap. (Two frames' speed,
-      the same model, scattered ±20 % with 3 mm of bar noise; a free parabola's vertex, by up
-      to a second on slower pulls.) Where the hips and knees over the 0.15 s after it are
-      still 20° bent past their plateau in the gap (the 20th percentile of their flexion
-      there: through keypoint noise their least is a dip, against which a slow pull's last
-      extension read as a stall), lost on its way into a stall, the top is where they first
-      came within 5° of their most extended. A bar no longer rising
-      faster than a held one (0.05 m/s) when last seen had arrived: its top is the one seen.
-      A top dated in a gap has no bar speed, so no velocity loss. The lockout is judged within
-      0.1 s of the top (0.11 of a quicker pull).
+    - On the tracked bar, lost on its way up (unseen right after its highest frame), the
+      top is where the hips and knees first come within 5° of their plateau in the gap (the
+      20th percentile of their flexion there: through keypoint noise their least is a dip,
+      and they wander through a hold), refined by the bar's last measured rise: slowing
+      evenly into the expected top height, the bar's height below that top is a parabola in
+      time, so its square root is a line; fitted through the last 0.3 s of the rise, the
+      line reaches zero at the top, no later than the gap's end. The fit dates it unless the
+      hips and knees at the fitted top are still 20° bent past their plateau (lost on its
+      way into a stall) or reached it more than 0.15 s before (the fit overshoots: a soft or
+      leaned-back lockout short of the expected top height, a quick pull not yet slowing
+      into it, or a bar seen arriving). (Two frames' speed scattered ±20 % with 3 mm of bar
+      noise; a free parabola's vertex, by up to a second on slower pulls; the fit alone, up
+      to 0.6 s on faulted lockouts and quick pulls.) No standing reference, no expected
+      height: the joints alone. A top dated in a gap has no bar speed, so no velocity loss.
+      The lockout is judged within 0.1 s of the top (0.11 of a quicker pull), the frames
+      after it up to where the hips and knees bend 20° past their most extended there (a
+      no-pause top's lowering, quicker than its pull).
     - Seen again coming down higher than it was last seen going up (a gap before its highest
       frame), the top is dated the same way from the frame before the gap.
     - A grind lost through its finish: the stall is seen and taken for the top (TOP), and the
-      bar is unseen above it. With the bar unseen, the hips and knees extending by the resume
-      deficit (8°) out of the held stall resume the pull, and its top is where they first
-      come within 5° of their plateau in the gap.
+      bar is unseen above it. When the bar is seen again after the gap, the hips and knees
+      over the whole gap (their medians) having extended past the held stall by twice the
+      resume deficit together (16°) resume the pull, and its top is dated as above. Decided
+      once over the gap: frame by frame, the keypoint noise of a long unseen hold resumed
+      soft lockouts and holds without a standing reference.
     - On the wrist proxy, lost either side of the wrists' highest frame, the lockout is
       judged where the hips and knees were most extended while the wrists were unseen (in a
       hold any of its frames is a lockout frame), and the joints date the top (Top, above).
@@ -454,19 +459,23 @@ noise.
 - **A bar lost for a second on its way to the top** [gaps] (1.5 cm AR(0.8)): lost mid-pull
   through the top, its last speed finishes it late (+0.10 to +0.31 s on a 1.5 s pull); lost
   through a grind's whole finish, the joints date it, up to +0.33 s on 2–3 of 27. A 0.6 s
-  hold lost from 0.2–0.4 s before the top until the lowering is dated by a fit of the bar's
-  last rise into the expected top height: on 1.2–2.5 s pulls, medians 0.03–0.13 s, none of
-  540 beyond 0.3 s; a 1.2 s pull lost from 0.4 s before its top is extrapolated, +0.04 to
-  +0.20 s. On a slow pull the fit can land 0.1–0.15 s early where the hips and knees,
-  wandering with the noise, still read clearly bent, and they then date it late (a review's
-  draws: 1 of 135 at +0.33 s). No velocity loss: a top dated in a gap has no speed.
-- **A 5 s pull's top lost from view** [gaps]: the crawl into it is held still before the gap,
-  so TOP is entered on the crawl and the top is the crawl's end: medians 0.24–0.43 s late or
-  early, up to 29 of 45 beyond 0.3 s, and D6 on 3 of 45 lost from 0.3–0.4 s before the top.
+  hold lost from 0.2–0.4 s before the top until the lowering is dated by the hips and knees
+  reaching their plateau, refined by the bar's fit: on 0.6–2.5 s pulls, medians 0–0.10 s, 3
+  of 675 beyond 0.3 s (max 0.41 s). The fit's expected height is the standing pose's: a
+  lockout that ends lower (soft, leaned back) or higher than standing moves the fit, and the
+  joints bound it at the cost of their own noise (a 1.2 s pull lost from 0.4 s before its
+  top, −0.07 to +0.17 s). No velocity loss: a top dated in a gap has no speed.
+- **A slow pull's crawl into its top, lost from view** [gaps]: the crawl is held still
+  before the gap, so TOP is entered on it and the top is the crawl's end: 5 s pulls, medians
+  0.24–0.43 s, up to 30 of 45 beyond 0.3 s, D6 on 4–5 of 45 lost from 0.3–0.4 s before the
+  top; 2.5 s pulls, 1 of 135 (−0.41 s, D6).
 - **A grind stalled 3 % short and lost through its finish and hold** [gaps]: the pull resumes
-  only on the hips and knees straightening 8° past the held stall while the bar is unseen; at
-  97 % they straighten less than that under 1.5 cm noise on 6 of 27 reps, which are dated at
-  the stall (a second early), and 2 of 27 draw D6. At 93–95 %, no D6.
+  when the hips and knees over the gap extended past the held stall by twice the resume
+  deficit together; the hips finish a 97 % stall by only 8.5–9°, and under 1.5 cm noise 10
+  of 27 never resume, are dated at the stall (a second early), and 4 of 27 draw D6. At
+  93–95 %, no D6.
+- **A no-pause top lost from view, quick lowering** [gaps]: dated a frame late by the fit,
+  its window takes the lowering's first bent frame: D6 on 1 of 60 at 0.9 / 0.8 s (1.5 cm).
 - **A grind 3–4 % short finishing over a second** [tops] (five bodies): its last centimetre
   or two has too few frames clear of the noise band to fit, and the bar's first frame at its
   level dates it: 0.4 s early on a median at 96 %, up to 0.67 s at 97 %. The fallbacks tried
@@ -476,7 +485,10 @@ noise.
   (max 0.33 s). The lockout is then judged where the hips and knees were most extended while
   the wrists were unseen: a window chosen by the angles it judges reads straight, and a 15°
   soft lockout is cued on 38 of 45 reps (45 of 45 seen). No false cue on 165 clean reps
-  hidden there, or 0.2 s either side of a no-pause top.
+  hidden there, or 0.2 s either side of a no-pause top. Hidden from just after a no-pause
+  top (0.07 s) to 0.4 s after, the lockout is judged on the lowering's first frames: D6 on
+  8 of 75 clean reps at 1.5 cm, over the 1-in-10 gate (a review, round 13; unchanged since
+  92fe516).
 - **Everything at 15 fps** (PLAN §9's second degraded mode) is untested: the analyser
   counts frames in a few places tuned on a 30 fps pose stream (`IMPLEMENTATION.md`,
   finding 67). Pose at 30 Hz with the bar detector at 15 Hz is tested.

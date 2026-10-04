@@ -695,7 +695,7 @@ def sweep_gaps() -> None:
     # A 0.6 s hold never seen: the bar lost until the lowering, by pull duration and
     # when the loss began; then, on 1.2 s pulls, lost from just before the top or
     # just after it arrived.
-    holds = [(pull_s, start_s, 0.8) for pull_s in (1.2, 1.5, 2.0, 2.5, 5.0) for start_s in (-0.4, -0.3, -0.2)]
+    holds = [(pull_s, start_s, 0.8) for pull_s in (0.6, 1.2, 1.5, 2.0, 2.5, 5.0) for start_s in (-0.4, -0.3, -0.2)]
     for pull_s, start_s, end_s in holds + [(1.2, -0.1, 0.7), (1.2, 0.03, 0.75)]:
         errors = []
         cues = []
@@ -729,6 +729,52 @@ def sweep_gaps() -> None:
         lockout = sum("deadlift_lockout" in rep for rep in cues)
         print(f"grind {fraction:.0%} (stall 0.6 s, finish 0.4 s), bar lost from 0.2 s before the top to 0.8 s after "
               f"(3 bodies x seeds 0-2): {_summary(errors)}; D6 cued on {lockout} of {len(cues)}")
+    # Faulted lockouts (15 deg leaned back, 15 deg soft) on 1.2 s pulls held 0.6 s, the bar lost
+    # until the lowering from before the top, or seen arriving first: dated, and cued.
+    faulted = (("15 deg lean-back", RepScript(pull_s=1.2, lean_back_deg=15.0), "deadlift_lean_back"),
+               ("15 deg soft lockout", RepScript(pull_s=1.2, lockout_deficit_deg=15.0), "deadlift_lockout"))
+    for label, script, fault in faulted:
+        for start_s in (-0.2, 0.05, 0.1):
+            errors = []
+            cues = []
+            for body_name, body in BODIES.items():
+                for seed in range(3):
+                    sim = simulate(Scenario(athlete=body, reps=[script] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                            seed=seed))
+                    lost = _bar_lost([(rep.top_time + start_s, rep.top_time + 0.8) for rep in sim.reps])
+                    features = _analyse(sim, lost, _noise("ar", 0.015, "gaps_faulted", label, start_s, body_name, seed))
+                    errors += _top_errors(sim, features)
+                    cues += _cued(features)
+            cued = sum(fault in rep for rep in cues)
+            print(f"{label} held 0.6 s, bar lost from {start_s:+.2f} s to +0.80 s of the top (5 bodies x seeds 0-2): "
+                  f"{_summary(errors)}; {fault} cued on {cued} of {len(cues)}")
+    # A 1.5 s hold seen for 0.15 s (PULL -> TOP), then lost until 0.2 s into the lowering: nothing
+    # stalled, so nothing resumes (clean, a 15 deg soft lockout, no standing reference).
+    long_holds = (("clean", RepScript(pull_s=1.2, top_hold_s=1.5), 1.5),
+                  ("15 deg soft lockout", RepScript(pull_s=1.2, top_hold_s=1.5, lockout_deficit_deg=15.0), 1.5),
+                  ("no standing reference", RepScript(pull_s=1.2, top_hold_s=1.5), 0.5))
+    for sigma_m in (0.015, 0.02):
+        for label, script, stance_s in long_holds:
+            errors = []
+            for body_name, body in BODIES.items():
+                for seed in range(3):
+                    sim = simulate(Scenario(athlete=body, reps=[script] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed,
+                                            approach_s=stance_s, stance_s=stance_s))
+                    lost = _bar_lost([(rep.top_time + 0.15, rep.top_time + 1.7) for rep in sim.reps])
+                    errors += _top_errors(sim, _analyse(sim, lost, _noise("ar", sigma_m, "gaps_seen_hold", label,
+                                                                           body_name, seed)))
+            print(f"{label}, 1.5 s hold seen 0.15 s then lost until 0.2 s into the lowering, {sigma_m * 100:.1f} cm AR "
+                  f"(5 bodies x seeds 0-2): {_summary(errors)}")
+    # No standing reference, every top lost (no expected top height to fit to).
+    errors = []
+    for body_name, body in BODIES.items():
+        for seed in range(3):
+            sim = simulate(Scenario(athlete=body, reps=[RepScript(pull_s=1.5)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed, approach_s=0.5, stance_s=0.5))
+            lost = _bar_lost([(rep.top_time - 0.3, rep.top_time + 0.8) for rep in sim.reps])
+            errors += _top_errors(sim, _analyse(sim, lost, _noise("ar", 0.015, "gaps_no_reference", body_name, seed)))
+    print(f"no standing reference, 1.5 s pulls held 0.6 s, bar lost from -0.30 s to +0.80 s of every top "
+          f"(5 bodies x seeds 0-2): {_summary(errors)}")
     # A 15 Hz detector through the tracker.
     for label, scripts in (("0.6 s pulls", [RepScript(pull_s=0.6)] * 3), ("1.2 s pulls", [RepScript(pull_s=1.2)] * 3),
                            ("5 s pulls", [RepScript(pull_s=5.0)] * 3),
