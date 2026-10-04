@@ -92,10 +92,12 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   - **A stall is not a top.** A bar that stalls short of lockout (a grind), or anywhere with
     no standing reference to expect the top at (a hitch), can read as a top. The pull resumes
     when the hips or knees held at least 8° short of standing (D6's mild threshold) or,
-    without a standing reference, have extended that much since the hold (over the last 5
-    frames), and the bar rises above the top it held by the hold band. A shrug or a lockout
-    settling upward rises on straight legs, so it never resumes the pull. One frame, against
-    the whole band: a median clearing a smaller band resumed soft lockouts on the noise.
+    without a standing reference, the hips and the knees have both extended that much since
+    the hold (over the last 5 frames), and the bar rises above the top it held by the hold
+    band. A shrug or a lockout settling upward rises on straight legs, so it does not resume
+    the pull; with the knees hidden nothing tells the two apart, and the pull never resumes
+    (a stall there stays the top). One frame, against the whole band: a median clearing a
+    smaller band resumed soft lockouts on the noise.
   - A grind closer to the lockout than the hold band stays in TOP, its stall inside the hold.
     The features time its top and judge its lockout from the bar's last climb:
     - **Judging the lockout:** D6 and D5 are read on the hold's last 0.5 s before the
@@ -108,23 +110,24 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       A noise dip is not flat for that long, a slow approach rises, and a shrug lifts the bar
       off a lockout as straight as the rest of it.
     - **The top** is the arrival at the lockout's level on that climb, fitted (§2, Events)
-      over the climb's upper half and from below, since a climb out of a stall starts flat
-      and a shrug above the level is no approach to it.
+      over the climb's upper half and the hold's first 0.2 s, from below: a climb out of a
+      stall starts flat, a frame above the level has arrived, and more of the hold would
+      outweigh the few frames of a short last climb. A dropped bar frame is no height.
     - **On the wrist proxy** the wrists' noise hides a stall a few cm short, and a slow
       pull's last centimetres, inside the hold. The top there is the hips and knees reaching
       the lockout: their summed flexion (5-frame running median) within 5° of the lockout's,
       from the bar's arrival at its level. It is searched no later than 0.5 s after the bar's
       own top, or after the joints' last frame still 20° more bent than the lockout before
       the lockout window, so the angles' slow wander over a long hold does not move it.
-  - Tested: grinds 2.3–5.8 cm short on the tracked bar are timed within one frame, and one
-    finishing its last 2.5 cm over 1 s within 0.15 s (median; those last 0.17 s move the bar
-    under 2 mm, inside its noise). On the wrist proxy at 1.5 cm AR(0.8) keypoint noise, 30
+  - Tested: grinds 2.3–5.8 cm short on the tracked bar are timed within one frame, one
+    finishing its last 2.5 cm over 0.3 s within 0.2 s, and over 1 s within 0.07 s (median;
+    its last 0.17 s move the bar under 2 mm, inside its noise). On the wrist proxy at 1.5 cm AR(0.8) keypoint noise, 30
     reps each: plain tops median 67 ms (max 0.17 s), grinds 3 cm short 33 ms (max 0.17 s,
     no false lockout cue), soft lockouts 67 ms (max 0.30 s); slow 5 s pulls are dated early,
     median 0.23 s (max 0.47 s), the joints creeping their last few degrees. A stall about
     1 cm short, with the knees inside D6's mild threshold of standing, is the top on the
     tracked bar and is dated at the stall, with no lockout cue. A 1.5–4 cm shrug, with or
-    without a standing reference, moves the top at most 0.05 s (0.18 s for 1.5 cm on a first
+    without a standing reference, the knees seen or hidden, moves the top at most 0.05 s (0.18 s for 1.5 cm on a first
     rep with no reference), with no velocity loss read.
 - **Dead stop:** within 2 cm of the rest, and either still for 3 frames or there for 0.3 s.
 - **Touch-and-go:**
@@ -179,6 +182,7 @@ NaN means "not measured", never 0.
 | `setup_hip_band_low/high_cm` | the setup model's band (§5) | setup window | D4 |
 | `setup_trunk_deg` | trunk angle, deg forward of vertical | setup window | context |
 | `trunk_change_liftoff_knee_deg` | (trunk at knee pass − trunk at liftoff) − the model's predicted change; the raw change when there is no model. Liftoff: median over 0.2 s before it; knee pass: a parabola fitted through the 0.2 s leading to it (a line with 4–5 frames). A line read a 0.6 s pull's accelerating rise up to 0.12 low in rise ratio; the parabola reads within 0.04 at 0.6–3 s pulls, with no more noise | liftoff → knee pass | D2 size |
+| `set_bar_tilt_cm` | median left-above-right tilt over the set's last 3 reps, this one included, signed, cm; NaN until two | set | D8b gate (wrist proxy) |
 | `hip_shoulder_rise_ratio` | hip rise ÷ shoulder rise over the same window, same estimates (> 1 = the hips out-rose the chest) | liftoff → knee pass | D2 gate |
 | `set_rise_ratio` | median `hip_shoulder_rise_ratio` over the set's last 3 reps, this one included; NaN until two | set | D2 gate |
 | `bar_drift_cm` | p90 of the bar centre's forward travel from its liftoff position, cm (away from the legs only) | pull | D3 |
@@ -187,7 +191,7 @@ NaN means "not measured", never 0.
 | `hip_shift_ratio` | hip midpoint's sideways position vs the locked midfoot ÷ ankle separation, both along the lifter's own left-right (below), as the median over the second half of the pull minus the median over the first fifth (> 0 = toward the right foot) | pull | D8 |
 | `bar_tilt_cm` | p90 of the left hub's height above the right hub, on a 5-frame running median, cm. On the proxy, the hands' height difference carried out to the 1.70 m hub span, as the median from mid-pull through the top hold | pull | D8b |
 | `elbow_flexion_deg` | p90 of the sagittal elbow bend minus standing, deg | pull | D9 |
-| `concentric_velocity_mps` | bar rise ÷ (top − liftoff), m/s | pull | D10 |
+| `concentric_velocity_mps` | bar rise ÷ (top − liftoff), m/s; tracked bar only (NaN on the wrist proxy, so no speed in the recap, the spoken summary or the diagnosis) | pull | D10 |
 | `velocity_loss_pct` | loss against the mean of the set's two fastest reps, % | set | D10 |
 
 **References:**
@@ -240,7 +244,7 @@ at or above its minimum tier (`details.min_tier`).
 | D6 | Incomplete lockout | 8 / 12 / 20° | moderate | Against the lifter's own standing angles, so it is not anatomy |
 | D5 | Lean-back | 8 / 12 / 18° | moderate | The same reference. Gravity-sensitive: moderate on the body vertical |
 | D8 | Hip shift | 0.10 / 0.15 / 0.22 of ankle separation | moderate | 0.10 is ~3 cm at a hip-width stance |
-| D8b | Bar tilt | 3 / 5 / 7 cm hub to hub | moderate (severe on the wrist proxy) | ×1.5 on the wrist proxy, where the hands' noise is carried ~3× out to the hubs |
+| D8b | Bar tilt | 3 / 5 / 7 cm hub to hub | moderate (severe on the wrist proxy) | ×1.5 on the wrist proxy, where the hands' noise is carried ~3× out to the hubs. There it reads the smaller of this rep's tilt and the median of the set's last 3 reps (`set_bar_tilt_cm`, signed), to the same side, and nothing on a set's first rep: the noise tilts each rep its own way, an uneven pull repeats |
 | D9 | Bent arms | 15 / 25 / 35° | mild | Elbows should stay long. Measured against standing |
 | D10 | Velocity loss | 20 / 30 / 40 % | recap | Sánchez-Medina 2011. Fatigue is load advice, never a mid-set cue. Not emitted on the wrist proxy |
 
@@ -345,5 +349,16 @@ Outside it:
 - **Event timing on the wrist proxy** is not held to the 100 ms gate. Its top is the hips and
   knees reaching the lockout: a slow 5 s pull is dated ~0.25 s early (median at 1.5 cm
   AR(0.8)), as the joints creep their last few degrees, and noise-free proxy events read up
-  to ~0.1 s early. With the knees hidden at the top, the bar's own fit dates it.
+  to ~0.1 s early. With the knees hidden at the top, the bar's own fit dates it (−0.2 to
+  +0.57 s at 2 cm). A 12° soft lockout held 2 s at 2 cm AR(0.8): 2 of 30 tops 0.5–1.1 s late,
+  where the angles' slow wander reads the hold ~20° more bent than its end.
+- **A stall with the knees hidden is the top.** Nothing then tells it from a shrug (both
+  hold the hips), so the pull does not resume; its top is dated at the stall.
+- **A shrug before the top registers** (in the first frames at the top, before the bar has
+  read still for 3 frames) can become the top: 5 of 48 noise-free with no standing reference,
+  +0.87 s (review, round 7).
+- **The bar lost at a touch-and-go low point:** 0.3 s of contiguous loss there loses reps
+  (35 of 45 counted), 0.5 s most of them; random dropouts do not.
+- **A proxy rep with no pause at the top** is judged on a few frames of noisy angles: at
+  2.5 cm AR(0.8) a dead stop with a 0–0.1 s hold draws a false D6 on up to 5 of 60 reps.
 - **Back rounding:** proxies only (PLAN.md §2.10).
