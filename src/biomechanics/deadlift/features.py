@@ -118,8 +118,11 @@ class RepTrack:
         self.lead_in: list[FrameMeasure] = []
         # The rep ended in a touch-and-go: its floor is the low point itself.
         self.touch_and_go_out = False
-        # A top that never held, lost from view across its peak: the joints dated it.
+        # A top that never held, lost from view across its peak: dated in the gap.
         self.top_unseen = False
+        # A stall resumed on the joints while the bar was unseen: its climb out
+        # of it went unseen.
+        self.climb_unseen = False
 
     def append(self, measure: FrameMeasure, velocity: float) -> None:
         self.frames.append(measure)
@@ -191,15 +194,16 @@ class _FinalClimb(NamedTuple):
     start_up: float
 
 
-# The hold's last LOCKOUT_WINDOW_S; all of a top's frames when the bar went
-# unseen right after them and was seen leaving more than LOCKOUT_WINDOW_S later.
+# The hold's last LOCKOUT_WINDOW_S; all of a top's frames when they end in a gap
+# the bar was seen leaving more than LOCKOUT_WINDOW_S later (a top lost from
+# view, judged in the gap). A hold seen only before such a gap is unjudged: its
+# frames may be the bar's last crawl into the top.
 def _lockout_frames(rep: RepTrack) -> list[FrameMeasure]:
     leaving = rep.lower_start if math.isfinite(rep.lower_start) else rep.frames[-1].t
     window = [frame for frame in rep.top_frames if leaving - frame.t <= LOCKOUT_WINDOW_S]
     if window or not rep.top_frames:
         return window
-    after = next((frame for frame in rep.frames if frame.t > rep.top_frames[-1].t), None)
-    return rep.top_frames if after is not None and not math.isfinite(after.bar_up) else window
+    return rep.top_frames if not math.isfinite(rep.top_frames[-1].bar_up) else window
 
 
 def _flexion_deg(frames: list[FrameMeasure]) -> float:
@@ -223,7 +227,9 @@ def _lockout_level(lockout: list[FrameMeasure], band_m: float) -> float:
 # A stretch of at least duration_s ending at index over which the bar's running
 # median stayed within the band. A dropped bar frame is no height, flat or
 # otherwise.
-def _flat(frames: list[FrameMeasure], smoothed: list[float], first: int, index: int, duration_s: float, band_m: float) -> bool:
+def _flat(
+    frames: list[FrameMeasure], smoothed: list[float], first: int, index: int, duration_s: float, band_m: float,
+) -> bool:
     if frames[index].t - frames[first].t < duration_s - 1e-6:
         return False
     heights = [height for height in smoothed[first:index + 1] if math.isfinite(height)]
@@ -722,8 +728,9 @@ def rep_features(
     features.bar_rise_cm = rise_m * 100.0
     features.pull_time_s = pull_time
     # The bar's speed is a tracked bar's: on the wrist proxy the top is the
-    # joints', and the wrists' noise sets its rise and liftoff.
-    if pull_time > 0.0 and bar_source == BAR_SOURCE_BAR:
+    # joints', and the wrists' noise sets its rise and liftoff. A top lost from
+    # view is an estimate: no speed for the recap's velocity loss to read.
+    if pull_time > 0.0 and bar_source == BAR_SOURCE_BAR and not rep.top_unseen:
         features.concentric_velocity_mps = rise_m / pull_time
     if math.isfinite(rep.lower_start) and math.isfinite(features.floor_time):
         features.lower_time_s = features.floor_time - rep.lower_start

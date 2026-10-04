@@ -20,6 +20,12 @@ BAND_M = 0.005
 REST_UP = 0.0
 # Half the bar's acceleration (m/s^2): a slow grind, whose first 0.5 cm takes 0.22 s.
 CURVATURE = 0.1
+# A bar seen again after a gap this many bands below its level: short of it by its noise.
+SEEN_AGAIN_BANDS = 1.5
+# A quick approach to the top (no flat stretch below it), and the frames it is
+# lost on, from the first unseen to the first seen again.
+FAST_CURVATURE = 1.0
+GAP_FRAMES = (24, 33)
 
 
 def _template() -> FrameMeasure:
@@ -75,6 +81,25 @@ class TestEventTimes:
         rep.top_time = next(frame.t for frame in rep.frames if frame.bar_up >= top_up - BAND_M)
         assert rep.top_time < arrival - 0.05
         assert top_time(rep, BAND_M) == pytest.approx(arrival, abs=EVENT_TOLERANCE_S)
+
+    def test_a_bar_seen_again_just_short_of_its_level_arrived_in_the_gap(self):
+        """Lost on its way into the top and seen again a band and a half below the
+        level (its noise), then at it: the gap is where it arrived, not the first
+        frame back at the level."""
+        arrival = 1.0
+        top_up = 0.5
+        times = [index * FRAME_DT_S for index in range(60)]
+        heights = [(t, top_up - FAST_CURVATURE * max(0.0, arrival - t) ** 2) for t in times]
+        first_unseen, seen_again = GAP_FRAMES
+        for index in range(first_unseen, seen_again):
+            heights[index] = (heights[index][0], float("nan"))
+        heights[seen_again] = (heights[seen_again][0], top_up - SEEN_AGAIN_BANDS * BAND_M)
+        rep = _rep(heights, 0)
+        rep.top_up = top_up
+        rep.top_frames = rep.frames[seen_again:]
+        rep.top_time = next(frame.t for frame in rep.frames if frame.bar_up >= top_up - BAND_M)
+        assert rep.top_time > times[seen_again]
+        assert top_time(rep, BAND_M) < times[seen_again]
 
     def test_touchdown_is_where_the_lowering_reached_the_rest(self):
         touchdown = 1.0

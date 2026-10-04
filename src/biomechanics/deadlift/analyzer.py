@@ -73,8 +73,9 @@ STILL_BAR_WINDOW_S = 0.3
 # A bar unseen for this many frames beside its highest one was lost across the
 # top (one unseen frame is the one a 15 Hz detector skips).
 UNSEEN_TOP_MIN_FRAMES = 2
-# Its last measured speed, over this many frames.
-UNSEEN_SPEED_FRAMES = 4
+# The hips and knees' plateau while the bar was unseen: this percentile of their
+# flexion there.
+PLATEAU_PERCENTILE = 20
 # The bar velocity's noise the window is widened for, and the widest window.
 VELOCITY_NOISE_MPS = 0.03
 MAX_VELOCITY_WINDOW_S = 0.4
@@ -257,54 +258,81 @@ def _lost_beside_peak(rep: RepTrack) -> bool:
     return max(before, after) >= UNSEEN_TOP_MIN_FRAMES
 
 
-# A top lost from view on the bar's way up. A parabola through its last
-# PEAK_FIT_S of measured rise stops climbing late (the deceleration grows into
-# the top). Slowing evenly into the expected top height from its last measured
-# speed, it covers the rest in twice the time that speed would, exact on a known
-# height but scattered by the expected height's noise (the standing pose's and
-# the grip's). Their mean, or either alone, within the frames it went unseen
-# on. Not slowing, or with the hips and knees just after it still clearly bent
-# past their most extended (lost on its way into a stall): where the joints
-# first came within LOCKOUT_REACHED_DEG of their most extended. Through a hold
-# the joints are flat: their most extended frame alone could be anywhere in it.
-def _unseen_top_time(rep: RepTrack, unseen: list[FrameMeasure], expected_up: float) -> float:
-    peak = rep.frames[rep.peak_index]
+# A top lost from view: the bar's last frame seen on its way into it (the
+# anchor) and the gap's last frame. Lost after its highest frame, or after the
+# frames that followed it within band_m (its noise); or, seen again coming down
+# higher than it was last seen going up, the frame before the gap that ends at
+# its highest. None if no such gap of UNSEEN_TOP_MIN_FRAMES or more lies there.
+def _lost_top_gap(rep: RepTrack, band_m: float) -> tuple[int, float] | None:
+    anchor = rep.peak_index
+    while (
+        anchor + 1 < len(rep.frames) and math.isfinite(rep.frames[anchor + 1].bar_up)
+        and rep.frames[anchor + 1].bar_up >= rep.peak_up - band_m
+    ):
+        anchor += 1
+    after = 0
+    while anchor + after + 1 < len(rep.frames) and not math.isfinite(rep.frames[anchor + after + 1].bar_up):
+        after += 1
+    if after >= UNSEEN_TOP_MIN_FRAMES:
+        return anchor, rep.frames[anchor + after].t
+    before = len(_unseen_around_peak(rep)) - len(_unseen_after_peak(rep)) - 1
+    if before >= UNSEEN_TOP_MIN_FRAMES and rep.peak_index > before:
+        return rep.peak_index - before - 1, rep.frames[rep.peak_index].t
+    return None
+
+
+# The hips and knees' summed flexion (its running median), as (time, degrees),
+# on the frames they were measured on.
+def _flexion_track(rep: RepTrack) -> list[tuple[float, float]]:
     measured = [frame for frame in rep.frames if frame.legs_measured]
     flexion = running_median([frame.hip_flex_deg + frame.knee_flex_deg for frame in measured], PEAK_MEDIAN_FRAMES)
-    span = [(frame.t, degrees) for frame, degrees in zip(measured, flexion)
-            if unseen[0].t <= frame.t <= unseen[-1].t and math.isfinite(degrees)]
-    least = min((degrees for _, degrees in span), default=NAN)
+    return [(frame.t, degrees) for frame, degrees in zip(measured, flexion) if math.isfinite(degrees)]
+
+
+# A top lost from view on the bar's way up, from its last frame seen (the
+# anchor). Slowing evenly into the expected top height, the bar's height below
+# it is a parabola in time, so its square root is a line: fitted through the
+# rise's last PEAK_FIT_S, the line reaches zero at the top, no later than the
+# gap's end. (Two frames' speed, the same model, scattered by its noise; a free
+# parabola's vertex, by up to a second on slower pulls.) With the hips and knees
+# just after it still clearly bent past their plateau in the gap (lost on its
+# way into a stall): where they first came within LOCKOUT_REACHED_DEG of their
+# most extended. Their plateau is their PLATEAU_PERCENTILE there: through
+# keypoint noise their least is a dip, which read a slow pull's last extension
+# as a stall, and the first frame near it came late. Not rising faster than a
+# held bar, out of a stall resumed unseen: where they first came that close to
+# their plateau. Not rising otherwise, the bar had arrived when last seen: NaN,
+# the top seen. Through a hold the joints are flat: their most extended frame
+# alone could be anywhere in it.
+def _unseen_top_time(rep: RepTrack, anchor_index: int, end_t: float, expected_up: float, rising_mps: float) -> float:
+    anchor = rep.frames[anchor_index]
+    span = [(t, degrees) for t, degrees in _flexion_track(rep) if anchor.t <= t <= end_t]
+    angles = [degrees for _, degrees in span]
+    least = min(angles, default=NAN)
+    plateau = float(np.percentile(angles, PLATEAU_PERCENTILE)) if angles else NAN
+    reached_t = next((t for t, degrees in span if degrees - least <= LOCKOUT_REACHED_DEG), anchor.t)
     rise = [
-        frame for frame in rep.frames[:rep.peak_index + 1]
-        if peak.t - frame.t <= PEAK_FIT_S and math.isfinite(frame.bar_up)
+        frame for frame in rep.frames[:anchor_index + 1]
+        if anchor.t - frame.t <= PEAK_FIT_S and math.isfinite(frame.bar_up) and frame.bar_up < expected_up
     ]
-    estimates = []
     if len(rise) >= MIN_NOISE_FRAMES:
-        offsets_s = np.asarray([frame.t for frame in rise]) - peak.t
-        curvature, slope, _ = np.polyfit(offsets_s, [frame.bar_up for frame in rise], 2)
-        if curvature < 0.0:
-            estimates.append(peak.t - slope / (2.0 * curvature))
-    last = rise[-UNSEEN_SPEED_FRAMES:]
-    speed_mps = (last[-1].bar_up - last[0].bar_up) / (last[-1].t - last[0].t) if len(last) > 1 else NAN
-    if speed_mps > 0.0 and expected_up > peak.bar_up:
-        estimates.append(peak.t + 2.0 * (expected_up - peak.bar_up) / speed_mps)
-    if estimates:
-        estimate = min(max(float(np.mean(estimates)), peak.t), unseen[-1].t)
-        after = [degrees for t, degrees in span if estimate <= t <= estimate + STALL_MIN_S / 2.0]
-        if not after or median(after) - least < CLEARLY_BENT_DEG:
-            return estimate
-    return next((t for t, degrees in span if degrees - least <= LOCKOUT_REACHED_DEG), peak.t)
+        offsets_s = np.asarray([frame.t for frame in rise]) - anchor.t
+        below = np.sqrt([expected_up - frame.bar_up for frame in rise])
+        slope, intercept = np.polyfit(offsets_s, below, 1)
+        # Its speed at the anchor: d(height)/dt = -2 * below * d(below)/dt.
+        if -2.0 * intercept * slope >= rising_mps:
+            estimate = min(anchor.t - intercept / slope, end_t)
+            after = [degrees for t, degrees in span if estimate <= t <= estimate + STALL_MIN_S / 2.0]
+            return estimate if not after or median(after) - plateau < CLEARLY_BENT_DEG else reached_t
+    if not rep.climb_unseen or not span:
+        return NAN
+    return next((t for t, degrees in span if degrees - plateau <= LOCKOUT_REACHED_DEG), anchor.t)
 
 
 # When, among the frames, the hips and knees were most extended (their summed
 # flexion's running median); the first frame's time if the legs went unmeasured.
 def _most_extended_time(rep: RepTrack, frames: list[FrameMeasure]) -> float:
-    measured = [frame for frame in rep.frames if frame.legs_measured]
-    flexion = running_median([frame.hip_flex_deg + frame.knee_flex_deg for frame in measured], PEAK_MEDIAN_FRAMES)
-    candidates = [
-        (degrees, frame.t) for frame, degrees in zip(measured, flexion)
-        if frames[0].t <= frame.t <= frames[-1].t and math.isfinite(degrees)
-    ]
+    candidates = [(degrees, t) for t, degrees in _flexion_track(rep) if frames[0].t <= t <= frames[-1].t]
     return min(candidates)[1] if candidates else frames[0].t
 
 
@@ -404,6 +432,7 @@ class DeadliftRepAnalyzer:
         self._completed: deque[_CompletedRep] = deque()
         self._awaiting_finish: deque[DeadliftRepFeatures] = deque()
         self._set_top_heights: list[float] = []
+        self._set_rep_count = 0
         self._set_predicted_change_deg = NAN
         self._set_rise_ratios: list[float] = []
         self._set_tilts_cm: list[float] = []
@@ -749,7 +778,10 @@ class DeadliftRepAnalyzer:
         reference = measure.midfoot if measure.midfoot is not None else measure.ankle_mid
         ahead = forward_m(measure.frame, measure.bar_centre, reference)
         sideways = lateral_m(measure.frame, measure.bar_centre, reference)
-        near = -cfg.max_bar_behind_m <= ahead <= cfg.stance_max_bar_ahead_m and abs(sideways) <= cfg.stance_max_bar_lateral_m
+        near = (
+            -cfg.max_bar_behind_m <= ahead <= cfg.stance_max_bar_ahead_m
+            and abs(sideways) <= cfg.stance_max_bar_lateral_m
+        )
         facing = True
         if measure.foot_forward is not None and self._rest_axis is not None:
             # Facing the bar: the feet point across it, not along it.
@@ -790,7 +822,8 @@ class DeadliftRepAnalyzer:
         near, facing = self._near_and_facing(measure)
         if near and self._pulled_without_setup(measure, velocity):
             return
-        if self._held("stance", measure.standing and near and facing and self._is_settled, measure.t, cfg.stance_still_s):
+        standing_at_bar = measure.standing and near and facing and self._is_settled
+        if self._held("stance", standing_at_bar, measure.t, cfg.stance_still_s):
             self._enter(DeadliftPhase.STANCE, measure.t)
             self._stance_midfoots.clear()
             self._stance_bar_offsets.clear()
@@ -938,7 +971,8 @@ class DeadliftRepAnalyzer:
             self._relock_at_floor(measure)
             self._start_rep(measure, touch_and_go=False, window_s=cfg.quick_pull_window_s)
             return
-        if self._held("resetup", measure.hands_on_bar and self._bar_still(cfg.liftoff_rest_speed_mps), measure.t, cfg.resetup_hold_s):
+        gripping = measure.hands_on_bar and self._bar_still(cfg.liftoff_rest_speed_mps)
+        if self._held("resetup", gripping, measure.t, cfg.resetup_hold_s):
             self._enter(DeadliftPhase.SETUP, measure.t)
             return
         if self._stood_up(measure):
@@ -982,7 +1016,9 @@ class DeadliftRepAnalyzer:
             setup["stance_bar_midfoot_cm"] = self._stance_bar_midfoot_cm
             self._stance_bar_midfoot_cm = NAN
         rep = RepTrack(liftoff, touch_and_go, setup)
-        rep.lead_in = [frame for frame in history[:liftoff_index] if liftoff.t - frame.t <= self.config.liftoff_lookback_s]
+        rep.lead_in = [
+            frame for frame in history[:liftoff_index] if liftoff.t - frame.t <= self.config.liftoff_lookback_s
+        ]
         for index in range(liftoff_index + 1, len(history)):
             rep.append(history[index], velocities[index])
         self._rep = rep
@@ -1024,16 +1060,18 @@ class DeadliftRepAnalyzer:
         if self._left_top(rep, rep.peak_up, velocity) and top_reached:
             # A top that never held still (a quick touch-and-go set, or the wrist
             # proxy's noise): the peak was the top.
-            # Lost on its way up and seen again coming down, the top went unseen
-            # and is dated from the bar's last rise. Seen again higher, the bar
-            # arrived in or after the gap, which the features date from its arrival.
-            # On the wrist proxy the joints date the top in the features, and the
-            # window is judged where they were most extended.
-            lost = len(_unseen_after_peak(rep)) >= UNSEEN_TOP_MIN_FRAMES
-            rep.top_unseen = lost and rep.frames[-1].bar_source == BAR_SOURCE_BAR
-            if rep.top_unseen:
-                peak_t = _unseen_top_time(rep, _unseen_around_peak(rep), self._expected_top_up())
-            else:
+            # Lost on its way up and seen again coming down (lower, or higher
+            # than it was last seen going up), the top went unseen and is dated
+            # from the bar's last rise. On the wrist proxy the joints date the top
+            # in the features, and the window is judged where they were most
+            # extended.
+            gap = _lost_top_gap(rep, self._event_band_m())
+            lost = gap is not None
+            peak_t = NAN
+            if lost and rep.frames[-1].bar_source == BAR_SOURCE_BAR:
+                peak_t = _unseen_top_time(rep, *gap, self._expected_top_up(), cfg.top_still_speed_mps)
+            rep.top_unseen = math.isfinite(peak_t)
+            if not rep.top_unseen:
                 peak_t = self._peak_time(rep)
             rep.top_time = peak_t if rep.top_unseen else self._top_arrival(rep)
             rep.top_up = rep.peak_up
@@ -1112,7 +1150,8 @@ class DeadliftRepAnalyzer:
         cfg = self.config
         if math.isfinite(measure.knee_flex_deg):
             return measure.knee_flex_deg <= cfg.overextended_max_knee_deg
-        shortening_m = self._standing_refs.get("leg_m", NAN) - float(np.linalg.norm(measure.hip_mid - measure.ankle_mid))
+        leg_m = float(np.linalg.norm(measure.hip_mid - measure.ankle_mid))
+        shortening_m = self._standing_refs.get("leg_m", NAN) - leg_m
         return shortening_m <= cfg.overextended_max_leg_shortening_m
 
     # How far short of standing the hips or knees held at the top (NaN without
@@ -1145,14 +1184,26 @@ class DeadliftRepAnalyzer:
     # upward rises too, and with the knees hidden nothing tells them apart. (A
     # grind inside the band stays in TOP: features.py times the top and judges
     # the lockout from the bar's last climb.)
+    # With the bar unseen, the hips and knees finishing their extension out of
+    # the stall resume it: else a grind lost through its finish stays at the
+    # stall, its top dated and its lockout judged there.
     def _above_held_top(self, rep: RepTrack, measure: FrameMeasure) -> bool:
         stall_deg = self._held_deficit_deg(rep) if self._standing_refs else self._extended_since_hold_deg(rep)
         if not stall_deg >= self.config.resume_min_deficit_deg:
             return False
+        if not math.isfinite(measure.bar_up):
+            return self._extended_since_hold_deg(rep) >= self.config.resume_min_deficit_deg
         return measure.bar_up > rep.top_up + self._hold_band_m()
 
     # The pull goes on, and its top comes later.
     def _resume_pull(self, rep: RepTrack, measure: FrameMeasure) -> None:
+        # Resumed unseen, the climb out of the stall went unseen from the bar's
+        # last frame seen: a top lost from view there.
+        if not math.isfinite(measure.bar_up):
+            rep.peak_index = next(index for index in range(len(rep.frames) - 1, -1, -1)
+                                  if math.isfinite(rep.frames[index].bar_up))
+            rep.peak_up = rep.frames[rep.peak_index].bar_up
+            rep.climb_unseen = True
         rep.top_unseen = False
         rep.top_time = NAN
         rep.top_up = NAN
@@ -1298,6 +1349,7 @@ class DeadliftRepAnalyzer:
         if math.isnan(rep.top_time):
             return
         self.rep_count += 1
+        self._set_rep_count += 1
         # A top the bar was never seen at has no height.
         if not rep.top_unseen:
             self._set_top_heights.append(rep.top_up)
@@ -1314,7 +1366,8 @@ class DeadliftRepAnalyzer:
             if len(recent) >= 2:
                 features.set_rise_ratio = float(np.median(recent))
         if math.isfinite(features.bar_tilt_cm):
-            self._set_tilts_cm.append(features.bar_tilt_cm if features.bar_low_side == "right" else -features.bar_tilt_cm)
+            tilt_cm = features.bar_tilt_cm if features.bar_low_side == "right" else -features.bar_tilt_cm
+            self._set_tilts_cm.append(tilt_cm)
             recent = self._set_tilts_cm[-SET_EVIDENCE_REPS:]
             if len(recent) >= 2:
                 features.set_bar_tilt_cm = float(np.median(recent))
@@ -1342,7 +1395,7 @@ class DeadliftRepAnalyzer:
         # a lifter standing at the bar before the set's first rep (none counted
         # since reset_set), not walking off after it, from a median over a second:
         # a few noisy frames must not start it.
-        guiding = self.phase == DeadliftPhase.STANCE and not self._set_top_heights and self._is_settled
+        guiding = self.phase == DeadliftPhase.STANCE and not self._set_rep_count and self._is_settled
         if guiding and measure.bar_source == BAR_SOURCE_BAR and len(self._stance_bar_offsets) >= LIVE_OFFSET_MIN_FRAMES:
             live_cm = median([offset for _, offset in self._stance_bar_offsets])
         height_cm = NAN
