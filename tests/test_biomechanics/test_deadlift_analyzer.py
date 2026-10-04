@@ -111,6 +111,16 @@ FAULTED_LOCKOUT_DEG = 15.0
 # the resume deficit; requiring it of both joints, 19 of 27 on this draw).
 NEAR_LOCKOUT_GRIND_NOISE_SEED = 4100
 NEAR_LOCKOUT_GRIND_FAR_RATIO = 0.5
+# The bar dropped for SHORT_GAP_S every SHORT_GAP_EVERY_S through a hold, at the
+# top of the platform's noise (2.5 cm AR(0.8)): a draw where, without a minimum
+# gap, holds resumed on each gap's few frames.
+SHORT_GAP_S = 0.1
+SHORT_GAP_EVERY_S = 0.25
+WORST_KEYPOINT_NOISE_M = 0.025
+SHORT_GAPS_NOISE_SEED = 1400
+# A 1.5 cm AR(0.8) draw whose expected top heights put the bar's fit alone early on
+# 2 s pulls with the knees hidden: the climb's bent knees, judged, cued D6 on 7 of 45.
+EARLY_FIT_NOISE_SEED = 4900
 # A no-pause top lost from view reads its lockout within this of straight,
 # noise-free (seen: within 3 deg), short of D6's mild threshold.
 LOST_TOP_MAX_DEFICIT_DEG = 6.0
@@ -383,6 +393,18 @@ def _then(first: FrameMutation, second: FrameMutation) -> FrameMutation:
     return mutate
 
 
+# The given keypoints unseen (confidence 0) in the windows.
+def _hidden_keypoints(windows: list[tuple[float, float]], keypoints: tuple[int, ...]) -> FrameMutation:
+    def mutate(index: int, frame: SimFrame) -> tuple[np.ndarray, np.ndarray, BarState3D | None]:
+        if not any(start <= frame.timestamp < end for start, end in windows):
+            return frame.points, frame.confidences, frame.bar
+        confidences = frame.confidences.copy()
+        confidences[list(keypoints)] = 0.0
+        return frame.points, confidences, frame.bar
+
+    return mutate
+
+
 # The wrists unseen (confidence 0) in the windows, the wrist proxy's bar lost
 # with them. Then the next mutation (noise), if any.
 def _wrists_hidden(windows: list[tuple[float, float]], then: FrameMutation | None = None) -> FrameMutation:
@@ -471,6 +493,7 @@ def _analyse(
     gravity_source: str = GRAVITY_SOURCE_MEASURED,
     meta: dict | None = None,
     mutate: FrameMutation | None = None,
+    legs_unmeasured: list[tuple[float, float]] | None = None,
 ) -> tuple[SimulatedSet, list[DeadliftRepFeatures], DeadliftRepAnalyzer, list[DeadliftPhase]]:
     sim = simulate(scenario)
     analyzer = DeadliftRepAnalyzer(BiomechanicsConfig().deadlift)
@@ -482,7 +505,9 @@ def _analyse(
     phases: list[DeadliftPhase] = []
     for index, frame in enumerate(sim.frames):
         points, confidences, bar = (frame.points, frame.confidences, frame.bar) if mutate is None else mutate(index, frame)
-        analyzer.observe(DeadliftFrameInput(frame.timestamp, frame.frame_index, points, confidences, bar))
+        carried = any(start <= frame.timestamp < end for start, end in legs_unmeasured or [])
+        analyzer.observe(DeadliftFrameInput(frame.timestamp, frame.frame_index, points, confidences, bar,
+                                            legs_measured=not carried))
         if not phases or phases[-1] != analyzer.phase:
             phases.append(analyzer.phase)
         while analyzer.take_completed_rep() is not None:
@@ -1165,6 +1190,86 @@ class TestOcclusionAndDropouts:
                 errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
         far = [error for error in errors if abs(error) > 2.0 * GAP_TOP_MAX_ERROR_S]
         assert len(far) <= NEAR_LOCKOUT_GRIND_FAR_RATIO * len(errors), errors
+
+    @pytest.mark.parametrize("unmeasured", ["carried", "knees_hidden"])
+    def test_a_hold_lost_with_the_legs_unmeasured_is_dated_by_the_bar(self, unmeasured: str):
+        """The hips and knees unmeasured through the gap (carried by the pose
+        tracker, or the knees hidden): the bar's fit alone dates the top (their few
+        frames' plateau put it at the last frame seen, 0.2 s early, and judged the
+        climb's bent knees: D6 severe on every rep)."""
+        errors = []
+        cued = 0
+        for pull_s in (1.2, 2.0):
+            for body in BODIES:
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=pull_s)] * 3,
+                                    bar_noise_m=TRACKED_BAR_NOISE_M)
+                lost = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                if unmeasured == "carried":
+                    sim, features, _, _ = _analyse(scenario, mutate=_tracker_coasting(lost), legs_unmeasured=lost)
+                else:
+                    hide = _hidden_keypoints(lost, KNEES)
+                    sim, features, _, _ = _analyse(scenario, mutate=_then(_tracker_coasting(lost), hide))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+                cued += sum("deadlift_lockout" in rep for rep in _cued(features))
+        assert cued == 0
+        assert max(map(abs, errors)) <= GAP_TOP_MAX_ERROR_S, errors
+
+    def test_a_top_dated_early_in_a_gap_does_not_judge_the_climb(self):
+        """With the knees hidden the bar's fit alone dates the top, and on a slow
+        pull the expected top height's noise can put it early: its window keeps no
+        frame from before the gap, the climb seen with the knees bent."""
+        cued = 0
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=2.0)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed)
+                lost = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                hidden = _then(_tracker_coasting(lost), _hidden_keypoints(lost, KNEES))
+                noise = _correlated_noise(PROXY_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO,
+                                          EARLY_FIT_NOISE_SEED + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_then(hidden, noise))
+                assert len(features) == len(sim.reps)
+                cued += sum("deadlift_lockout" in rep for rep in _cued(features))
+        assert cued == 0
+
+    def test_knees_and_bar_hidden_across_the_top_lose_no_rep(self):
+        """Seen standing is the lifter's top when the bar is lost across it; with the
+        knees hidden too, upright on legs as long as standing's (each rep had been a
+        failed rep on a tall lifter)."""
+        for body in BODIES:
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=1.2)] * 3, bar_noise_m=TRACKED_BAR_NOISE_M,
+                                    seed=seed)
+                lost = [(rep.top_time - 0.3, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                sim, features, _, _ = _analyse(
+                    scenario, mutate=_then(_tracker_coasting(lost), _hidden_keypoints(lost, KNEES)),
+                )
+                assert len(features) == len(sim.reps)
+
+    def test_short_gaps_through_a_hold_do_not_resume_it(self):
+        """Without a standing reference, the bar dropped for 3 frames every 0.25 s
+        through a 1.5 s hold at 2.5 cm AR(0.8): a resume on the joints needs a gap of
+        UNSEEN_RESUME_MIN_S (on each short gap's few frames of noise, holds resumed
+        and read up to 1.4 s late)."""
+        script = RepScript(pull_s=1.2, top_hold_s=1.5)
+        errors = []
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[script] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed,
+                                    approach_s=0.5, stance_s=0.5)
+                drops = []
+                for rep in simulate(scenario).reps:
+                    start = rep.top_time + 0.1
+                    while start + SHORT_GAP_S < rep.top_time + script.top_hold_s:
+                        drops.append((start, start + SHORT_GAP_S))
+                        start += SHORT_GAP_EVERY_S
+                noise = _correlated_noise(WORST_KEYPOINT_NOISE_M, PLATFORM_NOISE_RHO,
+                                          SHORT_GAPS_NOISE_SEED + 10 * body_index + seed)
+                sim, features, _, _ = _analyse(scenario, mutate=_then(_bar_dropped(drops), noise))
+                assert len(features) == len(sim.reps)
+                errors += [measured.top_time - expected.top_time for measured, expected in zip(features, sim.reps)]
+        assert max(map(abs, errors)) <= 2.0 * GAP_TOP_MAX_ERROR_S, errors
 
     @pytest.mark.parametrize("stall_fraction", [0.93, 0.95, 0.97])
     def test_a_grind_lost_through_its_finish_and_hold_is_dated_and_judged_at_the_lockout(self, stall_fraction: float):

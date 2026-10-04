@@ -78,6 +78,9 @@ PLATEAU_PERCENTILE = 20
 # A top lost from view is dated by the bar's fitted rise unless it lands more
 # than this after the hips and knees reached their plateau.
 FIT_CHECK_S = 0.15
+# A stall resumes on the hips and knees over a gap at least this long: over a
+# shorter one their medians are a few frames of keypoint noise.
+UNSEEN_RESUME_MIN_S = 0.3
 # The bar velocity's noise the window is widened for, and the widest window.
 VELOCITY_NOISE_MPS = 0.03
 MAX_VELOCITY_WINDOW_S = 0.4
@@ -1060,13 +1063,16 @@ class DeadliftRepAnalyzer:
             rep.top_up = rep.peak_up
             window_s = min(TOP_PEAK_WINDOW_S, TOP_PEAK_WINDOW_RATIO * (peak_t - rep.liftoff.t))
             # Unseen across the top, the lowering began somewhere in the gap: the
-            # window keeps its frames after the top.
+            # window keeps its frames after the top. A top dated in the gap is not
+            # on the climb seen before it: an early date (the fit alone, on a slow
+            # pull) put the climb's bent knees in the window.
             lowering_t = self._lowering_start(rep, rep.peak_up, measure.t)
             window_end = self._lost_window_end(rep, peak_t, window_s) if lost else peak_t
             rep.lower_start = max(window_end, lowering_t)
+            gap_start_t = rep.frames[gap[0]].t if rep.top_unseen else -math.inf
             rep.top_frames = [
                 frame for frame in rep.frames
-                if abs(frame.t - peak_t) <= window_s and frame.t <= rep.lower_start
+                if abs(frame.t - peak_t) <= window_s and gap_start_t < frame.t <= rep.lower_start
             ]
             self._enter(DeadliftPhase.LOWER, measure.t)
             return
@@ -1091,17 +1097,20 @@ class DeadliftRepAnalyzer:
     # with the lowering), or reached it more than FIT_CHECK_S before (the fit
     # overshoots: a soft or leaned-back lockout short of the expected top
     # height, or a quick pull not yet slowing into it: seen arriving, they reach
-    # it at the anchor). NaN without the hips and knees measured in the gap.
-    # Through a hold the joints are flat: their most extended frame alone could
-    # be anywhere in it.
+    # it at the anchor). The hips and knees measured on fewer than half the gap's
+    # frames (hidden, or carried by the pose tracker), the fit alone: the plateau
+    # of a few frames at the gap's start put the top at the anchor, on the
+    # climb's bent knees. Through a hold the joints are flat: their most extended
+    # frame alone could be anywhere in it.
     def _unseen_top_time(self, rep: RepTrack, anchor_index: int, end_t: float) -> float:
         anchor = rep.frames[anchor_index]
         span = [(t, degrees) for t, degrees in _flexion_track(rep) if anchor.t <= t <= end_t]
-        if not span:
-            return NAN
+        fitted_t = _fitted_top_time(rep, anchor_index, end_t, self._expected_top_up())
+        gap_frames = sum(1 for frame in rep.frames if anchor.t <= frame.t <= end_t)
+        if 2 * len(span) < gap_frames:
+            return fitted_t
         plateau = float(np.percentile([degrees for _, degrees in span], PLATEAU_PERCENTILE))
         joints_t = next(t for t, degrees in span if degrees - plateau <= LOCKOUT_REACHED_DEG)
-        fitted_t = _fitted_top_time(rep, anchor_index, end_t, self._expected_top_up())
         if not math.isfinite(fitted_t):
             return joints_t
         _, at_fit = min(span, key=lambda sample: abs(sample[0] - fitted_t))
@@ -1145,13 +1154,20 @@ class DeadliftRepAnalyzer:
 
     # A top lost from view across its peak, seen in the joints: the lifter stood
     # up while the bar was unseen around its highest frame, which then sits short
-    # of the expected top.
+    # of the expected top. With the knees hidden too, upright on legs as long as
+    # standing's (as _legs_straight reads them).
     def _stood_unseen(self, rep: RepTrack) -> bool:
         rise = rep.peak_up - rep.liftoff.bar_up
         return (
             _lost_beside_peak(rep) and rise >= self.config.failed_rep_min_rise_m
-            and any(frame.standing for frame in _unseen_around_peak(rep))
+            and any(self._stood(frame) for frame in _unseen_around_peak(rep))
         )
+
+    def _stood(self, measure: FrameMeasure) -> bool:
+        if math.isfinite(measure.knee_flex_deg):
+            return measure.standing
+        upright = abs(measure.trunk_deg) <= self.config.standing_max_trunk_deg
+        return upright and self._legs_straight(measure)
 
     # The top event: the bar's first arrival within TOP_ARRIVAL_BAND_M of its peak.
     @staticmethod
@@ -1207,6 +1223,8 @@ class DeadliftRepAnalyzer:
                 break
             gap.append(frame)
         if not math.isfinite(rep.frames[-1].bar_up) or len(gap) < UNSEEN_TOP_MIN_FRAMES:
+            return False
+        if rep.frames[-1].t - gap[-1].t < UNSEEN_RESUME_MIN_S:
             return False
         minimum_deg = self.config.resume_min_deficit_deg
         extended = sum(_extension_past_hold_deg(rep, gap)) >= 2.0 * minimum_deg

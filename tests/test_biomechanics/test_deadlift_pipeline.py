@@ -12,6 +12,7 @@ import pytest
 
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.deadlift.analyzer import DeadliftRepAnalyzer
+from biomechanics.deadlift.rule_base import TIER_RANK
 from biomechanics.deadlift.session_reference import DeadliftSessionReference
 from biomechanics.deadlift.simulator import RepScript, Scenario, simulate
 from biomechanics.deadlift.types import GRAVITY_SOURCE_MEASURED, DeadliftPhase
@@ -25,6 +26,8 @@ FRAME_DT_S = 1.0 / 30.0
 DEPTH_TARGET_RATIO = 0.05
 # The triangulator's confidence contract (utils/keypoint_kalman.py): std = 0.02 * sqrt(1/c - 1).
 TRIANGULATION_STD_SCALE_M = 0.02
+# A top lost from view is dated within this (test_deadlift_analyzer.py's bound).
+GAP_TOP_MAX_ERROR_S = 0.15
 
 
 class _FakeClock:
@@ -92,9 +95,11 @@ def _pipeline(monkeypatch, exercise: str, start_s: float, coaching_ready: bool =
 
 def _run_set(
     pipe, provider, clock, scenario: Scenario, measured_gravity: bool = True, keypoint_noise_m: float = 0.0,
+    bar_lost: list[tuple[float, float]] | None = None,
 ) -> list[PipelineFrame]:
     """keypoint_noise_m: triangulation noise added before the pipeline's Kalman, with
-    the confidence the triangulator gives that much error."""
+    the confidence the triangulator gives that much error. bar_lost: (start, end)
+    simulation times no bar state is pushed in."""
     sim = simulate(scenario)
     if measured_gravity:
         pipe.set_gravity(sim.gravity_up_world, GRAVITY_SOURCE_MEASURED)
@@ -108,7 +113,8 @@ def _run_set(
             provider.push(points, confidences)
         else:
             provider.push(frame.points, frame.confidences)
-        if frame.bar is not None:
+        lost = any(start <= frame.timestamp < end for start, end in bar_lost or [])
+        if frame.bar is not None and not lost:
             pipe.push_bar_state(frame.bar.model_copy(update={"timestamp": clock.time()}))
         results.append(pipe.process_frame())
         clock.now_s += FRAME_DT_S
@@ -210,6 +216,24 @@ class TestRealWorldInput:
         scenario = Scenario(plates_hide_feet_above_m=0.03)
         pipe, provider, clock = _pipeline(monkeypatch, DEADLIFT, scenario.start_time)
         assert len(_reps(_run_set(pipe, provider, clock, scenario))) == 3
+
+    def test_plates_hiding_the_feet_and_a_top_lost_from_view_cue_no_lockout(self, monkeypatch):
+        """With the feet hidden the pipeline marks the pull's legs unmeasured: a top
+        lost from view is dated by the bar's own rise (dated at the last frame seen,
+        0.27 s early, it judged the climb's bent knees: D6 severe on every rep)."""
+        scenario = Scenario(plates_hide_feet_above_m=0.03, bar_noise_m=0.003)
+        truth = simulate(scenario).reps
+        pipe, provider, clock = _pipeline(monkeypatch, DEADLIFT, scenario.start_time)
+        lost = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in truth]
+        reps = _reps(_run_set(pipe, provider, clock, scenario, bar_lost=lost))
+        assert len(reps) == len(truth)
+        for rep, expected in zip(reps, truth):
+            assert rep.features["top_time"] == pytest.approx(expected.top_time, abs=GAP_TOP_MAX_ERROR_S)
+            cued = [
+                fault for fault in rep.faults
+                if TIER_RANK[fault.severity.value] >= TIER_RANK[fault.details["min_tier"]]
+            ]
+            assert all(fault.fault_type != "deadlift_lockout" for fault in cued)
 
 
 class TestGate:
