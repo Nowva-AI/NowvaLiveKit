@@ -76,7 +76,8 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
   - "Still" means a slope under 0.02 m/s, or under 2.5 standard errors of the bar's own noise.
     The proxy's wrists jitter far more than a tracked bar.
 - **Top:** the bar rose at least 10 cm, reached the expected top height minus 8 cm, and held
-  still (under 0.05 m/s for 3 frames) with the trunk within 35° of vertical.
+  still (under 0.05 m/s for 3 frames it was seen on: an unseen bar is not a still one) with
+  the trunk within 35° of vertical. A top that never held is its peak (below).
   - The expected top height is the standing mid-wrist height minus the wrist-to-bar offset.
     Without a standing reference, it is the median top of the set's earlier reps.
   - The 8 cm margin lets soft lockouts count; D6 then judges them. A trunk 10° or more
@@ -114,7 +115,9 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       (noise-free 4.7° short at a 1.2 s pull and 0.5 s lowering).
     - **The final climb** begins at the end of the last stall: the bar's 5-frame running
       median flat (within the event band) for 0.3 s, below the lockout's level by more than
-      the band, with the hips and knees together at least 12° more bent than at the lockout.
+      the band, with the hips and knees together at least 12° more bent than at the lockout,
+      before the bar first reached that level (after it, a dip and back is a sag: through
+      2 cm of noise its joints can read a stall's 12°).
       A noise dip is not flat for that long, a slow approach rises, and a shrug lifts the bar
       off a lockout as straight as the rest of it.
     - **The lockout's level** is the window's lowest plateau: the median of its frames whose
@@ -124,8 +127,10 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
     - **A lockout that settled upward** (the shoulders drawn back on straight legs, 1–1.5 cm
       inside the hold band, until the lowering) puts the whole window on the raised plateau.
       Below that level by more than the band, a stretch flat for 0.2 s with the hips and
-      knees within 5° of the lockout's is the lockout already reached, not a stall: the level
-      is the first such plateau after the final climb began.
+      knees within 5° of the lockout's, before the bar first reached the level, is the
+      lockout already reached, not a stall: the level is the first such plateau after the
+      final climb began. After the bar reached the level such a plateau is a sag (the
+      shoulders relaxing, then tightened again), and the level stays.
     - **The top** is the arrival at that level on that climb, fitted (§2, Events) over the
       climb's upper half and the hold's first 0.2 s, from below: a climb out of a stall starts
       flat, a frame above the level has arrived, and more of the hold would outweigh the few
@@ -134,7 +139,10 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
       With no fit, the bar slowing evenly into the top from its last seen speed covers the
       rest in twice the time that speed would: the arrival is there, within the gap. When
       that does not land in the gap (a bar lost still in a grind's stall, or speeding up out
-      of it), the hips and knees, still seen, reaching the lockout date it. After a gap long
+      of it), or the hips and knees just after it are still clearly bent (20° past the
+      lockout, beyond the angles' noise: a bar lost on its way into a stall), the hips and
+      knees, still seen, reaching the lockout date it. The top's heights are measured ones:
+      a prediction carried over the gap is none of them. After a gap long
       enough to hide a stall (over 0.3 s), a bar seen again at its level had arrived by then:
       the fit is bounded there too.
     - **On the wrist proxy** the wrists' noise hides a stall a few cm short, and a slow
@@ -171,6 +179,15 @@ The bar drives the rep. The rep signal is the bar's height above its resting hei
 - **Gaps:**
   - A bar missing for up to 0.2 s is a tracking gap, not a lost bar. The last bar keeps its
     geometry (hands on the bar, facing) but gives no height.
+  - The tracker carries a lost bar on at its last velocity for 0.15 s (predicted states). A
+    prediction keeps its height only on the frame between two detections of a 15 Hz
+    detector (0.05 s after the last measurement): coasting longer, it overshoots a bar that
+    stops at the top, and it is geometry only.
+  - **A top that never held, lost from view across its peak:** the highest frame seen is
+    on the climb. On the tracked bar the peak is where the hips and knees were most
+    extended among the frames the bar went unseen around its highest one; the lockout is
+    judged around it and the top dated there. If the highest frame seen sits short of the
+    expected top, the lifter seen standing while the bar was unseen makes it a top.
   - Feet the plates hide keep their last measured position once the lifter is at the bar,
     since they do not move during a set.
 
@@ -377,7 +394,7 @@ noise.
   0 / 2 of 90, max 0.5 s); grinds 3 cm short median 33 ms (0 / 3 of 90 beyond 0.3 s, max
   1.2 s early at 2 cm); a 12° soft lockout held 2 s median 67 ms (4 / 6 of 90 beyond 0.3 s,
   0 / 3 beyond 0.5 s, max 1.5 s late at 2 cm, where the angles' slow wander reads the hold
-  ~20° more bent than its end); slow 5 s pulls are dated early, median 0.23 s (28 of 90
+  ~20° more bent than its end); slow 5 s pulls are dated early, median 0.23 s (29 of 90
   beyond 0.3 s, max 0.73 s), the joints creeping their last few degrees. Noise-free, proxy
   events read up to ~0.1 s early. With the knees hidden at the top, the bar's own fit dates
   it (a review measured −0.2 to +0.57 s at 2 cm).
@@ -399,9 +416,9 @@ noise.
 - **A lockout settling upward** [shrug] (the shoulders drawn back on straight legs, the bar
   up inside the hold band until the lowering) keeps its first plateau's level only when the
   settle clears the event band and the joints read locked through the noise. A 0.8 cm settle
-  on every rep (inside a 3 mm bar's 0.5–0.9 cm band) dates 13 of 64 tops up to 0.41 s late
-  noise-free; at 2 cm AR(0.8), 0.8–1.5 cm settles date 3–5 of 16 tops late with one rep
-  settling and 9–22 of 64 with every rep, and the recap reads a speed loss in 3–7 of 16 sets.
+  on every rep (inside a 3 mm bar's 0.5–0.9 cm band) dates 14 of 64 tops up to 0.41 s late
+  noise-free; at 2 cm AR(0.8), 0.8–1.5 cm settles date 3–6 of 16 tops late with one rep
+  settling and 9–24 of 64 with every rep, and the recap reads a speed loss in 3–7 of 16 sets.
   The rule also dates a few slow 5 s pulls early through 2 cm noise (`IMPLEMENTATION.md`,
   finding 50).
 - **A bar lost for a second on its way to the top** [gaps] (1.5 cm AR(0.8)): lost mid-pull

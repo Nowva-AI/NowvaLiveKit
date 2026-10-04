@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v22).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v23).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -140,12 +140,15 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 
   | Settle | One rep, noise-free | One rep, 2 cm AR(0.8) | Every rep, noise-free | Every rep, 2 cm AR(0.8) |
   |---|---|---|---|---|
-  | 0.8 cm from +0.2 s | 0 of 16, 0 sets | 5 of 16, 3 sets | 13 of 64, 4 sets | 22 of 64, 7 sets |
+  | 0.8 cm from +0.2 s | 1 of 16, 0 sets | 6 of 16, 4 sets | 14 of 64, 4 sets | 24 of 64, 7 sets |
   | 1.0 cm from +0.3 s | 0 of 16, 0 sets | 4 of 16, 4 sets | 0 of 64, 0 sets | 10 of 64, 7 sets |
   | 1.5 cm from +0.2 s | 0 of 16, 0 sets | 3 of 16, 3 sets | 0 of 64, 0 sets | 9 of 64, 4 sets |
 
-  On the previous commit (36e6a4d) the same rows dated 13–16 of 16 and 54–64 of 64 tops late,
-  with a velocity loss in up to 16 of 16 sets. Finding 50 has what is left and why.
+  On 36e6a4d the same rows dated 13–16 of 16 and 54–64 of 64 tops late, with a velocity loss
+  in up to 16 of 16 sets. Finding 50 has what is left and why. A lockout that sags 1.2–2 cm
+  (the shoulders relaxing) and is tightened again before the lowering, every rep: every top
+  within 0.07 s and no velocity loss, noise-free and at 2 cm AR(0.8) (finding 59: on
+  36e6a4d, 2–9 of 64 tops ~0.7 s late at 2 cm, a velocity loss in up to 6 of 16 sets).
 - **Re-setups at the floor:** feet shuffled 5 cm toward the bar while hinged are judged where
   they now stand (D1 6 → 1 cm measured 6 → 1 cm, at 0 and 2 cm noise); feet the plates hide
   keep the stance's lock.
@@ -160,17 +163,24 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 - **Occlusion:** plates hiding the feet whenever the bar is off the floor, also through the
   pipeline; feet hidden from the setup on: the counting holds and D1 is still judged.
 - **Bar dropouts and gaps:** 20 % and 40 % random dropouts, and a bar at 15 Hz; the set never
-  switches to the wrists. [gaps], 1.5 cm AR(0.8): at 10 % and 20 % dropouts on 2.5 s pulls
-  (3 bodies × seeds 0–3) every top is within 0.11 s. A bar lost for 0.2–1 s on its way to the
-  top (the loss starting between 0.9 s before it and 0.2 s after; 12 rows of 27 tops, 3 bodies
-  × seeds 0–2):
+  switches to the wrists. [gaps], 1.5 cm AR(0.8), the bar lost as the tracker reports it (its
+  last velocity carried on for 0.15 s as predicted states, then nothing): at 10 % and 20 %
+  dropouts on 2.5 s pulls (3 bodies × seeds 0–3) every top is within 0.11 s. A bar lost for
+  0.2–1 s on its way to the top (the loss starting between 0.9 s before it and 0.2 s after;
+  12 rows of 27 tops, 3 bodies × seeds 0–2):
   - 1.5 s plain pulls: within 0.13 s on 11 rows. Lost from 0.7 s before the top to 0.3 s
     after, +0.10 to +0.31 s: the last speed, seen mid-pull, finishes slower than the pull.
   - 93 % grinds: within 0.21 s on 10 rows. Lost through the whole finish (from 0.7 or 0.3 s
     before the top to 0.3 s after), up to +0.33 s on 2–3 of 27: the joints date it, through
     the keypoint noise.
-  Noise-free (test): losses from 0.5–0.9 s before the top of 1.2 s pulls, and through a
-  grind's finish, within 0.15 s, with no false velocity loss.
+  - Lost on the way into the stall (0.4 and 0.6 s stalls, from 0.1–0.2 s before them to
+    0.1 s after the top): within 0.21 s, 1 of 27 beyond 0.1 s.
+  - Touch-and-go tops with no pause, lost 0.2 s either side of reps 2–4's (1.2 / 1.0 s and
+    0.9 / 0.8 s, five bodies × seeds 0–3): every set counted, tops within 0.07 s, D6 cued on
+    1 and 2 of 60.
+  Noise-free (test): losses from 0.5–0.9 s before the top of 1.2 s pulls, into and through a
+  grind's stall, across tops that never held and coasted over by the tracker, within 0.1–0.15 s,
+  with no false velocity loss or D6.
 - **Drops and failures:** dropped bars, with the lifter standing over the bar until the next
   setup; failed reps, including a stall at the knees, are events, not reps.
 - **Lockouts:**
@@ -205,10 +215,10 @@ reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clea
 vertical, the same set fakes more than 2 cm of drift.
 
 **Compute (x86)** [compute], 1.5 cm keypoint noise:
-- Analyser: 0.33–0.36 ms median and 0.48–0.64 ms p95 per frame; frames that complete a rep
-  (event fits, the final climb, features, D8's two axes) 2.9–3.1 ms median on default pulls
-  and 5.0 ms (tracked) / 5.5 ms (proxy) on 5 s pulls with 2 s holds. The first frames of a
-  process pay numpy's warm-up once (~12–18 ms).
+- Analyser: 0.27–0.31 ms median and 0.41–0.50 ms p95 per frame; frames that complete a rep
+  (event fits, the final climb, features, D8's two axes) 3.0–3.2 ms median on default pulls
+  and 4.7–4.9 ms (tracked) / 5.4 ms (proxy) on 5 s pulls with 2 s holds. The first frames of
+  a process pay numpy's warm-up once (~12–18 ms).
 - Bar association and tracking: about 0.6–1.1 ms.
 - The Jetson numbers are still to be measured (J1).
 
@@ -558,10 +568,10 @@ vertical, the same set fakes more than 2 cm of drift.
     rep or every rep date every top within 0.05 s with no velocity loss [shrug] (test: 1 cm,
     five bodies, within 0.1 s). What it does not reach:
     - A settle smaller than the event band (3 × the rest's noise, 0.5–0.9 cm on a 3 mm bar)
-      stays inside the hold: 0.8 cm on every rep still dates 13 of 64 tops up to 0.41 s late,
+      stays inside the hold: 0.8 cm on every rep still dates 14 of 64 tops up to 0.41 s late,
       with a velocity loss in 4 of 16 sets.
-    - At 2 cm AR(0.8) the joints' 5° test misses some settles: 3–5 of 16 tops late with one
-      rep settling, 9–22 of 64 with every rep, and a velocity loss in 3–7 of 16 sets.
+    - At 2 cm AR(0.8) the joints' 5° test misses some settles: 3–6 of 16 tops late with one
+      rep settling, 9–24 of 64 with every rep, and a velocity loss in 3–7 of 16 sets.
     - It costs slow pulls a little. A 5 s pull's last centimetres can sit flat for 0.2 s,
       and through 2 cm of keypoint noise its joints can pass the 5° test: on the [tops] draw
       2 more of 90 tracked tops land beyond 0.1 s (up to 0.41 s early).
@@ -605,6 +615,63 @@ vertical, the same set fakes more than 2 cm of drift.
     frames on proxy 5 s pulls with 2 s holds went from 6.4 to 9.8 ms, nearly all of it
     `np.median`'s call on windows of a few frames. `statistics.median` returns the same values
     (every feature identical on 30 noisy sets, both bar sources) in 5.5 ms.
+
+55. **A gap is no hold** (review, round 10). With fewer than two seen frames in its window
+    the bar's velocity read 0, so a bar unseen across a top counted as still and the rep
+    entered TOP inside the gap. On a top that never held, the top was then dated at the last
+    frame seen and the lockout judged on the climb: noise-free, a 0.4 s loss across 1.2 s
+    touch-and-go tops with no pause cued D6 on 30 of 30 reps. An unseen frame now neither
+    starts nor breaks a hold.
+
+56. **A top lost from view on its way up is dated by the joints** (review, round 10). The
+    peak of a top that never held is the highest frame seen; lost on the way up and seen
+    again coming down, that frame is on the climb. On the tracked bar the peak is now where
+    the hips and knees were most extended among the frames the bar went unseen around its
+    highest one: the lockout is judged there and the top dated there. Seen again higher, the
+    bar arrived in or after the gap, which the features date (finding 51; the joints' most
+    extended frame is anywhere in a hold). If the highest frame seen sits short of the
+    expected top, the lifter seen standing while the bar was unseen makes it a top: 0.9 s
+    pulls had merged three reps into one in 10 of 10 sets. Noise-free (test), for a bar
+    dropped or coasted over: within 0.1 s, D6 on at most 1 in 10, every rep counted.
+
+57. **A coasting prediction is no height** (review, round 10). The tracker carries a lost bar
+    on at its last velocity for 0.15 s and the pipeline passes those predicted states on;
+    near the top they overshoot a bar that stops, and the overshoot became the rep's peak
+    (noise-free: the top 0.13–0.17 s early, a false D6 on 4 of 12). A prediction now keeps
+    its height only on the frame between two detections of a 15 Hz detector (0.05 s after
+    the last measurement), and is geometry only after that. Giving no prediction a height
+    would halve a 15 Hz detector's heights: event medians stayed within 100 ms, but a 5 s
+    pull's worst top went from 0.20 to 0.30 s (a probe, every other frame dropped). The
+    top's level, final climb, arrival, fit and gap rules read measured heights only: one
+    coasted frame inside the band had become the arrival, or moved the level, and grinds
+    read 0.3–0.6 s late. The gap tests and the [gaps] rows now emulate the tracker's
+    coasting, and read the same as with the bar dropped outright (test: within 0.1 s, no
+    D6).
+
+58. **A bar lost on its way into a stall is dated by the joints** (review, round 10).
+    Finding 51's speed estimate assumes the bar slows evenly into the top; lost while still
+    moving into a grind's stall, it put the arrival in the stall, 0.3–0.8 s early (worse
+    than the gap's middle). Where the hips and knees over the 0.15 s after the estimate are
+    still clearly bent past the lockout (20°, the bound the wrist proxy already uses; a
+    stall 3–7 % short reads 25–45°), the estimate gives way to the joints reaching the
+    lockout. The stall's own 12° bound vetoed good estimates: through 1.5 cm of correlated
+    keypoint noise the joints drift up to ~15° in 0.3 s, and held tops read 0.2–0.33 s
+    late. Compared with the joints where the bar was seen again instead of the lockout
+    window, a bar seen again just short of the top, still rising, dated it 0.2 s early.
+    Noise-free (test): within 0.15 s.
+
+59. **A sag is neither a settle nor a stall** (review, round 10). Finding 50 read any
+    straight-legged plateau below the hold as the lockout, so a lockout that sagged 1.2–2 cm
+    (the shoulders relaxing) and was tightened again was dated by the sag, 0.13–0.17 s early
+    (18–48 of 64 tops beyond 0.1 s, noise-free). Only a plateau that began before the bar
+    first reached the window's level is a settle now. Under 2 cm AR(0.8) the same sag had
+    another, older failure (on 36e6a4d too): the joints on its plateau could read a stall's
+    12°, and the tightening back up became the last climb, 9 of 64 tops ~0.7 s late with a
+    velocity loss in 6 of 16 sets. A stall now ends before the bar first reaches the level
+    (tests: noise-free within 0.1 s; at 2 cm, at most 1 of 64 beyond 0.15 s, no D10).
+
+60. **The analyser's median is a sort too**, as finding 54's (every feature identical on 30
+    noisy sets).
 
 ## Deferred: needs data, hardware or keys (not code)
 

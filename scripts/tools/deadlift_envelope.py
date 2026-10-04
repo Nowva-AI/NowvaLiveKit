@@ -23,10 +23,11 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from biomechanics.config import BiomechanicsConfig  # noqa: E402
 from biomechanics.deadlift.analyzer import DeadliftFrameInput, DeadliftRepAnalyzer  # noqa: E402
+from biomechanics.deadlift.bar_tracker_3d import DEFAULT_CONFIG as TRACKER_CONFIG  # noqa: E402
 from biomechanics.deadlift.rule_base import TIER_RANK  # noqa: E402
 from biomechanics.deadlift.session_reference import DeadliftSessionReference  # noqa: E402
 from biomechanics.deadlift.simulator import RepScript, Scenario, SimAthlete, SimFrame, SimulatedSet, simulate  # noqa: E402
-from biomechanics.deadlift.types import GRAVITY_SOURCE_MEASURED, DeadliftRepFeatures  # noqa: E402
+from biomechanics.deadlift.types import GRAVITY_SOURCE_MEASURED, BarState3D, DeadliftRepFeatures  # noqa: E402
 from biomechanics.faults.rule_engine import RuleEngine  # noqa: E402
 from biomechanics.profiles.deadlift import DeadliftProfile  # noqa: E402
 from biomechanics.utils.types import CocoKeypoints as CK  # noqa: E402
@@ -53,6 +54,16 @@ UPPER_BODY = (CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER, CK.LEFT_ELBOW, CK.RIGHT_ELBOW
               CK.NOSE, CK.LEFT_EYE, CK.RIGHT_EYE, CK.LEFT_EAR, CK.RIGHT_EAR)
 LOWER_BODY = (CK.LEFT_HIP, CK.RIGHT_HIP, CK.LEFT_KNEE, CK.RIGHT_KNEE, CK.LEFT_ANKLE, CK.RIGHT_ANKLE,
               CK.LEFT_HEEL, CK.RIGHT_HEEL, CK.LEFT_FOOT_INDEX, CK.RIGHT_FOOT_INDEX)
+
+# The tracker's last measured centres its coasting velocity is fitted to.
+TRACKER_VELOCITY_FRAMES = 4
+# A lockout sagging after the top: from SAG_START_S, down and back up over
+# SAG_RAMP_S each, back up from SAG_UP_S.
+SAG_START_S = 0.1
+SAG_RAMP_S = 0.2
+SAG_UP_S = 0.6
+# The holds a settle or a sag happens in, and the lowering after them.
+HELD_TOP = RepScript(top_hold_s=1.2)
 
 Mutation = Callable[[SimFrame], SimFrame]
 
@@ -241,8 +252,7 @@ def _stance(sim: SimulatedSet, kind: str, amount: float, shift_m: float) -> Muta
 
 
 def _settled_up(sim: SimulatedSet, rise_m: float, start_after_s: float, ramp_s: float, rep_indices: tuple[int, ...]) -> Mutation:
-    hold_s = RepScript(top_hold_s=1.2).top_hold_s
-    lower_s = RepScript().lower_s
+    hold_s, lower_s = HELD_TOP.top_hold_s, HELD_TOP.lower_s
     windows = [(sim.reps[index].top_time + start_after_s, sim.reps[index].top_time + hold_s) for index in rep_indices]
 
     def lift_m(t: float) -> float:
@@ -272,17 +282,70 @@ def _settled_up(sim: SimulatedSet, rise_m: float, start_after_s: float, ramp_s: 
     return mutate
 
 
-def _bar_lost(windows: list[tuple[float, float]]) -> Mutation:
+# The bar lowered by sag_m (shoulders relaxed) after the top of each of the reps,
+# then tightened back up before the lowering.
+def _sagged(sim: SimulatedSet, sag_m: float, rep_indices: tuple[int, ...]) -> Mutation:
+    tops = [sim.reps[index].top_time for index in rep_indices]
+
+    def sag_at(t: float) -> float:
+        for top in tops:
+            down, held, up, back = top + SAG_START_S, top + SAG_START_S + SAG_RAMP_S, top + SAG_UP_S, top + SAG_UP_S + SAG_RAMP_S
+            if down <= t < held:
+                return sag_m * (t - down) / SAG_RAMP_S
+            if held <= t < up:
+                return sag_m
+            if up <= t < back:
+                return sag_m * (1.0 - (t - up) / SAG_RAMP_S)
+        return 0.0
+
     def mutate(frame: SimFrame) -> SimFrame:
-        lost = any(start <= frame.timestamp < end for start, end in windows)
-        return frame._replace(bar=None) if lost else frame
+        sag = sag_at(frame.timestamp)
+        if sag <= 0.0:
+            return frame
+        points = frame.points.copy()
+        points[list(UPPER_BODY), 1] += sag
+        left, right = list(frame.bar.left_end_m), list(frame.bar.right_end_m)
+        left[1] += sag
+        right[1] += sag
+        bar = frame.bar.model_copy(update={"left_end_m": tuple(left), "right_end_m": tuple(right)})
+        return frame._replace(points=points, bar=bar)
 
     return mutate
 
 
+# The bar lost on the frames lost(t) picks, as BarTracker3D reports it: a predicted
+# state carried on at the last measured velocity for its max_prediction_s, then None.
+def _coasting(lost: Callable[[float], bool]) -> Mutation:
+    history: list[tuple[float, BarState3D]] = []
+
+    def mutate(frame: SimFrame) -> SimFrame:
+        if not lost(frame.timestamp):
+            history.append((frame.timestamp, frame.bar))
+            del history[:-TRACKER_VELOCITY_FRAMES]
+            return frame
+        if len(history) < 2 or frame.timestamp - history[-1][0] > TRACKER_CONFIG.max_prediction_s + 1e-9:
+            return frame._replace(bar=None)
+        last_t, last = history[-1]
+        times = np.array([t for t, _ in history]) - last_t
+        velocity = np.polyfit(times, np.array([bar.centre for _, bar in history]), 1)[0]
+        shift = velocity * (frame.timestamp - last_t)
+        return frame._replace(bar=last.model_copy(update={
+            "timestamp": frame.timestamp,
+            "left_end_m": tuple((np.asarray(last.left_end_m) + shift).tolist()),
+            "right_end_m": tuple((np.asarray(last.right_end_m) + shift).tolist()),
+            "predicted": True,
+        }))
+
+    return mutate
+
+
+def _bar_lost(windows: list[tuple[float, float]]) -> Mutation:
+    return _coasting(lambda t: any(start <= t < end for start, end in windows))
+
+
 def _dropouts(probability: float, *key: object) -> Mutation:
     rng = _rng(*key)
-    return lambda frame: frame._replace(bar=None) if rng.random() < probability else frame
+    return _coasting(lambda t: bool(rng.random() < probability))
 
 
 # ------------------------------------------------------------------------ sweeps
@@ -475,7 +538,7 @@ def sweep_shrug() -> None:
                 slowed = sets = 0
                 for body_name in ("default", "short", "tall", "long_femurs"):
                     for seed in range(4):
-                        sim = simulate(Scenario(athlete=BODIES[body_name], reps=[RepScript(top_hold_s=1.2)] * 4,
+                        sim = simulate(Scenario(athlete=BODIES[body_name], reps=[HELD_TOP] * 4,
                                                 bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
                         indices = tuple(range(4)) if every_rep else (1,)
                         features = _analyse(sim, _settled_up(sim, rise_m, start_after_s, ramp_s, indices),
@@ -488,6 +551,20 @@ def sweep_shrug() -> None:
                 print(f"lockout settling {rise_m * 100:.1f} cm up from +{start_after_s} s, {'every rep' if every_rep else 'rep 2'}, "
                       f"{sigma_m * 100:.1f} cm AR (4 bodies x seeds 0-3): tops > {SHRUG_SHIFT_S} s late {late} of {len(errors)} "
                       f"(max {max(errors):+.3f}), sets with D10 {slowed} of {sets}")
+    # A lockout that sags (shoulders relaxed) and is tightened again before the lowering, every rep.
+    for sag_m in (0.012, 0.015, 0.02):
+        for sigma_m in (0.0, 0.02):
+            errors = []
+            slowed = 0
+            for body_name in ("default", "short", "tall", "long_femurs"):
+                for seed in range(4):
+                    sim = simulate(Scenario(athlete=BODIES[body_name], reps=[HELD_TOP] * 4, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                    features = _analyse(sim, _sagged(sim, sag_m, tuple(range(4))),
+                                        _noise("ar", sigma_m, "sag", sag_m, sigma_m, body_name, seed))
+                    errors += _top_errors(sim, features)
+                    slowed += any("deadlift_velocity_loss" in rep for rep in _judged(features))
+            print(f"lockout sagging {sag_m * 100:.1f} cm and tightened again, every rep, {sigma_m * 100:.1f} cm AR "
+                  f"(4 bodies x seeds 0-3): {_summary(errors)}; sets with D10 {slowed} of 16")
 
 
 def sweep_hip_shift() -> None:
@@ -529,14 +606,15 @@ def sweep_hip_shift() -> None:
 
 
 def sweep_gaps() -> None:
-    """Bar dropouts and a bar lost around the top, tracked bar, 1.5 cm AR."""
+    """Bar dropouts and a bar lost around the top as the tracker reports it (predicted, then none), tracked bar, 1.5 cm AR."""
     for probability in (0.1, 0.2):
         errors: list[float] = []
         for body_name in ("default", "short", "tall"):
             for seed in range(4):
                 sim = simulate(Scenario(athlete=BODIES[body_name], reps=[RepScript(pull_s=2.5)] * 3,
                                         bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
-                errors += _top_errors(sim, _analyse(sim, _dropouts(probability, "dropouts", probability, body_name, seed)))
+                errors += _top_errors(sim, _analyse(sim, _dropouts(probability, "dropouts", probability, body_name, seed),
+                                                    _noise("ar", 0.015, "dropout_keypoints", probability, body_name, seed)))
         print(f"{probability:.0%} random bar dropouts, 2.5 s pulls (3 bodies x seeds 0-3): {_summary(errors)}")
     for kind, scripts in (("plain", [RepScript(pull_s=1.5)] * 3),
                           ("grind 93%", [RepScript(pull_s=1.6, stall_fraction=0.93, stall_s=0.6, finish_s=0.4)] * 3)):
@@ -550,6 +628,38 @@ def sweep_gaps() -> None:
                     errors += _top_errors(sim, _analyse(sim, lost, _noise("ar", 0.015, "gaps", kind, offset_s, gap_s,
                                                                             body_name, seed)))
             print(f"{kind}: bar lost {gap_s} s from {offset_s:+.1f} s of the top (3 bodies x seeds 0-2): {_summary(errors)}")
+    # Lost on its way into a grind's stall, until just after the top.
+    for stall_s, finish_s, before_s in ((0.4, 0.3, 0.1), (0.6, 0.4, 0.2)):
+        grind = RepScript(pull_s=1.6, stall_fraction=0.93, stall_s=stall_s, finish_s=finish_s)
+        errors = []
+        for body_name in ("default", "short", "tall"):
+            for seed in range(3):
+                sim = simulate(Scenario(athlete=BODIES[body_name], reps=[grind] * 3, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                lost = _bar_lost([(rep.top_time - finish_s - stall_s - before_s, rep.top_time + 0.1) for rep in sim.reps])
+                errors += _top_errors(sim, _analyse(sim, lost, _noise("ar", 0.015, "gaps_into_stall", stall_s, body_name, seed)))
+        print(f"grind 93% (stall {stall_s} s, finish {finish_s} s): bar lost from {before_s} s before the stall to 0.1 s "
+              f"after the top (3 bodies x seeds 0-2): {_summary(errors)}")
+    # A top that never held, the bar lost across it on reps 2-4.
+    for pull_s, lower_s in ((1.2, 1.0), (0.9, 0.8)):
+        script = RepScript(top_hold_s=0.0, pull_s=pull_s, lower_s=lower_s)
+        reps = [script.model_copy(update={"floor_hold_s": 0.0})] * 4 + [script]
+        errors = []
+        cues: list[set[str]] = []
+        exact = sets = 0
+        for body_name, body in BODIES.items():
+            for seed in range(4):
+                sim = simulate(Scenario(athlete=body, reps=reps, bar_noise_m=TRACKED_BAR_NOISE_M, seed=seed))
+                lost = _bar_lost([(rep.top_time - 0.2, rep.top_time + 0.2) for rep in sim.reps[1:4]])
+                features = _analyse(sim, lost, _noise("ar", 0.015, "gaps_no_pause", pull_s, body_name, seed))
+                rep_errors = _top_errors(sim, features)
+                sets += 1
+                if rep_errors:
+                    exact += 1
+                    errors += rep_errors[1:4]
+                    cues += _cued(features)[1:4]
+        lockout = sum("deadlift_lockout" in rep for rep in cues)
+        print(f"no-pause touch-and-go {pull_s} / {lower_s} s, bar lost 0.2 s either side of reps 2-4's tops (5 bodies x "
+              f"seeds 0-3): {exact}/{sets} sets exact; {_summary(errors)}; D6 cued on {lockout} of {len(cues)}")
 
 
 def sweep_counting() -> None:

@@ -29,6 +29,10 @@ SETTLE_AFTER_TOP_S = 0.3
 SETTLE_RAMP_S = 0.3
 HEIGHT_TOLERANCE_M = 1e-9
 COMPUTE_ROWS = 4
+SAG_M = 0.015
+LOST_BEFORE_TOP_S = 0.3
+LOST_AFTER_TOP_S = 0.5
+FRAME_S = 1.0 / 30.0
 SCRIPT_TIMEOUT_S = 300
 
 
@@ -104,6 +108,29 @@ class TestOneSet:
             SETTLE_RISE_M, abs=HEIGHT_TOLERANCE_M)
         assert raised.bar.left_end_m[1] - lifted.bar.left_end_m[1] == pytest.approx(SETTLE_RISE_M, abs=HEIGHT_TOLERANCE_M)
         assert lifted.points[CK.LEFT_HIP] == pytest.approx(raised.points[CK.LEFT_HIP], abs=HEIGHT_TOLERANCE_M)
+
+
+    def test_a_sag_lowers_the_bar_and_shoulders_then_comes_back(self):
+        sim = simulate(Scenario(reps=[RepScript(top_hold_s=1.2)] * 2))
+        mutate = envelope._sagged(sim, SAG_M, rep_indices=(1,))
+        top = sim.reps[1].top_time
+        sagged = next(frame for frame in sim.frames if frame.timestamp >= top + envelope.SAG_START_S + envelope.SAG_RAMP_S)
+        back = next(frame for frame in sim.frames if frame.timestamp >= top + envelope.SAG_UP_S + envelope.SAG_RAMP_S)
+        # Y-down: down is +y.
+        assert mutate(sagged).bar.left_end_m[1] - sagged.bar.left_end_m[1] == pytest.approx(SAG_M, abs=HEIGHT_TOLERANCE_M)
+        assert mutate(back).points == pytest.approx(back.points, abs=HEIGHT_TOLERANCE_M)
+
+    def test_a_lost_bar_coasts_as_the_tracker_reports_it_then_is_gone(self):
+        sim = simulate(Scenario(reps=[RepScript()] * 2))
+        top = sim.reps[0].top_time
+        start, end = top - LOST_BEFORE_TOP_S, top + LOST_AFTER_TOP_S
+        mutate = envelope._bar_lost([(start, end)])
+        states = [(frame.timestamp, mutate(frame).bar) for frame in sim.frames]
+        in_gap = [(t, bar) for t, bar in states if start <= t < end]
+        coasting = [(t, bar) for t, bar in in_gap if bar is not None]
+        assert coasting and all(bar.predicted for _, bar in coasting)
+        assert max(t for t, _ in coasting) - start <= envelope.TRACKER_CONFIG.max_prediction_s + FRAME_S
+        assert in_gap[-1][1] is None
 
 
 class TestCommandLine:
