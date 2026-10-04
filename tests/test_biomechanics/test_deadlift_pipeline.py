@@ -14,10 +14,11 @@ from biomechanics.config import BiomechanicsConfig
 from biomechanics.deadlift.analyzer import DeadliftRepAnalyzer
 from biomechanics.deadlift.rule_base import TIER_RANK
 from biomechanics.deadlift.session_reference import DeadliftSessionReference
-from biomechanics.deadlift.simulator import RepScript, Scenario, simulate
+from biomechanics.deadlift.simulator import RepScript, Scenario, SimAthlete, simulate
 from biomechanics.deadlift.types import GRAVITY_SOURCE_MEASURED, DeadliftPhase
 from biomechanics.faults.session_reference import SessionReference
 from biomechanics.profiles.deadlift import DeadliftProfile, GatedDeadliftProfile
+from biomechanics.utils.types import CocoKeypoints as CK
 from biomechanics.utils.types import PipelineFrame, Skeleton3D
 
 DEADLIFT = "Barbell Conventional Deadlift"
@@ -28,6 +29,22 @@ DEPTH_TARGET_RATIO = 0.05
 TRIANGULATION_STD_SCALE_M = 0.02
 # A top lost from view is dated within this (test_deadlift_analyzer.py's bound).
 GAP_TOP_MAX_ERROR_S = 0.15
+# VALIDATION.md's gate: 1 false correction per 10 reps.
+FALSE_CUE_GATE_RATIO = 0.1
+# Correlated triangulation noise: AR(0.8) at the platform's 1.5 cm, a draw where
+# one knee hidden across slow pulls' lost tops put their climb in the window.
+AR_RHO = 0.8
+CORRELATED_NOISE_M = 0.015
+ONE_KNEE_NOISE_SEED = 16000
+BODIES = (
+    SimAthlete(),
+    SimAthlete(tibia_m=0.38, femur_m=0.40, torso_m=0.47, upper_arm_m=0.27, forearm_m=0.26,
+               hip_half_width_m=0.10, stance_half_width_m=0.11, shoulder_half_width_m=0.17, grip_half_width_m=0.24),
+    SimAthlete(tibia_m=0.48, femur_m=0.50, torso_m=0.57, upper_arm_m=0.33, forearm_m=0.31,
+               hip_half_width_m=0.14, stance_half_width_m=0.15, shoulder_half_width_m=0.21, grip_half_width_m=0.28),
+    SimAthlete(hip_half_width_m=0.095, stance_half_width_m=0.17, grip_half_width_m=0.29),
+    SimAthlete(tibia_m=0.40, femur_m=0.52, torso_m=0.48),
+)
 
 
 class _FakeClock:
@@ -114,6 +131,34 @@ def _run_set(
         else:
             provider.push(frame.points, frame.confidences)
         lost = any(start <= frame.timestamp < end for start, end in bar_lost or [])
+        if frame.bar is not None and not lost:
+            pipe.push_bar_state(frame.bar.model_copy(update={"timestamp": clock.time()}))
+        results.append(pipe.process_frame())
+        clock.now_s += FRAME_DT_S
+    return results
+
+
+def _run_occluded(
+    pipe, provider, clock, scenario: Scenario, hidden: list[tuple[tuple[int, ...], list[tuple[float, float]]]],
+    bar_lost: list[tuple[float, float]], noise_m: float = 0.0, noise_seed: int = 0,
+) -> list[PipelineFrame]:
+    """hidden: keypoints at confidence 0 in their windows; bar_lost: simulation times no
+    bar state is pushed in; noise_m: AR(0.8) triangulation noise, with the confidence the
+    triangulator gives that much error."""
+    sim = simulate(scenario)
+    pipe.set_gravity(sim.gravity_up_world, GRAVITY_SOURCE_MEASURED)
+    rng = np.random.default_rng(noise_seed)
+    confidence_cap = 1.0 / (1.0 + (noise_m / TRIANGULATION_STD_SCALE_M) ** 2)
+    error = np.zeros_like(sim.frames[0].points)
+    results = []
+    for frame in sim.frames:
+        confidences = frame.confidences.copy()
+        for keypoints, windows in hidden:
+            if any(start <= frame.timestamp < end for start, end in windows):
+                confidences[list(keypoints)] = 0.0
+        error = AR_RHO * error + rng.normal(0.0, noise_m * math.sqrt(1.0 - AR_RHO ** 2), error.shape)
+        provider.push(frame.points + error, np.minimum(confidences, confidence_cap) * (confidences > 0.0))
+        lost = any(start <= frame.timestamp < end for start, end in bar_lost)
         if frame.bar is not None and not lost:
             pipe.push_bar_state(frame.bar.model_copy(update={"timestamp": clock.time()}))
         results.append(pipe.process_frame())
@@ -234,6 +279,50 @@ class TestRealWorldInput:
                 if TIER_RANK[fault.severity.value] >= TIER_RANK[fault.details["min_tier"]]
             ]
             assert all(fault.fault_type != "deadlift_lockout" for fault in cued)
+
+
+class TestOccludedLegs:
+    """One knee untriangulated: the pipeline marks the legs unmeasured (an
+    extrapolated knee) while the analyser measures the knee from the other."""
+
+    def test_one_knee_hidden_across_a_lost_top_cues_no_lockout(self, monkeypatch):
+        """The bar's fit alone dates slow pulls' lost tops, early through the noise:
+        their windows keep no frame of the climb (5 of 45 cued when the window
+        tested for any knee measured instead)."""
+        reps = cued = 0
+        for body_index, body in enumerate(BODIES):
+            for seed in range(3):
+                scenario = Scenario(athlete=body, reps=[RepScript(pull_s=2.0)] * 3, bar_noise_m=0.003, seed=seed)
+                lost = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in simulate(scenario).reps]
+                pipe, provider, clock = _pipeline(monkeypatch, DEADLIFT, scenario.start_time)
+                results = _run_occluded(pipe, provider, clock, scenario, [((CK.LEFT_KNEE,), lost)], lost,
+                                        CORRELATED_NOISE_M, ONE_KNEE_NOISE_SEED + 10 * body_index + seed)
+                got = _reps(results)
+                assert len(got) == len(scenario.reps)
+                reps += len(got)
+                cued += sum(
+                    any(fault.fault_type == "deadlift_lockout"
+                        and TIER_RANK[fault.severity.value] >= TIER_RANK[fault.details["min_tier"]]
+                        for fault in rep.faults)
+                    for rep in got
+                )
+        assert cued <= FALSE_CUE_GATE_RATIO * reps
+
+    @pytest.mark.parametrize("bar", ["tracked", "wrist_proxy"])
+    def test_one_knee_hidden_from_the_setup_with_every_top_lost_keeps_the_session(self, monkeypatch, bar: str):
+        """No frame of a rep with its legs measured, and its top lost (the bar, or the
+        wrists on the proxy): process_frame() raised out of the analyser, and the
+        pipeline's process ended the session."""
+        scenario = Scenario(reps=[RepScript(pull_s=1.2)] * 3, bar_noise_m=0.003, track_bar=bar == "tracked")
+        sim = simulate(scenario)
+        knee_hidden = [(sim.reps[0].liftoff_time - 0.5, sim.frames[-1].timestamp + 1.0)]
+        across_the_tops = [(rep.top_time - 0.2, rep.top_time + 0.8) for rep in sim.reps]
+        hidden = [((CK.LEFT_KNEE,), knee_hidden)]
+        if bar == "wrist_proxy":
+            hidden.append(((CK.LEFT_WRIST, CK.RIGHT_WRIST), across_the_tops))
+        pipe, provider, clock = _pipeline(monkeypatch, DEADLIFT, scenario.start_time)
+        results = _run_occluded(pipe, provider, clock, scenario, hidden, across_the_tops if bar == "tracked" else [])
+        assert len(_reps(results)) == len(sim.reps)
 
 
 class TestGate:

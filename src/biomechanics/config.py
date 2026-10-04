@@ -386,6 +386,9 @@ class DeadliftConfig(BaseModel):
     standing_still_s: float = 1.0
     standing_max_knee_deg: float = 20.0
     standing_max_trunk_deg: float = 20.0
+    # Standing with the knees hidden: the hips no more than this closer to the
+    # ankles than standing (the knee limit above shortens the leg ~1.3 cm).
+    standing_max_leg_shortening_m: float = 0.03
     settled_speed_mps: float = 0.20
     body_speed_window_s: float = 0.5
     # The bar is still when its slope is under the speed threshold, or under this
