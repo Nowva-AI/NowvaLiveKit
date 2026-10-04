@@ -1,6 +1,6 @@
 # Conventional deadlift — implementation status
 
-Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v20).
+Branch `claude/deadlift-v1-impl`. It implements the software of `docs/deadlift/PLAN.md` (v21).
 The interface between the pipeline and the voice agent is frozen in
 `.claude/deadlift/CONTRACT.md`. What the analyser does, metric by metric, is in
 `docs/deadlift/KNOWLEDGE.md`.
@@ -31,6 +31,12 @@ Every number below comes from the simulator, not from real lifts. It shows that 
 what it claims under the conditions listed. It says nothing about how real bodies move; that is
 J6 (`VALIDATION.md`).
 
+**Reproducing them.** Each number marked [sweep] is printed by
+`PYTHONPATH=src python scripts/tools/deadlift_envelope.py <sweep>`, which also prints each row's
+bodies and seeds. The keypoint noise is drawn independently for every sweep, row, body and seed
+(a row of n sets is n noise draws; until round 8 one draw per seed was shared by every body).
+Numbers marked (test) are pinned by the named test in `tests/test_biomechanics/`.
+
 **Noise models.** Keypoint noise is added at the analyser's input, after where the pipeline's
 Kalman sits:
 - "i.i.d." is independent per frame.
@@ -38,120 +44,108 @@ Kalman sits:
   it is the closer to the platform's documented 1.6–2.4 cm.
 
 "Cued" means at or above the fault's min tier, as the agent would speak it. Every set has 3 mm
-of bar noise when the bar is tracked.
+of bar noise when the bar is tracked. The five bodies are default, short, tall, narrow hips on a
+wide stance, and long femurs.
 
-**Tracked bar, dead-stop sets.** Each row is 12 sets of 3 clean reps: pulls of 0.6, 1.2 and
-3 s, 4 seeds each.
+**Counting, events and clean sets** [events], default body, 12 sets per row (pulls of 0.6, 1.2
+and 3 s × seeds 0–3). Event error is over liftoff, knee pass, top and floor.
 
-| Keypoint noise | Rep counting | Event error (liftoff, knee, top, floor) | Cued faults on clean reps |
-|---|---|---|---|
-| none | 12/12 sets exact | median 15 ms, p95 67 ms | 0 / 36 |
-| 2.0 cm i.i.d. | 12/12 | median 17 ms, p95 67 ms | 0 / 36 |
-| 2.0 cm AR(0.8) | 12/12 | median 19 ms, p95 67 ms | 0 / 36 |
-| 2.5 cm i.i.d. | 12/12 | median 17 ms, p95 67 ms | 0 / 36 |
-| 2.5 cm AR(0.8) | 12/12 | median 21 ms, p95 67 ms | 1 / 36 |
-
-**Tracked bar, touch-and-go.** Sets of 4 touch-and-go reps plus one dead stop (12 per row):
-
-| Keypoint noise | Rep counting | Event error | Cued on clean reps |
-|---|---|---|---|
-| none | 12/12 | median 17 ms, p95 67 ms | 0 / 60 |
-| 2.0 cm AR(0.8) | 12/12 | median 19 ms, p95 67 ms | 1 / 60 |
-
-Also counted exactly on the tracked bar:
-- 5-rep touch-and-go sets at 2–5 mm bar noise (25 random tempos per noise level);
-- 10-rep sets at 3 mm bar noise plus 2 cm AR keypoint noise.
-
-At 5 mm of bar noise a low point can read as a dead stop: the next rep is then counted as a
-quick re-pull instead of a touch-and-go, but no rep is lost.
-
-**Wrist proxy** (no bar tracking), 12 sets per row:
-
-| Keypoint noise | Dead-stop sets: counting / events / cued | Touch-and-go sets: counting / events / cued |
+| Keypoint noise | Tracked, dead stop (36 reps) | Tracked, touch-and-go (4 + 1 dead stop, 60 reps) |
 |---|---|---|
-| none | 12/12, median 8 ms (p95 100), 0 / 36 | 12/12, median 11 ms (p95 100), 0 / 60 |
-| 1.0 cm i.i.d. | 12/12, median 67 ms (p95 167), 0 / 36 | 12/12, median 33 ms (p95 167), 0 / 60 |
-| 1.0 cm AR(0.8) | 12/12, median 67 ms (p95 282), 0 / 36 | — |
-| 2.0 cm i.i.d. | 12/12, median 100 ms (p95 462), 0 / 36 | — |
-| 2.0 cm AR(0.8) | 12/12, median 100 ms (p95 462), 0 / 36 | 12/12, median 67 ms (p95 433), 1 / 60 |
+| none | 12/12 exact, median 15 ms, p95 67 ms, 0 cued | 12/12, median 18 ms, p95 67 ms, 0 cued |
+| 2.0 cm i.i.d. | 12/12, median 19 ms, p95 67 ms, 0 cued | — |
+| 2.0 cm AR(0.8) | 12/12, median 19 ms, p95 67 ms, 0 cued | 12/12, median 20 ms, p95 67 ms, 0 cued |
+| 2.5 cm i.i.d. | 12/12, median 19 ms, p95 67 ms, 0 cued | — |
+| 2.5 cm AR(0.8) | 12/12, median 20 ms, p95 72 ms, 0 cued | — |
 
-On the proxy the top is the hips and knees reaching the lockout (finding 34): noise-free it
-reads a frame or three early on slow approaches, under noise it is the better date.
-
-The cues on clean reps at 2–2.5 cm AR(0.8) stay within the `VALIDATION.md` gate of 1 false
-correction per 10 reps. Over five bodies (default, short, tall, narrow hips with a wide
-stance, long femurs):
-- Tracked bar, dead-stop sets × three tempos × four seeds: 0 of 180 reps cued at 2 cm AR(0.8)
-  and 1 of 180 at 2.5 cm (D8; round 5 cued 7 and 15, all D8).
-- Wrist proxy, 0.6 s holds, six seeds: 0 / 3 / 5 of 90 at 1.5 / 2 / 2.5 cm AR(0.8) (D8, one
-  D8b; round 7 cued 6 and 15 at 2 and 2.5 cm, mostly D8b).
-- Wrist proxy with no pause at the top (0 and 0.1 s holds, four seeds: 60 dead-stop and 100
-  touch-and-go reps per row): 0–5 per row at 2 cm. At 2.5 cm, beyond the platform's
-  documented 2.4 cm, dead-stop sets with 0–0.1 s holds cue 9 of 60 (mostly D6: the lockout
-  is a few frames of noisy angles), touch-and-go 5–8 of 100.
-
-**Fast touch-and-go on the wrist proxy.** Six-rep sets (5 touch-and-go, 0.4 s lowerings, 0.2 s
-tops), 10 seeds per row: every rep counted at 0.5, 0.6 and 0.8 s pulls, at both 2 cm AR(0.8)
-and 1.5 cm i.i.d. keypoint noise (0 of 360 lost per condition pair). Before round 4, 0.5–0.6 s
-pulls lost whole sets (1 rep counted of 6).
+| Keypoint noise | Wrist proxy, dead stop (36 reps) | Wrist proxy, touch-and-go (60 reps) |
+|---|---|---|
+| none | 12/12, median 8 ms, p95 100 ms, 0 cued | 12/12, median 11 ms, p95 100 ms, 0 cued |
+| 1.0 cm i.i.d. | 12/12, median 63 ms, p95 167 ms, 0 cued | 12/12, median 44 ms, p95 202 ms, 0 cued |
+| 1.0 cm AR(0.8) | 12/12, median 67 ms, p95 228 ms, 0 cued | — |
+| 2.0 cm i.i.d. | 12/12, median 107 ms, p95 462 ms, 0 cued | — |
+| 2.0 cm AR(0.8) | 12/12, median 67 ms, p95 467 ms, 0 cued | 12/12, median 67 ms, p95 267 ms, 0 cued |
 
 The proxy's events are bound by the wrists' noise: event timing past the 100 ms gate is a
-tracked-bar result. Two proxy limits are documented in `KNOWLEDGE.md` §7:
-- a grip-and-rip with no pause at the bottom loses the first rep;
-- standing up off the bar without lifting it counts as a rep (5 counted for 3 with two
-  re-setups; the tracked bar counts 3).
+tracked-bar result. On the proxy the top is the hips and knees reaching the lockout (finding
+34): noise-free it reads a frame or three early on slow approaches, under noise it is the better
+date. A touch-and-go floor event (the low point) can read up to 0.37 s off on the tracked bar.
 
-**Through the real pipeline and its Kalman** (tracked bar and proxy):
-- 3/3 reps at 1, 1.5 and 2 cm triangulation noise, with the closed-loop STANCE reached;
-- touch-and-go 5/5 at 0–2 cm on both bar sources;
-- no cued fault on clean proxy reps at 2 cm i.i.d. or 1.5 cm correlated noise;
-- standing references captured at 1–2 cm.
+**Rep counting** [counting]: every set exact for 5-rep touch-and-go sets at 2, 3, 4 and 5 mm of
+bar noise (25 random tempos each, pulls 0.6–2 s), 10-rep touch-and-go sets at 3 mm plus 2 cm
+AR(0.8) (10 seeds), and fast touch-and-go on the wrist proxy (5 touch-and-go reps, 0.4 s
+lowerings, 0.2 s tops; 0.5, 0.6 and 0.8 s pulls; 10 seeds; 2 cm AR(0.8) and 1.5 cm i.i.d.): 0 of
+360 reps lost. Before round 4, 0.5–0.6 s proxy pulls lost whole sets. At 5 mm of bar noise a low
+point can read as a dead stop: the next rep is then counted as a quick re-pull, not a
+touch-and-go, but no rep is lost.
 
-**Other cases**, each counting every rep:
+**False cues on clean reps over five bodies** [clean], [no_pause]. `VALIDATION.md`'s gate is 1
+false correction per 10 reps.
+
+| Set | 2 cm AR(0.8) | 2.4 cm | 2.5 cm |
+|---|---|---|---|
+| Tracked, dead stop, 3 tempos × seeds 0–3 (180 reps) | 0 | — | 7 (D8 5, D9, D1) |
+| Proxy, 0.6 s holds, seeds 0–5 (90 reps; 0 at 1.5 cm) | 0 | — | 5 (D8 3, D6, D3) |
+| Proxy, no pause (0 s hold), dead stop, seeds 0–7 (120 reps) | 3 | 10 | 13 |
+| Proxy, 0.1 s hold, dead stop (120 reps) | 0 | 7 | 9 |
+| Proxy, no pause, touch-and-go, 0.9 s pulls (200 reps) | 10 (D6 6) | 28 (D6 13, D8 10) | 30 |
+| Proxy, 0.1 s hold, touch-and-go (200 reps) | 3 | 8 | 8 |
+| Tracked, no pause / 0.1 s hold, dead stop (120 reps each) | 0 / 1 | 5 / 3 | 5 / 7 |
+| Tracked, no pause / 0.1 s hold, touch-and-go (200 reps each) | 1 / 5 | 6 / 8 | 9 / 11 |
+
+Within the gate at 2 cm everywhere. At the top of the platform's documented noise (2.4 cm),
+fast touch-and-go proxy reps with no pause at the top are over it (14 %): a top that never held
+is judged on the 0.1 s either side of its peak, a few frames of noisy angles (finding 45 moved
+that window onto the peak; before it, 2 cm cued 20 of 200).
+
+**Through the real pipeline and its Kalman** (test, `test_deadlift_pipeline.py`; tracked bar
+and proxy): 3/3 reps at 1, 1.5 and 2 cm triangulation noise with the closed-loop STANCE
+reached; touch-and-go 5/5 at 0–2 cm on both bar sources; no cued fault on clean proxy reps at
+2 cm i.i.d. or 1.5 cm correlated noise; standing references captured at 1–2 cm.
+
+**Other cases** (test, unless marked), each counting every rep:
 - **Setups:** setup holds of 0, 0.1, 0.2 and 0.3 s with 0.5 s and 1 s hinges (grip-and-rip).
   Standing up off the bar between reps re-judges each setup.
-- **Tempo:** 0.45 s to 5 s pulls with 3 mm bar noise, all events within 100 ms. A
-  0.8 s sticking point mid-pull is ground through and counted. A hitch 90 % of the way up
-  is not taken for the top, with or without a standing reference (top within 100 ms; it
-  was ~1 s early). A grind 2.3–5.8 cm short of lockout for 0.4–0.8 s is timed at the real
-  top within one frame, with no lockout fault (it was 0.75–0.93 s early with a false
-  moderate D6); one that finishes its last 2.5 cm over 1 s, within 0.07 s (median of 12),
-  and over 0.3 s, within 0.2 s (24 of 24). 5 s pulls at 2 cm AR(0.8) keypoint noise: every
-  top within 76 ms (18 reps). On the wrist
-  proxy at 1.5 cm AR(0.8), grinds 3 cm short draw no false lockout cue and are timed within
-  0.17 s (30 of 30; finding 34). A stall about 1 cm short, with the knees inside D6's mild
-  threshold of standing, is the top on the tracked bar and is dated at the stall, with no
-  lockout cue. A 1.5–4 cm shrug at the top, with or without a standing reference, the knees
-  seen or hidden, moves the top at most 0.05 s (0.18 s for a 1.5 cm shrug on the first rep with no standing
-  reference) and reads no velocity loss (it read D10 severe).
+- **Tempo:** 0.45 s to 5 s pulls with 3 mm bar noise, all events within 100 ms. A 0.8 s
+  sticking point mid-pull is ground through and counted. A hitch 90 % of the way up is not
+  taken for the top, with or without a standing reference (top within 100 ms; it was ~1 s
+  early). [tops]: grinds 4–6 % short for 0.4–0.8 s are timed within one frame, with no lockout
+  fault (they were 0.75–0.93 s early with a false moderate D6); a grind finishing its last
+  2.5 cm over 0.3 s within 0.1 s (24 reps), over 1 s with a median of 0.07 s (12 reps; max
+  0.37 s, its last 0.17 s moving the bar under 2 mm); 5 s pulls at 2 cm AR(0.8) over five bodies
+  within 0.1 s on 88 of 90 (max 0.25 s). On the wrist proxy see `KNOWLEDGE.md` §7.
+- **Shrugs at the top** [shrug] (1.2 s holds, every rep shrugged, 4 bodies × seeds 0–3): with a
+  standing reference, 1.5–4 cm shrugs move no top more than 0.18 s (one of 48 at 2.5 cm AR(0.8),
+  +0.37 s), the knees seen or hidden, and read no velocity loss. Without one, a shrug that
+  starts before the bar has read still is taken for the top on 3–8 of 48 reps (+0.83–0.87 s),
+  and the recap then reads a speed loss (D10) in 3–7 of 16 sets.
 - **Re-setups at the floor:** feet shuffled 5 cm toward the bar while hinged are judged where
   they now stand (D1 6 → 1 cm measured 6 → 1 cm, at 0 and 2 cm noise); feet the plates hide
   keep the stance's lock.
-- **Stance, pelvis and turns (D8):** 30 sets of 3 reps over five bodies at 2 cm AR(0.8), on
-  each bar source (tracked / proxy), false D8 cues: lower body 8° off the bar 1 / 2 of 90
-  (round 3: 32 of 48), left foot 6 cm ahead 2 / 1 (round 4: 10 of 24), hip line turned 4°
-  against the legs 2 / 2 (round 5: 10 of 36), a 15° pelvis twist with no sideways travel
-  2 / 1, against 2 / 1 for a clean stance. Standing turned 20° then squaring up, or turning
-  10° at the floor, at 1.5 cm: 0–2 of 90. A real shift with the pelvis turning ±10° with it
-  reads the same as with a square pelvis (noise-free 0.185 either way; round 5 read 0.10 and
-  0.27). Recall and the one case both axes leak: `KNOWLEDGE.md` §7.
-- **Occlusion:**
-  - Plates hiding the feet whenever the bar is off the floor, also through the pipeline.
-  - Feet hidden from the setup on: the counting holds and D1 is still judged.
-- **Bar dropouts:** 20 % and 40 % random dropouts, and a bar at 15 Hz. The set never switches
-  to the wrists. At 10 % and 20 % dropouts on 2.5 s pulls (three bodies, four seeds), every
-  top is within 100 ms.
-- **Drops and failures:**
-  - Dropped bars, with the lifter standing over the bar until the next setup.
-  - Failed reps, including a stall at the knees, are events, not reps.
+- **Stance, pelvis and turns (D8)** [hip_shift], 90 reps per row (five bodies × seeds 0–5),
+  2 cm AR(0.8), tracked / proxy, false D8 cues: clean stance 1 / 2; lower body 8° off the bar
+  0 / 2 (round 3: 32 of 48); left foot 6 cm ahead 1 / 1 (round 4: 10 of 24); hip line turned 4°
+  against the legs 0 / 0 (round 5: 10 of 36); a 15° pelvis twist with no sideways travel 0 / 2.
+  Turned 20° then squaring up, or turning 10° at the floor, at 1.5 cm: 0–3. Both axes 6° off
+  the hips' travel (the stance off the bar, the hip line square to it): 25 / 34, the one case
+  two lines cannot tell from a shift (`KNOWLEDGE.md` §7). A real 0.20 shift reads the same with
+  the pelvis turning ±10° with it (0.17 / 0.13–0.14 median; round 5 read 0.10 and 0.27).
+- **Occlusion:** plates hiding the feet whenever the bar is off the floor, also through the
+  pipeline; feet hidden from the setup on: the counting holds and D1 is still judged.
+- **Bar dropouts and gaps:** 20 % and 40 % random dropouts, and a bar at 15 Hz; the set never
+  switches to the wrists. [gaps]: at 10 % and 20 % dropouts on 2.5 s pulls (3 bodies × seeds
+  0–3) every top is within 0.11 s; a bar lost for 0.2–0.6 s around the top dates it within
+  0.22 s (plain pulls and 93 % grinds).
+- **Drops and failures:** dropped bars, with the lifter standing over the bar until the next
+  setup; failed reps, including a stall at the knees, are events, not reps.
 - **Lockouts:**
   - Over-extended lockouts (25–40° behind vertical) are counted and judged by D5. With no
     standing reference and no earlier top to expect them at they are counted too; D5 needs
     the standing reference to judge them.
-  - Soft lockouts at platform noise (2 cm AR(0.8)): a 14° deficit is cued on 18 of 18 reps; a
-    12° one reads 12.7° (median) against 12.9° noise-free. Held 2 s, its top is never re-dated
-    by the noise: within 0.13 s on a 5 mm tracked bar and 0.27 s on the wrist proxy. A 10°
-    lockout (mild, not cued) is cued on no more proxy reps than tracked ones (five bodies).
+  - [lockout], 2 cm AR(0.8), five bodies: a 14° soft lockout (15.5–16.3° noise-free) is cued
+    on 70 of 90 reps; a 12° one reads 12.1° (median) against 12.9° noise-free. A 10° one
+    (mild, never cued noise-free) is cued on 8 of 60 tracked reps and 16 of 60 proxy reps.
+    [tops]: held 2 s, its top is within 0.14 s on a 5 mm tracked bar (90 reps).
   - A lockout 30° short is a failed rep, and so is a pull that leans back 40° from mid-thigh
     with the knees still bent ~60°, whether the knees are seen or hidden. Over-extended
     lockouts with the knees hidden are still counted (leg length against standing).
@@ -160,28 +154,26 @@ tracked-bar result. Two proxy limits are documented in `KNOWLEDGE.md` §7:
 - **Injected faults:** with noise-free keypoints, every injected fault (D1–D10) fires at
   moderate or worse on every rep. D2's is a hips-first pull scripted without the setup model.
 - **Clean sets:** clean, noisy and tilted-world sets are fault-free.
-- **D2 against a held back angle**, which the setup model reads as 6–12° of excess:
-  - cued on 0 of 90 reps at 2 cm i.i.d. noise and 0 of 90 at 2 cm AR(0.8);
-  - before round 3 it was cued on 31 and 35 of 90.
-- **D2 on a scripted hips-first pull** (ratio ~1.24): cued from the set's second rep on, on
-  64–65 of 90 reps under the same noise. A first rep is cued alone only beyond a 1.30 ratio.
-- **D2's rise ratio** reads within 0.04 of the poses' kinematic truth at 0.6, 1.2 and 3 s
-  pulls (four pull shapes, two bodies). A line through the frames before the knee pass read
-  fast pulls up to 0.12 high.
-- **The next rep improves:** two hips-first reps then three with the chest rising are cued
-  on the first two only, and every rep's ratio matches its own truth.
-- **Near-threshold faults:** at 2 cm i.i.d. keypoint noise, a fault injected just above
-  moderate reads moderate on 3–4 of 8 reps for D5 and D6 (+1–2° over the threshold), and on
-  6–8 of 8 for the others. D9 at +5° reads mild.
+- **D2 against a held back angle** [d2], which the setup model reads as 6–12° of excess (60°
+  to 60°, seeds 0–29): cued on 0 of 90 reps at 2 cm i.i.d. noise and 0 of 90 at 2 cm AR(0.8);
+  before round 3 it was cued on 31 and 35 of 90.
+- **D2 on a scripted hips-first pull** [d2] (45° to 55°, ratio ~1.24): cued from the set's
+  second rep on, on 60 of 90 reps under either noise. A first rep is cued alone only beyond a
+  1.30 ratio.
+- **D2's rise ratio** (test) reads within 0.04 of the poses' kinematic truth at 0.6, 1.2 and
+  3 s pulls (four pull shapes, two bodies). A line through the frames before the knee pass
+  read fast pulls up to 0.12 high.
+- **The next rep improves** (test): two hips-first reps then three with the chest rising are
+  cued on the first two only, and every rep's ratio matches its own truth.
 
 **Gravity:** measured gravity keeps a 3° tilted world from faking drift. Against the body
 vertical, the same set fakes more than 2 cm of drift.
 
-**Compute (x86):**
-- Analyser, at 1.5 cm keypoint noise: 0.3 ms median and 0.5–0.6 ms p95 per frame, and
-  2.8–3.8 ms on the frames that complete a rep (event fits, the final climb, features, D8's
-  two axes), 4–6.5 ms for a 5 s pull with a 2 s hold (more on the proxy), on either bar source. The first frames
-  of a process pay numpy's warm-up once (~12–18 ms).
+**Compute (x86)** [compute], 1.5 cm keypoint noise:
+- Analyser: 0.31–0.37 ms median and 0.46–0.62 ms p95 per frame; frames that complete a rep
+  (event fits, the final climb, features, D8's two axes) 3.0 ms median on default pulls and
+  4.3 ms (tracked) / 6.5 ms (proxy) on 5 s pulls with 2 s holds. The first frames of a
+  process pay numpy's warm-up once (~12–18 ms).
 - Bar association and tracking: about 0.6–1.1 ms.
 - The Jetson numbers are still to be measured (J1).
 
@@ -380,8 +372,8 @@ vertical, the same set fakes more than 2 cm of drift.
     replaces finding 28's window). The hold's most extended 0.3 s is the minimum over windows
     of the very angles D6 judges: under keypoint noise it selected the noise, reading a 14°
     soft lockout ~4° straighter (cued on 8 of 18 reps at 2 cm AR(0.8)) and biasing D5. D6 and
-    D5 now read the hold's last 0.5 s before the lowering: 18 of 18 cued (median 15.9°), and
-    a 12° lockout reads 12.7° against 12.9° noise-free.
+    D5 now read the hold's last 0.5 s before the lowering: 18 of 18 cued on the default body
+    (median 15.9°; 70 of 90 over five bodies with independent noise, the `lockout` sweep).
 
 32. **A noisy median must not resume a held lockout** (review, round 6; replaces finding 29's
     rule). The resume gate opens on every soft lockout (a D6 fault), and a 0.2 s median then
@@ -448,7 +440,8 @@ vertical, the same set fakes more than 2 cm of drift.
     whole hold whose distance from the level (noise above it counted too) a late-ending
     parabola explains better: grinds with a 0.3 s finish read up to 0.47 s late. Frames
     above the level now count as arrived, and the fit keeps the hold's first 0.2 s: within
-    0.2 s on 24 of 24, the slow finish's median 0.07 s (was 0.145 s), 5 s pulls within 76 ms.
+    0.2 s on 24 of 24, the slow finish's median 0.07 s (was 0.145 s), 5 s pulls within 76 ms
+    on the default body (within 0.1 s on 88 of 90 over five bodies, the `tops` sweep).
 
 40. **On the wrist proxy the lowering is dated within the noise, not an event band**
     (review, round 7). An event band (3 × the wrists' rest noise, 3–5 cm) reached 0.13–0.17 s
@@ -480,6 +473,31 @@ vertical, the same set fakes more than 2 cm of drift.
     twice per rep: rep-completing frames on a 5 s pull with a 2 s hold went from 8–10 ms to
     4–5 ms.
 
+45. **A top that never held is judged around its peak, not the highest noisy frame**
+    (review, round 8). On the wrist proxy the highest frame is the highest of the wrists'
+    noise, up to ~0.15 s before the top with the knees still 19–32° bent: touch-and-go reps
+    at 2 cm AR(0.8) drew a false D6 on 14 of 200 (2 severe) against 1 of 200 tracked. The
+    peak is now the vertex of a parabola through the bar's height within 0.3 s of the
+    highest frame.
+
+46. **The lockout's level is its window's lowest plateau.** A shrug inside the hold band
+    (1.5 cm) stays in the hold, and the last 0.5 s caught its way down: their median sat up
+    to ~1 cm above the lockout, so the bar "arrived" during the shrug (13 of 48 tops up to
+    0.63 s late, with a standing reference). The level is now the median of the frames whose
+    running median is within the event band of the window's lowest.
+
+47. **A bar lost as it arrives is dated in the gap.** The fit could not date the top before
+    the first frame the bar was seen again: a 0.4 s loss from 0.1 s before the top read
+    +0.33 s, with a false velocity loss in the recap. The fit now starts at the gap's first
+    frame, and with no fit the top is the gap's middle (within 0.22 s for gaps of 0.2–0.6 s
+    around the top, plain pulls and grinds; was up to +0.53 s).
+
+48. **The envelope is a committed script with independent noise.** The tables were drawn
+    with one noise sequence per seed, shared by every body in a row, and several quoted rates
+    did not hold on other draws (review, round 8). Every simulated number in this file and
+    `KNOWLEDGE.md` §7 now comes from `scripts/tools/deadlift_envelope.py`, which draws the
+    noise per sweep, row, body and seed and prints each row's bodies and seed range.
+
 ## Deferred: needs data, hardware or keys (not code)
 
 | Item | Why it can't be done here |
@@ -504,3 +522,6 @@ vertical, the same set fakes more than 2 cm of drift.
   (PortAudio, program-generator data; the exact command is in `docs/deadlift/CI.md`).
   Everything passes except 12 failures that already fail on `main` in this environment:
   1 listener reconnect, 4 rep sound, 7 v6 program verification.
+- **Simulated envelope:** `PYTHONPATH=src python scripts/tools/deadlift_envelope.py all`
+  re-measures every [sweep] number above (each sweep 2–30 min on one core; `compute` times
+  this machine, so run it alone).

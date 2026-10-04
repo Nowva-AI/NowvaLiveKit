@@ -33,3 +33,4 @@ Utilities for data generation, model management, and audio:
 - `generate_cue_audio.py` — generate pre-cached coaching cue audio via OpenAI TTS
 - `simulate_squat_workout.py` — simulate a full workout through the IPC pipeline
 - `capture_audit.py` — record a webcam clip and audit every pre-IK chain stage frame by frame
+- `deadlift_envelope.py` — re-measure the deadlift's simulated envelope (`docs/deadlift/IMPLEMENTATION.md`)
