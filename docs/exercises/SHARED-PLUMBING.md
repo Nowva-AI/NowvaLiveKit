@@ -17,14 +17,16 @@ Every hook defaults to today's squat behaviour. The squat's output must stay byt
 |---|---|---|
 | `create_rep_analyzer(config: BiomechanicsConfig) -> RepAnalyzer \| None` | `None` | deadlift §3.3. It takes the config the way `create_fault_rules(config)` does, so an analyser reads `config.faults.<exercise>` |
 | `observe_frame(ctx: FrameContext) -> None` | no-op | deadlift §3.3 |
-| `create_session_reference() -> SessionReference \| None` | `None`, so the engine builds the squat `SessionReference` | deadlift §3.3 |
+| `create_session_reference(config: BiomechanicsConfig) -> SessionReference \| None` | `None`, so the engine builds the squat `SessionReference` | deadlift §3.3 |
 | `create_set_diagnosis()` | `None` | deadlift §3.3 |
 | `allows_camera_refine: bool` | `True` | deadlift §3.3 |
 | `needs_bar_3d: bool` | `False` | deadlift §3.3 |
 | `get_readiness_check() -> Callable[[FrameContext], bool] \| None` | `None`, which keeps today's standing gate unchanged | already on base; wired here. For profiles **without** an analyser. The predicate is ANDed into `StandingPoseGate` (see `is_ready`) |
-| `on_rep_rejected(reason, features, angles) -> list[FaultEvent]` | `[]` | this file |
-| `shallow_rep_cue(fault: FaultEvent, streak: int, cued_this_set: int) -> str \| None` | `None` (cue-less) | this file. See §2, "Rejection streak" |
+| `on_rep_rejected(reason, features, angles, config: BiomechanicsConfig) -> list[FaultEvent]` | `[]` | this file |
+| `shallow_rep_cue(fault: FaultEvent, streak: int, cued_this_set: int, config: BiomechanicsConfig) -> str \| None` | `None` (cue-less) | this file. See §2, "Rejection streak" |
 | `reports_depth: bool` | `True` for squat, `False` for others | this file |
+
+Profiles hold no config. Every hook that reads thresholds receives the pipeline's `config` as an argument, including `cue_start_tier` (§4). A profile that overrides one of these hooks must take the same arguments: the pipeline always passes `config`.
 
 When a profile returns an analyser, `pipeline.py` skips its squat-shaped blocks:
 - the frame sample, bottom frame and trajectory;
@@ -60,9 +62,9 @@ class RepAnalyzer(Protocol):
   2. calls `rule_engine.discard_rep()`;
   3. calls `analyzer.discard_rep()`;
   4. sets `rep_data = None`;
-  5. calls `profile.on_rep_rejected(reason, features, angles)`.
+  5. calls `profile.on_rep_rejected(reason, features, angles, config)`.
   Each returned fault goes through the same observability gate as rule faults: `RuleEngine._tag_observability`, made public as `tag_observability`, using `FAULT_MEASUREMENT`. A fault that is not observable is dropped, exactly like a rule verdict.
-  The remaining faults are emitted. A fault with `details["shallow_rep"] = True` also produces a `shallow_rep` message, whose `cue` is `profile.shallow_rep_cue(fault, streak, cued_this_set)`.
+  The remaining faults are emitted. A fault with `details["shallow_rep"] = True` also produces a `shallow_rep` message, whose `cue` is `profile.shallow_rep_cue(fault, streak, cued_this_set, config)`.
 - **Rejection streak.** The pipeline owns all streak state; analysers keep none.
   - `streak` counts consecutive rejections with the same reason within the set, starting at 1.
   - A counted rep resets it to 0.
@@ -80,8 +82,13 @@ Optional analyser methods. The pipeline checks with `hasattr` and falls back to 
   - A profile must not hold analyser state to build its readiness check.
 - **`counter_baseline() -> float | None`.** A float seeds the rep counter's baseline through `rep_counter.seed_baseline(value)`, for example with the press's rack height. `None` keeps the counter's own baseline.
   - It is called when the readiness check latches, and again after **every** rep-counter reset. The pipeline wraps the rest-end and set-boundary `rep_counter.reset()` calls (`pipeline_process.py:1229, 1467, 1604, 2008`) in `pipeline.reset_rep_counter()`, which re-seeds.
+- **Single-camera pitch** (§3, "Camera mount"):
+  - `bind_pitch_certification(certification, profile_name)` hands the analyser the session's `PitchCertification` and its own tripwire, keyed by profile name. The pipeline calls it on every analyser it builds.
+  - `pitch_tripwire_delta() -> float | None` reports a delta trip once. The pipeline polls it after `observe` and again right after `finish_rep`, so a trip found in a rep's own setup judges that rep's verdicts uncertified.
+  - `camera_pitch_untrusted: bool` is the gross tripwire on an uncertified camera. The pipeline signals its first transition once a session, whatever exercise trips it.
+- Each analyser observes a frame timestamp once. The pipeline skips `observe` on a repeated timestamp (the Kalman warm-up after the latch repeats the latched frame).
 
-`set_exercise()` builds a fresh analyser and a fresh session reference. Only the depth target carries over, and it belongs to the squat.
+`set_exercise()` builds a fresh analyser and a fresh session reference. Two things carry over: the depth target, which belongs to the squat, and the single camera's `PitchCertification` (§3), which belongs to the session.
 
 ## 3. `FrameContext` (passed to `observe_frame`, `observe` and the readiness checks)
 
@@ -112,6 +119,8 @@ Profiles may add fields additively.
     - Each exercise states what certification requires for its own metrics, for example a pitch limit and a lens-height band, and what it unlocks.
     - On a certified mount, the pitch estimator is used only as a **delta** tripwire: the change from the reading recorded at certification, taken with the same posture. Posture and depth bias largely cancel in a delta.
     - If the delta exceeds the exercise's stated tolerance, certification is revoked for the session.
+    - **State.** `PitchCertification` (`utils/camera_mount.py`) is session-owned and created by the pipeline. It holds the revoked flag and one tripwire per profile name, so a reading survives exercise switches and split sets (press → squat → press, an RDL pool with a press in between). Each exercise only compares readings taken in its own posture; the press catches a knock made during another exercise when it comes back.
+    - **Signal.** A revocation or a gross trip sends `pipeline_status` with status `"camera_pitch"` and the reading in `details` (`{"delta_deg": …}` or `{"pitch_deg": …}`). The agent plays `level_camera` once a session.
   - **Pitch leak on one camera.** On one camera the world frame is aligned to the camera, not to gravity. With camera pitch θ, a "vertical" difference reads Δy·cos θ + Δz·sin θ. The sin term leaks forward and back motion into every height and tilt metric: 14% at 8°, 26% at 15°.
     - When `pitch_certified`, an analyser profile rotates the camera-frame skeleton about the camera X axis by `mount_pitch_deg` before computing any vertical or tilt metric. A shared helper does this: `geometry.level_camera_frame(points, pitch_deg)`. An inclinometer accurate to ±1° leaves a pitch-error leak under 2%.
     - **Levelling is not free.** Each levelled height becomes y·cos θ + z·sin θ, so it brings in the monocular regressed depth at sin θ.
@@ -129,7 +138,7 @@ Profiles may add fields additively.
 - **Cue fallback (deadlift §4.3.1).** `cache_cues` carries `"fault_to_cue": profile.get_fault_to_cue_map()`. `orchestrator.set_exercise(name, is_squat, fault_to_cue)` stores the map, and `_add_fault_candidate` and the rest-complete focus line use it instead of the squat `FAULT_TO_CUE_MAP`. For the squat the map is `FAULT_TO_CUE_MAP`, so nothing changes.
 - **Start tier and recorded-only verdicts.**
   - Profile attribute `min_cue_tiers: dict[fault_type, FaultSeverity]`, the static start tiers. A fault type that is missing starts at mild, so the squat is unchanged.
-  - Profile method `cue_start_tier(fault_type, ctx: FrameContext) -> FaultSeverity`. By default it looks the fault up in `min_cue_tiers`. A profile overrides it when a start tier depends on session state. Example: RDL hip sink starts at mild only while `ctx.pitch_certified`, and at moderate otherwise, including after the delta tripwire revokes certification mid-session.
+  - Profile method `cue_start_tier(fault_type, ctx: FrameContext, config: BiomechanicsConfig) -> FaultSeverity`. By default it looks the fault up in `min_cue_tiers`. A profile overrides it when a start tier depends on session state. Example: RDL hip sink starts at mild only while `ctx.pitch_certified`, and at moderate otherwise, including after the delta tripwire revokes certification mid-session.
   - The pipeline calls `cue_start_tier` when each verdict is formed, and is the only place that stamps `details["recorded_only"] = True` on a verdict below the start tier. Rules never stamp it themselves.
   - A cue of None is not enough on its own: the orchestrator reads a None cue as "decide here" and fills one in from the fault-to-cue map (`coaching_orchestrator.py:948-951`). Recorded-only verdicts are therefore filtered explicitly on every path:
     - **Bridge.** `ipc_bridge` sends them with `"recorded_only": true` on the `fault` message, and keeps them out of `rep_complete.faults_in_rep`. They stay in `faults_detailed`, flagged, for the DB and the recap.
@@ -140,7 +149,7 @@ Profiles may add fields additively.
       - `get_fault_progress` (`:853`);
       - `get_multi_session_fault_trends` (`:929`);
       - the set-summary `fault_summary` that `ipc_bridge.send_set_complete` produces (`:363-372`) for the display.
-      So no "most common fault", trend or on-screen count ever rests on an untrusted verdict. `evaluate_cue_outcome` needs no change, because a recorded-only verdict always reads as "decreased".
+      So no "most common fault", trend or on-screen count ever rests on an untrusted verdict. A setup note (`details.setup_note`, for example the press grip, judged once per set) is skipped by the same aggregations, by `RepData.is_clean` and by both set-summary `fault_summary` loops: it rides on a rep but is not a rep fault. `evaluate_cue_outcome` needs no change, because a recorded-only verdict always reads as "decreased".
     - **One filter for every agent-side reader.** `agent/services/fault_filters.py::reportable_faults(faults, spoken: bool) -> list`:
       - It always drops `details.recorded_only` verdicts.
       - When `spoken` is true, it also drops `approximate` verdicts unless the caller hedges them.
@@ -210,7 +219,7 @@ The deadlift plan moved to v13 (`deadlift-PLAN-v13-reference.md` §3.1–3.5). I
 
 | Item | Decision |
 |---|---|
-| Start-tier table | Named `min_cue_tiers` (deadlift name). `cue_start_tier(fault_type, ctx)` stays as the session-aware override. |
+| Start-tier table | Named `min_cue_tiers` (deadlift name). `cue_start_tier(fault_type, ctx, config)` stays as the session-aware override. |
 | Keypoints and idle timeout | Profile attributes `tracking_keypoints` and `set_idle_timeout_s`. The defaults are squat values. |
 | `feeds_body_calibration: bool` | New, default `True`. A profile whose poses would corrupt the standing body measurement sets it `False`. Each plan decides (the deadlift says False). |
 | `gate_until_ready: bool` | New, default `False`. When True and the profile isn't coaching-ready (the dev override counts as ready), `get_profile` returns an `UntrackedProfile` that keeps the gated profile's `allows_camera_refine` and `feeds_body_calibration` values. This stops scheduled programs ("Barbell Romanian Deadlift", "Barbell Overhead Press") from running unvalidated rules. **OHP and RDL set it True** until their flip gates pass. |
@@ -218,6 +227,6 @@ The deadlift plan moved to v13 (`deadlift-PLAN-v13-reference.md` §3.1–3.5). I
 | Analyser rep signal | The analyser exposes `rep_signal: float`, NaN when unknown, updated in `observe`. When an analyser exists, the pipeline reads `analyzer.rep_signal` instead of `profile.get_rep_signal`. |
 | `finish_rep` / rep start | This spec's `finish_rep(rep_number)` and `on_rep_start(piston)` are kept. They correspond to the deadlift's `finish_rep()` and `start_rep(liftoff=...)`. Whichever branch lands second renames to the first. |
 | Activation | A single `_activate_profile(pipeline, session_tracker, bridge, exercise_name, meta=None)` in `pipeline_process.py` runs at startup and on every `set_exercise`. It sets `diagnosis_enabled`, installs `create_set_diagnosis()`, applies metadata and calls `prepare_exercise`. It replaces the separate startup lines and `_switch_exercise`. |
-| `RuleEngine(reference=...)` | Optional argument, default `None`, meaning `SessionReference()`. It is passed from `profile.create_session_reference()`. |
+| `RuleEngine(reference=...)` | Optional argument, default `None`, meaning `SessionReference()`. It is passed from `profile.create_session_reference(config)`. |
 | Config | Either form is fine: `faults.<exercise>` sub-models (OHP, RDL), or `<exercise>_*` fields in `FaultsConfig` plus a top-level section with an explicit parse branch (deadlift). |
 | Analyser path in `RepData` | `max_depth_angle` comes from `features.max_depth_angle` (NaN allowed). `depth_target_met = True`. Features are dumped after `finish_rep`. |

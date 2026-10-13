@@ -368,7 +368,7 @@ New `rdl.counter: HipPositionCounterConfig` in YAML. The duration fields are con
 `RdlRepAnalyzer.rejection_reason(features)` (SHARED-PLUMBING §2) runs on every completed excursion. It
 returns None for a counted rep, `"partial"`, or `"ignore"`.
 - On a reason, the pipeline runs the spec's rejection sequence: `reject_last_rep`, `discard_rep` on the
-  engine and the analyser, `rep_data = None`, then `profile.on_rep_rejected(reason, features, angles)`.
+  engine and the analyser, `rep_data = None`, then `profile.on_rep_rejected(reason, features, angles, config)`.
 - A rejected excursion therefore never reaches `SessionReference.update`.
 
 Counting uses an absolute floor on **hand travel**, because hand travel is robust to the bias budget.
@@ -385,8 +385,16 @@ Coaching uses the athlete's own range.
   - Mapping of the 0.33 floor (bar over midfoot, or against the front of the legs where they reach
     further forward): k20/s5 → 43.2°, k15/s4 → 48.0°, k20/s0 → 35.5°, k15/s8 → 58.8°, k20/s10 → 55.2°.
     A 45° hinge at k20/s5 reads 0.35; 50° at k15/s4 reads 0.35.
+  - Measured through the pipeline (implementation review, round 2), travel reads about 0.01 below
+    this noise-free table on the rig and ±0.02 on one camera. Reps within ~2° of the floor therefore
+    count inconsistently: 45° at k20/s5 counted 11 of 15 on one camera, 48° at k15/s4 0 of 15 on the
+    rig. The floor is decided again at validation; 0.30 would count k15/s4 from about 45° and still
+    clear the biased dip below by 0.11.
   - Knees forward lower the travel at a given hinge (the hips stay higher and further forward), so a
-    knees-forward RDL needs ~10–15° more hinge to count; hip sink coaches that pattern.
+    knees-forward RDL needs ~10–15° more hinge to count. Hip sink does **not** catch this pattern: it
+    falls as the knees go forward (§4.4), about 0.01 at k15/s8 against a 0.12 mild band. Measured at
+    k15/s8: reps count from about 59°, reps of about 51–59° are partials (cued `rdl_lower` from the
+    second in a row), and below about 51° the excursion is silently ignored.
   - A grip or re-rack dip to mid-thigh hooks reads 0.14 (≤ 0.19 with bias): 0.14 below the floor, more
     than the 0.09 margin required, and below the 0.25 partial start.
   - If the wrists are unseen in the bottom window, fall back to `hinge_deg ≥ 50°`, kept conservative

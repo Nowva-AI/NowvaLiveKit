@@ -512,13 +512,18 @@ class IPCBridge:
     # Pipeline status
     # ------------------------------------------------------------------
 
-    def send_pipeline_status(self, status: str, latency: Dict[str, float]) -> None:
-        """Broadcast pipeline health status."""
-        self._send({
+    def send_pipeline_status(
+        self, status: str, latency: Dict[str, float], details: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Broadcast pipeline health status, with the status's own readings when it has any."""
+        message: Dict[str, Any] = {
             "type": "pipeline_status",
             "status": status,
             "latency_ms": latency,
-        })
+        }
+        if details is not None:
+            message["details"] = details
+        self._send(message)
 
     # ------------------------------------------------------------------
     # Helpers

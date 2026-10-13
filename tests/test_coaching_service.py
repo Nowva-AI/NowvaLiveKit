@@ -1238,7 +1238,9 @@ class TestProfileNameFollowsTheGate:
 # =============================================================================
 
 RDL_CUE_MAP = {"rdl_hip_sink": "rdl_hips_back"}
-CAMERA_PITCH_MESSAGE = {"type": "pipeline_status", "status": "camera_pitch", "latency_ms": {"delta_deg": 4.0}}
+CAMERA_PITCH_MESSAGE = {
+    "type": "pipeline_status", "status": "camera_pitch", "latency_ms": {}, "details": {"delta_deg": 4.0},
+}
 MODERATE_WIDER_GRIP_NOTE = {"fault_id": "press_grip", "direction": "wider", "severity": "moderate"}
 FAULT_LABEL_HIP_SINK = "letting the hips sink (squatting it) instead of pushing them back"
 

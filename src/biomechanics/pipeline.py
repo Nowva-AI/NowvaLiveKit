@@ -1077,10 +1077,10 @@ class BiomechanicsPipeline:
             analyzer.on_rep_start(piston=was_in_rep)
         return rep_data, shallow_rep, shallow_cue, revoked_deg
 
+    # An analyser's delta tripwire trip revokes certification for the session,
+    # and every verdict of this frame stamped after it is judged uncertified.
+    # Returns the delta when this poll revoked.
     def _poll_pitch_tripwire(self, analyzer: RepAnalyzer, ctx: FrameContext) -> float | None:
-        """An analyser's delta tripwire trip revokes certification for the session,
-        and every verdict of this frame stamped after it is judged uncertified.
-        Returns the delta when this poll revoked."""
         tripwire_delta = getattr(analyzer, "pitch_tripwire_delta", None)
         delta_deg = tripwire_delta() if tripwire_delta is not None else None
         if delta_deg is None or self._pitch_certification.revoked:

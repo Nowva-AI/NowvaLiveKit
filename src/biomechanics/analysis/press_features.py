@@ -670,9 +670,9 @@ class PressRepAnalyzer:
         self._first_rep_pending = True
         self._note_rack_pitch(samples)
 
+    # Pools rack-hold standing pitch readings into the set's; True when the
+    # set's one tripwire check, due once enough are in, finds the camera moved.
     def _note_rack_pitch(self, samples: list[PressFrameSample]) -> bool:
-        """Pools rack-hold standing pitch readings into the set's; True when the
-        set's one tripwire check, due once enough are in, finds the camera moved."""
         if self._capture_mode != SINGLE_CAMERA or not self._pitch_certified:
             return False
         self._set_pitch_readings.extend(_finite([sample.standing_pitch_deg for sample in samples]))

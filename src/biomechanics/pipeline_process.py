@@ -342,14 +342,14 @@ def _send_shallow_rep(bridge: IPCBridge, result: PipelineFrame, set_number: int)
     print(f"[SHALLOW REP] depth_class={result.shallow_rep_class} — not counted")
 
 
+# pipeline_status "camera_pitch" (the agent plays level_camera once) when a
+# delta tripwire revoked the certified mount or a gross tripwire found an
+# uncertified camera far off level.
 def _send_camera_pitch_status(bridge: IPCBridge, result: PipelineFrame) -> None:
-    """pipeline_status "camera_pitch" (the agent plays level_camera once) when a
-    delta tripwire revoked the certified mount or a gross tripwire found an
-    uncertified camera far off level."""
     if result.pitch_certification_revoked_deg is not None:
-        bridge.send_pipeline_status("camera_pitch", {"delta_deg": result.pitch_certification_revoked_deg})
+        bridge.send_pipeline_status("camera_pitch", {}, {"delta_deg": result.pitch_certification_revoked_deg})
     if result.camera_pitch_untrusted_deg is not None:
-        bridge.send_pipeline_status("camera_pitch", {"pitch_deg": result.camera_pitch_untrusted_deg})
+        bridge.send_pipeline_status("camera_pitch", {}, {"pitch_deg": result.camera_pitch_untrusted_deg})
 
 
 def _readiness_hint(pipeline: BiomechanicsPipeline, default: str) -> str:

@@ -108,8 +108,12 @@ def _is_recorded_only(fault: dict) -> bool:
     return bool(fault.get("recorded_only") or (fault.get("details") or {}).get("recorded_only"))
 
 
+# A setup note (the press grip, judged once per set) rides on a rep but is not a rep fault.
 def _counted_faults(rep_faults: list[dict] | None) -> list[dict]:
-    return [fault for fault in rep_faults or [] if not _is_recorded_only(fault)]
+    return [
+        fault for fault in rep_faults or []
+        if not _is_recorded_only(fault) and not (fault.get("details") or {}).get("setup_note")
+    ]
 
 
 def _build_rep_row(message: dict) -> dict:

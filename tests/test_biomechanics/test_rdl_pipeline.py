@@ -50,7 +50,8 @@ MODERATE_SQUAT_BOTTOM = RdlPose(70.0, 60.0, 15.0)
 UNRACK_TRAVEL = 0.14
 # A grip or re-rack dip at the top of the bias budget (rdl.md §3.6, §4.3).
 WORST_DIP_TRAVEL = 0.19
-# Soft-knee RDLs a tight-hamstring lifter reaches (rdl.md §3.6): all count.
+# Soft-knee RDLs a tight-hamstring lifter reaches (rdl.md §3.6): all count on these
+# noise-free poses. With keypoint noise, reps within ~2° of the floor count inconsistently.
 SOFT_KNEE_BOTTOMS = [
     pytest.param(RdlPose(45.0, 20.0, 5.0), id="45deg-k20-s5"),
     pytest.param(RdlPose(50.0, 15.0, 4.0), id="50deg-k15-s4"),

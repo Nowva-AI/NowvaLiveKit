@@ -391,7 +391,8 @@ class TestCameraPitchStatus:
 
         statuses = [message for message in mock_ipc_client.messages if message["type"] == "pipeline_status"]
         assert [message["status"] for message in statuses] == ["camera_pitch", "camera_pitch"]
-        assert [message["latency_ms"] for message in statuses] == [{"delta_deg": 4.0}, {"pitch_deg": -12.0}]
+        assert [message["details"] for message in statuses] == [{"delta_deg": 4.0}, {"pitch_deg": -12.0}]
+        assert [message["latency_ms"] for message in statuses] == [{}, {}]
 
     def test_an_ordinary_frame_sends_nothing(self, mock_ipc_client):
         from biomechanics.coaching.ipc_bridge import IPCBridge

@@ -765,6 +765,35 @@ class TestRecordedOnlyIsNeverAggregated:
         assert _counted_faults([shallow_rep, counted]) == [counted]
 
 
+def _setup_note_detail(fault_type="press_grip", severity_score=1.0):
+    detail = _fault_detail(fault_type, severity_score)
+    detail["details"] = {"setup_note": True}
+    return detail
+
+
+class TestSetupNoteIsNeverAggregated:
+    def test_top_faults_and_per_set_counts_skip_it(self):
+        from datetime import datetime
+
+        summary = build_baseline_summary(
+            started_at=datetime.utcnow(),
+            mean_session_score=None,
+            total_reps=2,
+            total_sets=1,
+            set_rows=[_FakeSetRow(set_number=1)],
+            rep_rows=[
+                _FakeBaselineRep(faults=[_setup_note_detail()]),
+                _FakeBaselineRep(faults=[_fault_detail("press_lockout", 2.0)]),
+            ],
+        )
+        assert [entry["fault_type"] for entry in summary["top_faults"]] == ["press_lockout"]
+        assert summary["per_set"][0]["faults"] == {"press_lockout": 1}
+
+    def test_fault_progress_series_skips_it(self):
+        reps = [_FakeRepRow("t1", 1, [_setup_note_detail()])]
+        assert _extract_fault_series(reps, "press_grip") == []
+
+
 class TestEndOfRepFaultTypes:
     def test_rdl_lockout_and_missed_press_are_end_of_rep(self):
         from db.biomechanics_persistence import END_OF_REP_FAULT_TYPES
