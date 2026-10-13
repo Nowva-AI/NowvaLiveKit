@@ -44,6 +44,10 @@ FOOT_CONTACT_PAIRS = [
 # difference is noise rather than foot inclination.
 MIN_FOOT_LENGTH_M = 0.10
 
+# last_failure when the gate's own checks pass but the exercise's readiness
+# predicate (setup position) does not.
+PROFILE_CHECK_FAILURE = "profile_check"
+
 
 def _frontal_knee_flexion(points: np.ndarray) -> tuple:
     # Monocular depth (z) is too noisy for a 3D knee angle — straight legs
@@ -144,16 +148,22 @@ class StandingPoseGate:
         """Return (consecutive_passes, required_frames) for status tracking."""
         return (self._consecutive_passes, self.required_consecutive_frames)
 
-    def check(self, skeleton: Skeleton3D) -> bool:
+    def check(self, skeleton: Skeleton3D, profile_check: bool = True) -> bool:
         """
         Check if the current skeleton passes the standing pose gate.
 
-        Returns True once the gate is satisfied (and stays True forever).
+        profile_check is the exercise's own readiness predicate for this frame,
+        ANDed with the gate's checks over the consecutive-frame window; it never
+        replaces them. Returns True once the gate is satisfied (and stays True forever).
         """
         if self._passed:
             return True
 
-        if self._check_single_frame(skeleton):
+        frame_passes = self._check_single_frame(skeleton)
+        if frame_passes and not profile_check:
+            self.last_failure = PROFILE_CHECK_FAILURE
+            frame_passes = False
+        if frame_passes:
             self._consecutive_passes += 1
         else:
             self._consecutive_passes = 0

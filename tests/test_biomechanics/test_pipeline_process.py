@@ -265,14 +265,16 @@ class TestSwitchExercise:
         from biomechanics.coaching.session_tracker import SessionTracker
         from biomechanics.config import BiomechanicsConfig
         from biomechanics.pipeline import BiomechanicsPipeline
-        from biomechanics.pipeline_process import _switch_exercise
+        from biomechanics.pipeline_process import _activate_profile
+        from biomechanics.profiles.overhead_press import OverheadPressProfile
 
+        monkeypatch.setattr(OverheadPressProfile, "coaching_ready", True)
         monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
         pipeline = BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
         bridge = IPCBridge(mock_ipc_client)
         session_tracker = SessionTracker(bridge)
 
-        _switch_exercise(pipeline, session_tracker, bridge, "Barbell Overhead Press")
+        _activate_profile(pipeline, session_tracker, bridge, "Barbell Overhead Press")
 
         assert pipeline.profile.name == "overhead_press"
         assert not session_tracker.diagnosis_enabled
@@ -281,3 +283,139 @@ class TestSwitchExercise:
         assert cache_cues["profile"] == "overhead_press"
         assert "press_lockout" in cache_cues["cues"]
         assert "knees_out" not in cache_cues["cues"]
+
+
+class _ViewRecordingProvider:
+    def __init__(self) -> None:
+        self.view_recording: list[bool] = []
+
+    def set_view_recording(self, enabled: bool) -> None:
+        self.view_recording.append(enabled)
+
+
+class TestActivateProfile:
+    """One activation path at startup and on every set_exercise (SHARED-PLUMBING.md §9)."""
+
+    def _parts(self, monkeypatch, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.coaching.session_tracker import SessionTracker
+        from biomechanics.config import BiomechanicsConfig
+        from biomechanics.pipeline import BiomechanicsPipeline
+
+        monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
+        pipeline = BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
+        pipeline._multi_camera_provider = _ViewRecordingProvider()
+        bridge = IPCBridge(mock_ipc_client)
+        return pipeline, SessionTracker(bridge), bridge
+
+    def test_startup_keeps_the_pipeline_built_for_the_exercise(self, monkeypatch, mock_ipc_client):
+        from biomechanics.pipeline_process import _activate_profile
+
+        pipeline, tracker, bridge = self._parts(monkeypatch, mock_ipc_client)
+        rule_engine = pipeline._rule_engine
+        _activate_profile(pipeline, tracker, bridge, "Barbell Back Squat", startup=True)
+
+        assert pipeline._rule_engine is rule_engine
+        assert tracker.diagnosis_enabled and tracker.reports_depth
+        assert tracker.set_diagnosis is None
+        assert pipeline._multi_camera_provider.view_recording == [True]
+        cache_cues = [m for m in mock_ipc_client.messages if m["type"] == "cache_cues"]
+        assert [m["profile"] for m in cache_cues] == ["squat"]
+
+    def test_a_switch_rebuilds_the_pipeline_and_applies_the_metadata(self, monkeypatch, mock_ipc_client):
+        from biomechanics.pipeline_process import _activate_profile
+        from biomechanics.profiles.untracked_variant import UntrackedVariantProfile
+
+        pipeline, tracker, bridge = self._parts(monkeypatch, mock_ipc_client)
+        rule_engine = pipeline._rule_engine
+        _activate_profile(pipeline, tracker, bridge, "Barbell Sumo Deadlift", {"grip": "mixed"})
+
+        assert pipeline._rule_engine is not rule_engine
+        assert isinstance(pipeline.profile, UntrackedVariantProfile)
+        assert not tracker.diagnosis_enabled
+        assert tracker.exercise_meta == {"grip": "mixed"}
+        assert pipeline._multi_camera_provider.view_recording == [False]
+
+    def test_a_gated_exercise_runs_untracked(self, monkeypatch, mock_ipc_client):
+        from biomechanics.pipeline_process import _activate_profile
+
+        pipeline, tracker, bridge = self._parts(monkeypatch, mock_ipc_client)
+        _activate_profile(pipeline, tracker, bridge, "Barbell Romanian Deadlift")
+
+        assert pipeline.profile.name == "untracked"
+        assert [m for m in mock_ipc_client.messages if m["type"] == "cache_cues"][-1]["profile"] == "untracked"
+
+
+class TestShallowRepDelivery:
+    def test_a_squat_shallow_rep_keeps_its_depth_class_and_cue(self, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.pipeline_process import _send_shallow_rep
+        from biomechanics.utils.types import PipelineFrame
+
+        bridge = IPCBridge(mock_ipc_client)
+        _send_shallow_rep(bridge, PipelineFrame(frame_index=0, timestamp=0.0, shallow_rep_class=1), set_number=1)
+
+        message = mock_ipc_client.messages[-1]
+        assert (message["depth_class"], message["cue"]) == (1, "deeper")
+
+    def test_an_analyser_rejection_carries_the_profiles_cue_and_label(self, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.pipeline_process import _send_shallow_rep
+        from biomechanics.utils.types import FaultEvent, FaultSeverity, PipelineFrame
+
+        fault = FaultEvent(
+            fault_type="rdl_partial", severity=FaultSeverity.MODERATE, severity_score=1.5, message="m",
+            details={"shallow_rep": True, "range_label": "knee"},
+        )
+        frame = PipelineFrame(
+            frame_index=0, timestamp=0.0, faults=[fault], analyzer_shallow_rep=True, shallow_rep_cue="rdl_lower",
+        )
+        _send_shallow_rep(IPCBridge(mock_ipc_client), frame, set_number=2)
+
+        message = mock_ipc_client.messages[-1]
+        assert message["cue"] == "rdl_lower"
+        assert message["depth_class"] is None
+        assert message["label"] == "knee"
+        assert message["set_number"] == 2
+
+
+class TestCameraPitchStatus:
+    def test_a_revoked_mount_and_a_far_off_level_camera_each_send_camera_pitch(self, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.pipeline_process import _send_camera_pitch_status
+        from biomechanics.utils.types import PipelineFrame
+
+        bridge = IPCBridge(mock_ipc_client)
+        _send_camera_pitch_status(bridge, PipelineFrame(frame_index=0, timestamp=0.0, pitch_certification_revoked_deg=4.0))
+        _send_camera_pitch_status(bridge, PipelineFrame(frame_index=1, timestamp=0.1, camera_pitch_untrusted_deg=-12.0))
+
+        statuses = [message for message in mock_ipc_client.messages if message["type"] == "pipeline_status"]
+        assert [message["status"] for message in statuses] == ["camera_pitch", "camera_pitch"]
+        assert [message["details"] for message in statuses] == [{"delta_deg": 4.0}, {"pitch_deg": -12.0}]
+        assert [message["latency_ms"] for message in statuses] == [{}, {}]
+
+    def test_an_ordinary_frame_sends_nothing(self, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.pipeline_process import _send_camera_pitch_status
+        from biomechanics.utils.types import PipelineFrame
+
+        _send_camera_pitch_status(IPCBridge(mock_ipc_client), PipelineFrame(frame_index=0, timestamp=0.0))
+        assert mock_ipc_client.messages == []
+
+
+class TestReadinessHint:
+    def test_the_profiles_hint_names_its_own_setup_failure(self, monkeypatch):
+        from biomechanics.config import BiomechanicsConfig
+        from biomechanics.pipeline import BiomechanicsPipeline
+        from biomechanics.pipeline_process import GATE_FAILURE_HINTS, _readiness_hint
+        from biomechanics.utils.standing_gate import PROFILE_CHECK_FAILURE
+
+        monkeypatch.setenv("NOWVA_MULTI_CAMERA", "true")
+        pipeline = BiomechanicsPipeline(BiomechanicsConfig(), defer_capture=True)
+        pipeline._readiness_gate.last_failure = "visibility"
+        assert _readiness_hint(pipeline, "HOLD STILL") == GATE_FAILURE_HINTS["visibility"]
+
+        pipeline._readiness_gate.last_failure = PROFILE_CHECK_FAILURE
+        assert _readiness_hint(pipeline, "HOLD STILL") == "HOLD STILL"
+        monkeypatch.setattr(type(pipeline.profile), "readiness_hint", "HANDS IN VIEW")
+        assert _readiness_hint(pipeline, "HOLD STILL") == "HANDS IN VIEW"

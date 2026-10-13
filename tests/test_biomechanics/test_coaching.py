@@ -52,6 +52,16 @@ def cue_cache(coaching_config):
 
 
 @pytest.fixture
+def press_and_rdl_ready(monkeypatch) -> None:
+    """The press and RDL are gated (untracked) until coaching-ready; these tests read their profiles."""
+    from biomechanics.profiles.overhead_press import OverheadPressProfile
+    from biomechanics.profiles.romanian_deadlift import RomanianDeadliftProfile
+
+    monkeypatch.setattr(OverheadPressProfile, "coaching_ready", True)
+    monkeypatch.setattr(RomanianDeadliftProfile, "coaching_ready", True)
+
+
+@pytest.fixture
 def ipc_bridge(mock_ipc_client, coaching_config, ipc_config):
     return IPCBridge(mock_ipc_client, coaching_config, ipc_config)
 
@@ -124,26 +134,44 @@ class TestCueCache:
         assert cue_cache.profile_name == "squat"
         assert cue_cache.current_exercise == "barbell_back_squat"
 
-    def test_prepare_romanian_deadlift_gets_its_own_cues(self, cue_cache):
+    def test_prepare_romanian_deadlift_gets_its_own_cues(self, cue_cache, press_and_rdl_ready):
         """The program library's name resolves to the RDL profile, whose cues
         are its own: nothing borrowed from the squat."""
+        from biomechanics.profiles.romanian_deadlift import RomanianDeadliftProfile
+
         cues = cue_cache.prepare_for_exercise("Barbell Romanian Deadlift")
         assert cue_cache.profile_name == "romanian_deadlift"
-        assert "rdl_flat_back" in cues
+        own_cues = set(RomanianDeadliftProfile().get_fault_to_cue_map().values())
+        assert own_cues and own_cues <= set(cues)
+        assert all(key.startswith("rdl_") for key in own_cues)
         assert "knees_out" not in cues
         assert "chest_up" not in cues
         assert "great_depth" not in cues
 
-    def test_prepare_overhead_press_gets_press_cues(self, cue_cache):
+    def test_prepare_overhead_press_gets_press_cues(self, cue_cache, press_and_rdl_ready):
+        from biomechanics.profiles.overhead_press import OverheadPressProfile
+
         cues = cue_cache.prepare_for_exercise("Barbell Overhead Press")
-        assert {"press_lockout", "press_elbows", "press_bar_path", "press_even"} <= set(cues)
+        own_cues = set(OverheadPressProfile().get_fault_to_cue_map().values())
+        assert own_cues and own_cues <= set(cues)
+        assert all(key.startswith("press_") for key in own_cues)
         assert "knees_out" not in cues
         assert "rep_1" in cues
 
-    def test_overhead_press_lockout_fault_gets_the_press_cue(self, cue_cache):
-        """The squat also has a lockout fault; the press must not say "stand tall"."""
+    def test_press_faults_never_get_a_squat_cue(self, cue_cache, press_and_rdl_ready):
+        """The squat has a lockout fault too; the press must never say "stand tall"."""
+        from biomechanics.profiles.overhead_press import OverheadPressProfile
+
         cue_cache.prepare_for_exercise("Barbell Overhead Press")
-        assert cue_cache.get_cue_for_fault("lockout", 10.0) == "press_lockout"
+        for fault_type in OverheadPressProfile().get_fault_to_cue_map():
+            cue = cue_cache.get_cue_for_fault(fault_type, 10.0)
+            cue_cache.last_cue_time = 0.0
+            assert cue is None or cue.startswith("press_")
+
+    def test_gated_press_gets_only_praise_and_counts_until_ready(self, cue_cache):
+        cues = cue_cache.prepare_for_exercise("Barbell Overhead Press")
+        assert cue_cache.profile_name == "untracked"
+        assert {key for key in cues if not key.startswith("rep_")} == set(GENERIC_POSITIVE_CUE_KEYS)
 
     def test_prepare_untracked_exercise_gets_only_praise_and_counts(self, cue_cache):
         cues = cue_cache.prepare_for_exercise("Barbell Bench Press")

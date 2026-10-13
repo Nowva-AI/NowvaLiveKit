@@ -8,14 +8,35 @@ exercise-specific behavior.
 
 Subclasses override only the methods that differ from the default (squat)
 behavior. This is a concrete base class, not an ABC — every method has a
-sensible default so new exercises can be added incrementally.
+sensible default so new exercises can be added incrementally. Every hook
+for non-squat exercises (docs/exercises/SHARED-PLUMBING.md §1, §4, §9)
+defaults to today's squat path, except reports_depth, which only the squat sets.
 """
 
-from typing import Callable, Dict, List, Optional
+from __future__ import annotations
+
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
 from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
 from biomechanics.faults.fault_types import FaultRule
-from biomechanics.utils.types import JointAngles, Skeleton3D, depth_category
+from biomechanics.utils.types import (
+    LEG_KEYPOINTS,
+    FaultEvent,
+    FaultSeverity,
+    JointAngles,
+    Skeleton3D,
+    depth_category,
+)
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+    from biomechanics.faults.session_reference import SessionReference
+    from biomechanics.utils.frame_context import FrameContext, RepAnalyzer
+
+# The orchestrator ends a set after this long without a rep (squat value).
+DEFAULT_SET_IDLE_TIMEOUT_S = 15.0
 
 
 class ExerciseProfile:
@@ -24,7 +45,9 @@ class ExerciseProfile:
 
     Subclasses override methods to customize behavior for their exercise.
     The pipeline calls these methods during initialization and per-frame
-    processing — profiles are factories, not owners.
+    processing — profiles are factories, not owners: a hook that needs a
+    threshold receives the pipeline's config, and a profile keeps no config
+    or session state of its own.
     """
 
     name: str = "default"
@@ -39,6 +62,28 @@ class ExerciseProfile:
     coaching_ready: bool = False
     # How Nova names the exercise when listing what it coaches ("" = from name).
     display_name: str = ""
+
+    # --- Shared exercise plumbing (squat defaults) ---
+    # Set boundaries may refine the rig's camera calibration on this
+    # exercise's frames (hinged poses near plates would degrade it).
+    allows_camera_refine: bool = True
+    # The exercise needs the 3D bar tracker.
+    needs_bar_3d: bool = False
+    # This exercise's standing frames may feed the session's body measurement.
+    feeds_body_calibration: bool = True
+    # Until coaching_ready, get_profile serves an untracked stand-in instead.
+    gate_until_ready: bool = False
+    # Set summaries and recaps speak about depth (the squat only).
+    reports_depth: bool = False
+    # Readiness HUD hint when the profile's own readiness check fails ("" = generic).
+    readiness_hint: str = ""
+    # Static start tier per fault type: verdicts below it are recorded, never
+    # cued. A missing fault type starts at mild.
+    min_cue_tiers: Mapping[str, FaultSeverity] = MappingProxyType({})
+    # Keypoints whose loss means tracking is lost and frames are not trusted.
+    tracking_keypoints: tuple[int, ...] = LEG_KEYPOINTS
+    # The orchestrator ends a set after this long without a rep.
+    set_idle_timeout_s: float = DEFAULT_SET_IDLE_TIMEOUT_S
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> List[FaultRule]:
         """Create the fault rules for this exercise.
@@ -118,12 +163,60 @@ class ExerciseProfile:
         """
         return depth_category(angle)
 
-    def get_readiness_check(self) -> Optional[Callable[[Skeleton3D, JointAngles], bool]]:
-        """Return a predicate for setup-position validation.
-
-        None means use the default standing-pose gate.
+    def get_readiness_check(self) -> Optional[Callable[[FrameContext], bool]]:
+        """A setup-position predicate for a profile without a rep analyser,
+        ANDed into the standing gate over its consecutive-frame window. It reads
+        only the context (raw hip-centred skeleton, no angles); a profile never
+        holds analyser state to build it. None keeps the standing gate as is.
         """
         return None
+
+    # ------------------------------------------------------------------
+    # Rep analyser and per-rep hooks (SHARED-PLUMBING.md §1-§2)
+    # ------------------------------------------------------------------
+
+    def create_rep_analyzer(self, config: BiomechanicsConfig) -> Optional[RepAnalyzer]:
+        """An analyser owning every per-frame and per-rep state of a non-squat
+        exercise. None (the squat) keeps the pipeline's squat path."""
+        return None
+
+    def observe_frame(self, ctx: FrameContext) -> None:
+        """Sees every analysed frame after the readiness latch. Default: nothing."""
+
+    def create_session_reference(self, config: BiomechanicsConfig) -> Optional[SessionReference]:
+        """The exercise's session reference; None lets the engine build the squat's."""
+        return None
+
+    def create_set_diagnosis(self) -> Any:
+        """The exercise's set-level diagnosis, or None (only the squat engine today)."""
+        return None
+
+    def on_rep_rejected(
+        self, reason: str, features: BaseModel, angles: JointAngles, config: BiomechanicsConfig,
+    ) -> List[FaultEvent]:
+        """Faults explaining a rep the analyser rejected (not counted)."""
+        return []
+
+    def shallow_rep_cue(
+        self, fault: FaultEvent, streak: int, cued_this_set: int, config: BiomechanicsConfig,
+    ) -> Optional[str]:
+        """Cue for a rejected rep's shallow_rep message. streak counts consecutive
+        rejections with this reason this set (from 1); cued_this_set counts the
+        set's shallow_rep messages that carried a cue. None = cue-less."""
+        return None
+
+    def get_hedged_recap_faults(self, config: BiomechanicsConfig) -> frozenset[str]:
+        """Fault types whose recorded-only verdicts the recap may mention, hedged
+        (the exercise's faults.<exercise>.hedged_recap_faults). Default: none."""
+        return frozenset()
+
+    def cue_start_tier(self, fault_type: str, ctx: FrameContext, config: BiomechanicsConfig) -> FaultSeverity:
+        """The lowest severity at which a verdict may be cued, given this frame.
+
+        Override when a start tier depends on session state (a certified mount,
+        a revoked one); the pipeline stamps verdicts below it recorded-only.
+        """
+        return self.min_cue_tiers.get(fault_type, FaultSeverity.MILD)
 
     # ------------------------------------------------------------------
     # Rep counter factory

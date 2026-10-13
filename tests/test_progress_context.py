@@ -241,3 +241,80 @@ class TestTrendComparisonLines:
 
     def test_no_reps_gives_nothing(self):
         assert build_trend_comparison_lines(_fault_trends(), {"knee_valgus": 0}, 0) == []
+
+
+PRESS_FAULT_TYPES = [
+    "press_layback", "press_bar_forward", "press_lockout", "press_leg_drive",
+    "press_uneven", "press_velocity_loss", "press_grip", "press_missed",
+]
+RDL_FAULT_TYPES = [
+    "rdl_hip_sink", "rdl_bar_drift", "rdl_lockout", "rdl_bar_tilt",
+    "rdl_range_drift", "rdl_tempo", "rdl_partial",
+]
+
+
+class TestExerciseAwareWording:
+    def test_greeting_names_the_exercise(self):
+        line = build_greeting_progress_line(_baseline(), exercise="romanian_deadlift")
+        assert "last Romanian deadlift session" in line
+        assert "squat" not in line
+
+    def test_report_names_the_exercise(self):
+        assert "No overhead press sessions recorded" in build_progress_report([], None, exercise="overhead_press")
+        report = build_progress_report([_score_row(0.6), _score_row(0.7)], None, exercise="overhead_press")
+        assert "2 overhead press sets recorded" in report
+
+    def test_unknown_profile_is_spoken_plainly(self):
+        assert "No front raise sessions" in build_progress_report([], None, exercise="front_raise")
+
+
+class TestExerciseFaultLabels:
+    def test_every_press_and_rdl_fault_has_a_plain_label(self):
+        for fault_type in PRESS_FAULT_TYPES + RDL_FAULT_TYPES:
+            label = FAULT_LABELS[fault_type]
+            assert "_" not in label
+            assert not any(word in label for word in JARGON_WORDS), label
+            assert "hinge" not in label
+
+
+class TestDirectionAwareGripLabel:
+    def test_grip_label_names_which_way_it_is_off(self):
+        assert fault_label("press_grip", {"direction": "wider"}) == "grip too narrow — elbows flaring out"
+        assert fault_label("press_grip", {"direction": "narrower"}) == "grip too wide — forearms leaning in"
+
+    def test_without_a_direction_the_generic_label_stays(self):
+        assert fault_label("press_grip") == FAULT_LABELS["press_grip"]
+        assert fault_label("press_grip", {"value": 3.0}) == FAULT_LABELS["press_grip"]
+
+    def test_details_never_change_other_labels(self):
+        assert fault_label("press_uneven", {"direction": "wider"}) == FAULT_LABELS["press_uneven"]
+
+
+class TestRecordedOnlyNeverBecomesMostCommon:
+    def test_session_with_only_recorded_only_uneven_has_no_most_common_fault(self):
+        """The press instance of the shared test: from stored rows to the lines."""
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        from db.biomechanics_persistence import build_baseline_summary
+
+        uneven = {
+            "fault_type": "press_uneven", "severity": "mild", "severity_score": 1.0,
+            "details": {"observability": "observable", "recorded_only": True},
+        }
+        baseline = build_baseline_summary(
+            started_at=datetime.utcnow(), mean_session_score=None, total_reps=2, total_sets=1,
+            set_rows=[SimpleNamespace(
+                set_number=1, rep_count=2, mean_score=None, depth_score_avg=None,
+                trunk_score_avg=None, knee_score_avg=None, symmetry_score_avg=None,
+                tempo_score_avg=None,
+            )],
+            rep_rows=[
+                SimpleNamespace(kinematics=None, faults=[uneven], set_number=1) for _ in range(2)
+            ],
+        )
+        greeting = build_greeting_progress_line(baseline, exercise="overhead_press")
+        report = build_progress_report([_score_row(0.6)], baseline, exercise="overhead_press")
+        assert "most common fault" not in greeting
+        assert "Most common fault" not in report
+        assert "one hand lagging" not in greeting + report

@@ -15,7 +15,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from biomechanics.coaching.cue_cache import CueCache
-from biomechanics.config import CoachingConfig, IPCConfig
+from biomechanics.config import BiomechanicsConfig, CoachingConfig, IPCConfig
 from biomechanics.diagnosis.bridge import (
     build_anthro_dict,
     build_rom_dict,
@@ -32,6 +32,7 @@ from biomechanics.diagnosis.types import (
     SetScoreSummary,
 )
 from biomechanics.faults.observability import APPROXIMATE
+from biomechanics.profiles.base import DEFAULT_SET_IDLE_TIMEOUT_S, ExerciseProfile
 from biomechanics.faults.rules.depth import depth_category as geometric_depth_category
 from biomechanics.utils.json_safe import nan_to_none
 from biomechanics.utils.types import (
@@ -53,6 +54,14 @@ TRACKING_ARMED_AFTER_REP_S = 3.0
 # Legs measured again for this long before "recovered", so a flickering
 # keypoint does not toggle lost and recovered.
 TRACKING_RECOVERED_AFTER_S = 0.3
+# The squat's shallow-rep cue, and the squat's own fault -> cue map: cache_cues
+# omits every field still at its squat default, so the squat payload never changes.
+DEEPER_CUE_KEY = "deeper"
+
+
+def _is_recorded_only(fault: FaultEvent) -> bool:
+    """A verdict below its fault's start tier: stored and flagged, never cued or counted."""
+    return bool(fault.details.get("recorded_only"))
 
 
 class IPCBridge:
@@ -87,6 +96,8 @@ class IPCBridge:
         self._last_in_rep_s: float | None = None
         self._tracking_lost = False
         self._lost_cameras: list[str] = []
+        # The active profile speaks about depth (set by prepare_exercise).
+        self.reports_depth = True
 
     # ------------------------------------------------------------------
     # Athlete parameters
@@ -105,16 +116,44 @@ class IPCBridge:
     # Exercise preparation
     # ------------------------------------------------------------------
 
-    def prepare_exercise(self, exercise_name: str) -> Dict[str, str]:
-        """Cache cues for an exercise and notify the voice agent."""
+    def prepare_exercise(
+        self,
+        exercise_name: str,
+        profile: ExerciseProfile | None = None,
+        config: BiomechanicsConfig | None = None,
+    ) -> Dict[str, str]:
+        """Cache cues for an exercise and notify the voice agent.
+
+        The agent learns the active profile from this message. Fields a non-squat
+        profile needs (fault_to_cue, reports_depth, set_idle_timeout_s,
+        waits_for_diagnosis, hedged_recap_faults) are sent only when they differ
+        from the squat's, so an absent field means the squat default.
+        """
+        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
+        from biomechanics.profiles import get_profile
+
         cues = self.cue_cache.prepare_for_exercise(exercise_name)
-        self._send({
+        profile = profile or get_profile(exercise_name)
+        self.reports_depth = profile.reports_depth
+        message: Dict[str, Any] = {
             "type": "cache_cues",
             "exercise_name": exercise_name,
-            # The agent learns the active exercise profile from this message.
             "profile": self.cue_cache.profile_name,
             "cues": cues,
-        })
+        }
+        fault_to_cue = profile.get_fault_to_cue_map()
+        if fault_to_cue != FAULT_TO_CUE_MAP:
+            message["fault_to_cue"] = fault_to_cue
+        if not profile.reports_depth:
+            message["reports_depth"] = False
+        if profile.set_idle_timeout_s != DEFAULT_SET_IDLE_TIMEOUT_S:
+            message["set_idle_timeout_s"] = profile.set_idle_timeout_s
+        if not profile.uses_diagnosis_engine and profile.create_set_diagnosis() is not None:
+            message["waits_for_diagnosis"] = True
+        hedged = profile.get_hedged_recap_faults(config) if config is not None else frozenset()
+        if hedged:
+            message["hedged_recap_faults"] = sorted(hedged)
+        self._send(message)
         return cues
 
     # ------------------------------------------------------------------
@@ -175,15 +214,17 @@ class IPCBridge:
 
         details = fault.details
         observability = details.get("observability", "observable")
+        recorded_only = _is_recorded_only(fault)
         # A fault read from monocular depth regression is recorded and can be
-        # mentioned (hedged) after the set, but never cued mid-set.
+        # mentioned (hedged) after the set, but never cued mid-set. Neither is a
+        # verdict below its fault's start tier.
         cue_key = None
-        if observability != APPROXIMATE:
+        if observability != APPROXIMATE and not recorded_only:
             cue_key = self.cue_cache.get_cue_for_fault(
                 fault.fault_type, now, side=details.get("side"),
             )
 
-        self._send({
+        message: Dict[str, Any] = {
             "type": "fault",
             "fault_type": fault.fault_type,
             "severity": fault.severity.value,
@@ -198,9 +239,14 @@ class IPCBridge:
             "value": details.get("value"),
             "unit": details.get("unit"),
             "details": details,
-        })
+        }
+        if recorded_only:
+            message["recorded_only"] = True
+        self._send(message)
 
-        self.last_fault_send[fault.fault_type] = now
+        # A recorded-only verdict never holds back a cueable one of the same fault.
+        if not recorded_only:
+            self.last_fault_send[fault.fault_type] = now
 
     # ------------------------------------------------------------------
     # Rep completion
@@ -225,16 +271,17 @@ class IPCBridge:
         msg: Dict[str, Any] = {
             "type": "rep_complete",
             "rep_number": rep.rep_number,
-            "max_depth_angle": round(rep.max_depth_angle, 1),
-            "depth_category": self._rep_depth_category(rep),
+            "max_depth_angle": round(rep.max_depth_angle, 1) if self.reports_depth else None,
+            "depth_category": self._rep_depth_category(rep) if self.reports_depth else None,
             "depth_target_met": rep.depth_target_met,
             "features": rep.features,
             "highlights": highlights or [],
             # Deduplicated: a fault can be detected on several frames of the
             # same rep, and this list is used for membership tests and for
             # fault counts in the recap, where repeats inflate the totals.
-            # faults_detailed below keeps every individual detection.
-            "faults_in_rep": list(dict.fromkeys(f.fault_type for f in rep.faults)),
+            # faults_detailed below keeps every individual detection, with
+            # recorded-only verdicts flagged in their details.
+            "faults_in_rep": list(dict.fromkeys(f.fault_type for f in rep.faults if not _is_recorded_only(f))),
             "rep_duration_ms": round(rep.duration * 1000),
             "is_clean": rep.is_clean,
             "descent_time_s": round(rep.descent_time, 3),
@@ -272,23 +319,37 @@ class IPCBridge:
 
     def send_shallow_rep(
         self,
-        depth_class: int,
+        depth_class: int | None,
         fault: Optional[FaultEvent] = None,
         set_number: int | None = None,
+        cue_key: str | None = DEEPER_CUE_KEY,
+        label: str | None = None,
     ) -> None:
-        """Send a rep that was rejected for insufficient depth.
+        """Send a rep that was rejected for insufficient depth or range.
 
         Deliberately not routed through send_fault: this replaces the rep
         callout the lifter would otherwise have heard, so it is not subject
         to the fault cooldown. Carries the depth fault's fields so the
-        persistence layer can log it like any other depth cue.
+        persistence layer can log it like any other depth cue. A non-squat
+        rejection has no depth class: it passes its profile's cue (None =
+        cue-less) and its range label, which stands in for the class name.
         """
+        depth_class_name = DEPTH_CLASS_NAMES.get(depth_class, "Unknown")
+        if label is not None:
+            depth_class_name = label
+        elif depth_class is None:
+            depth_class_name = ""
         msg: Dict[str, Any] = {
             "type": "shallow_rep",
             "depth_class": depth_class,
-            "depth_class_name": DEPTH_CLASS_NAMES.get(depth_class, "Unknown"),
-            "cue": "deeper",
+            "depth_class_name": depth_class_name,
+            "cue": cue_key,
         }
+        if label is not None:
+            msg["label"] = label
+        # Below its fault's start tier: stored and flagged, never cued.
+        if fault is not None and _is_recorded_only(fault):
+            msg["recorded_only"] = True
         if fault is not None:
             msg.update({
                 "fault_type": fault.fault_type,
@@ -356,14 +417,20 @@ class IPCBridge:
         if not reps:
             return
 
-        depths = [r.max_depth_angle for r in reps]
-        avg_depth = statistics.mean(depths)
-        depth_consistency = statistics.stdev(depths) if len(depths) > 1 else 0.0
+        avg_depth: float | None = None
+        depth_consistency: float | None = None
+        if self.reports_depth:
+            depths = [r.max_depth_angle for r in reps]
+            avg_depth = round(statistics.mean(depths), 1)
+            depth_consistency = round(statistics.stdev(depths) if len(depths) > 1 else 0.0, 1)
 
-        # Build per-fault-type summary
+        # Build per-fault-type summary. Recorded-only verdicts are not trusted
+        # enough to count on the display, and a setup note is not a rep fault.
         fault_summary: Dict[str, Dict[str, Any]] = {}
         for rep in reps:
             for fault in rep.faults:
+                if _is_recorded_only(fault) or fault.details.get("setup_note"):
+                    continue
                 key = fault.fault_type
                 if key not in fault_summary:
                     fault_summary[key] = {"count": 0, "total_severity": 0.0}
@@ -378,8 +445,8 @@ class IPCBridge:
             "type": "set_complete",
             "set_number": set_number,
             "total_reps": len(reps),
-            "avg_depth": round(avg_depth, 1),
-            "depth_consistency": round(depth_consistency, 1),
+            "avg_depth": avg_depth,
+            "depth_consistency": depth_consistency,
             "clean_reps": sum(1 for r in reps if r.is_clean),
             "fault_summary": fault_summary,
         })
@@ -445,13 +512,18 @@ class IPCBridge:
     # Pipeline status
     # ------------------------------------------------------------------
 
-    def send_pipeline_status(self, status: str, latency: Dict[str, float]) -> None:
-        """Broadcast pipeline health status."""
-        self._send({
+    def send_pipeline_status(
+        self, status: str, latency: Dict[str, float], details: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Broadcast pipeline health status, with the status's own readings when it has any."""
+        message: Dict[str, Any] = {
             "type": "pipeline_status",
             "status": status,
             "latency_ms": latency,
-        })
+        }
+        if details is not None:
+            message["details"] = details
+        self._send(message)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -18,8 +18,16 @@ from agent.services.audio_cue_service import (
     SAMPLE_RATE,
     AudioCueService,
 )
-from agent.services.coaching_constants import CUE_DISPLAY_LABELS
+from agent.services.coaching_constants import (
+    BETTER_CUE_TEXT,
+    CUE_DISPLAY_LABELS,
+    FIXED_CUE_TEXT,
+    LEVEL_CAMERA_CUE,
+    SETUP_CUE_KEYS_BY_PROFILE,
+)
 from biomechanics.coaching.cue_cache import SQUAT_CUES
+from biomechanics.profiles.overhead_press import OverheadPressProfile
+from biomechanics.profiles.romanian_deadlift import RomanianDeadliftProfile
 
 # Sample cue dict as sent by the biomechanics IPC bridge
 SAMPLE_SQUAT_CUES = {
@@ -35,6 +43,31 @@ SAMPLE_TTS_KEYS = {key for key in SAMPLE_SQUAT_CUES if not key.startswith("rep_"
 
 FAKE_PCM = b"\x00\x01" * 1200  # 2400 bytes of fake 16-bit PCM
 JARGON_WORDS = ["valgus", "eccentric", "concentric", "dorsiflexion"]
+
+
+# Profiles gated until validated: their clips are enforced once coaching_ready flips.
+GATED_PROFILES = [OverheadPressProfile, RomanianDeadliftProfile]
+
+
+def _flip_gate_keys(profile_class) -> set[str]:
+    """Every line a coaching-ready profile plays: its cue dict, the agent-side
+    setup and camera lines, and the _fixed/_better praise drafted for its cues.
+    Rep counts are shared with the squat, which speaks them without clips."""
+    profile = profile_class()
+    own_cues = {key for key in profile.get_cue_dict() if not key.startswith("rep_")}
+    keys = own_cues | set(SETUP_CUE_KEYS_BY_PROFILE.get(profile.name, ())) | {LEVEL_CAMERA_CUE}
+    for cue in profile.get_fault_to_cue_map().values():
+        keys |= {key for key in (f"{cue}_fixed", f"{cue}_better") if key in FIXED_CUE_TEXT or key in BETTER_CUE_TEXT}
+    return keys
+
+
+def _missing_clips(profile_class, wav_dir: Path) -> list[str]:
+    on_disk = set()
+    for wav_file in wav_dir.glob("*.wav"):
+        cue_key, _, variant = wav_file.stem.rpartition("_")
+        if cue_key and variant.isdigit():
+            on_disk.add(cue_key)
+    return sorted(_flip_gate_keys(profile_class) - on_disk)
 
 
 def _make_speech_response(audio_bytes: bytes = FAKE_PCM) -> MagicMock:
@@ -85,6 +118,20 @@ class TestCacheCuesFallback:
         asyncio.run(service.cache_cues({"knees_out": "knees_out", "mystery_cue": "mystery_cue"}))
 
         assert set(service._fallback_cache) == {"knees_out"}
+
+    def test_never_synthesizes_the_agent_side_lines(self, service):
+        """Setup and camera lines play from a clip on disk or not at all."""
+        mock_client = AsyncMock()
+        mock_client.audio.speech.create = AsyncMock(return_value=_make_speech_response())
+        service._client = mock_client
+
+        asyncio.run(service.cache_cues({
+            key: key for key in ("press_setup", "rdl_setup", "rdl_back_note", "level_camera", "knees_out")
+        }))
+
+        assert set(service._fallback_cache) == {"knees_out"}
+        assert not service.has_cue("press_setup")
+        assert not service.has_cue("level_camera")
 
     def test_skips_cues_already_on_disk(self, cue_wav_dir):
         _write_cue_wav(cue_wav_dir / "knees_out_0.wav")
@@ -178,3 +225,23 @@ class TestCueText:
         for key in ("hips_through", "flat_back"):
             assert key not in CUE_TEXT_MAP
             assert key not in CUE_DISPLAY_LABELS
+
+
+class TestFlipGateClips:
+    @pytest.mark.parametrize("profile_class", GATED_PROFILES, ids=lambda profile_class: profile_class.name)
+    def test_a_coaching_ready_profile_has_a_clip_for_every_key(self, profile_class):
+        if not profile_class.coaching_ready:
+            pytest.skip(f"{profile_class.name} is not coaching_ready: its clips are enforced once it flips")
+        assert _missing_clips(profile_class, audio_cue_module.CUES_WAV_DIR) == []
+
+    @pytest.mark.parametrize("profile_class", GATED_PROFILES, ids=lambda profile_class: profile_class.name)
+    def test_the_gate_lists_every_key_with_its_praise(self, profile_class, tmp_path):
+        keys = _flip_gate_keys(profile_class)
+        cues = set(profile_class().get_fault_to_cue_map().values())
+        fixed = {key for key in FIXED_CUE_TEXT if key.removesuffix("_fixed") in cues}
+        better = {key for key in BETTER_CUE_TEXT if key.removesuffix("_better") in cues}
+        assert fixed and better
+        assert cues | fixed | better | {LEVEL_CAMERA_CUE} <= keys
+        assert set(SETUP_CUE_KEYS_BY_PROFILE[profile_class().name]) <= keys
+        # A flipped profile with no clips on disk fails the gate on every key.
+        assert _missing_clips(profile_class, tmp_path) == sorted(keys)

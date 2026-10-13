@@ -22,10 +22,13 @@ from agent.services.coaching_constants import (
     ADJUSTMENT_ON_TARGET_CUE,
     ADJUSTMENT_PARAM_LABELS,
     ADJUSTMENT_SYSTEM_PROMPT,
+    BETTER_CUE_TEXT,
     COACHING_PERSONA,
     CUE_TEXT_MAP,
     FIXED_CUE_TEXT,
+    PREEMPTIVE_TEXT,
 )
+from agent.services.fault_filters import reportable_faults
 from agent.services.progress_context import fault_label
 from agent.services.visual_bridge import VisualBridge
 
@@ -38,6 +41,7 @@ LISTENER_RECONNECT_POLL_S = 1.0
 POSITIVE_CUE_KEYS = frozenset(
     {"good_rep", "great_depth", "strong", "clean", "perfect", "adjust_good"}
     | set(FIXED_CUE_TEXT)
+    | set(BETTER_CUE_TEXT)
 )
 
 # Chat-context items with a fixed identity: one summary, one last-set note
@@ -73,10 +77,15 @@ DEFAULT_EXERCISE_NAME = "Barbell Back Squat"
 
 
 def _profile_name(exercise_name: str) -> str:
-    """The biomechanics profile coaching an exercise ("squat", "overhead_press", "untracked")."""
+    """The biomechanics profile coaching an exercise ("squat", "overhead_press", "untracked").
+    A profile gated until it is coaching-ready is untracked until then, exactly as
+    the pipeline serves it, so the agent and the pipeline name the same profile."""
     from biomechanics.profiles import UntrackedProfile, find_profile_class
 
-    return (find_profile_class(exercise_name) or UntrackedProfile).name
+    profile_class = find_profile_class(exercise_name) or UntrackedProfile
+    if profile_class.gate_until_ready and not profile_class.coaching_ready:
+        return UntrackedProfile.name
+    return profile_class.name
 
 
 class CoachingService:
@@ -195,7 +204,9 @@ class CoachingService:
         )
 
     async def _fetch_progress_baseline(self, user_id) -> dict | None:
-        """Load last-session baseline and multi-session fault trends."""
+        """Load the current exercise's last-session baseline and multi-session fault trends."""
+        exercise = _profile_name(self._current_exercise_name())
+
         def _fetch():
             from db.database import SessionLocal
             from db.biomechanics_persistence import (
@@ -205,8 +216,8 @@ class CoachingService:
             )
             db = SessionLocal()
             try:
-                baseline = get_progress_baseline(db, user_id)
-                fault_trends = get_multi_session_fault_trends(db, user_id)
+                baseline = get_progress_baseline(db, user_id, exercise=exercise)
+                fault_trends = get_multi_session_fault_trends(db, user_id, exercise=exercise)
                 cue_effectiveness = get_cue_effectiveness(db, user_id)
                 return baseline, fault_trends, cue_effectiveness
             finally:
@@ -394,13 +405,14 @@ class CoachingService:
     def last_rep_verdict(self) -> dict | None:
         """The latest workout rep and its faults (one per fault type), or None
         before the first rep: {"rep_number", "faults": [{"fault_type", "side",
-        "observability"}]}."""
+        "observability"}]}. Recorded-only verdicts are left out; approximate
+        ones stay flagged, for the caller to drop or hedge when it speaks."""
         message = self._last_rep_message
         if message is None:
             return None
         faults: list[dict] = []
         seen: set[str] = set()
-        for fault in message.get("faults_detailed") or []:
+        for fault in reportable_faults(message.get("faults_detailed") or [], spoken=False):
             fault_type = fault.get("fault_type")
             if not fault_type or fault_type in seen:
                 continue
@@ -574,6 +586,7 @@ class CoachingService:
                         message=fault_msg,
                         observability=observability,
                         side=message.get("side"),
+                        recorded_only=bool(message.get("recorded_only")),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — fault dropped")
@@ -582,8 +595,11 @@ class CoachingService:
                 depth = message.get("depth_category", "")
                 is_clean = message.get("is_clean", False)
                 faults = message.get("faults_in_rep", [])
-                # None when no frame of the rep saw both knees (NaN on the wire)
-                max_depth_angle = message.get("max_depth_angle") or 0.0
+                # None when no frame of the rep saw both knees (NaN on the wire),
+                # and always None for an exercise without depth
+                max_depth_angle = message.get("max_depth_angle")
+                if self._coaching_orchestrator is None or self._coaching_orchestrator.reports_depth:
+                    max_depth_angle = max_depth_angle or 0.0
                 rep_duration_ms = message.get("rep_duration_ms") or 0
                 ascent_time_s = float(message.get("ascent_time_s", 0.0) or 0.0)
                 logger.info(
@@ -610,11 +626,13 @@ class CoachingService:
                         highlights=message.get("highlights"),
                         set_number=message.get("set_number"),
                         faults_detailed=message.get("faults_detailed"),
+                        features=message.get("features"),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — rep_complete dropped")
             elif msg_type == "shallow_rep":
-                depth_name = message.get("depth_class_name", "")
+                # An analyser's rejected rep has no depth class; its range label stands in
+                depth_name = message.get("depth_class_name") or message.get("label") or ""
                 logger.info(
                     f"[COACHING SERVICE] SHALLOW REP received: depth={depth_name} "
                     f"knee={message.get('max_knee_flexion')}°"
@@ -627,6 +645,7 @@ class CoachingService:
                     await self._coaching_orchestrator.on_shallow_rep(
                         cue_key=message.get("cue"),
                         depth_class_name=depth_name,
+                        recorded_only=bool(message.get("recorded_only")),
                     )
                 else:
                     logger.warning("[COACHING SERVICE] No orchestrator — shallow_rep dropped")
@@ -685,6 +704,11 @@ class CoachingService:
                     await self._coaching_orchestrator.on_tracking_quality(
                         message.get("status", ""), message.get("reason", "keypoints")
                     )
+            elif msg_type == "pipeline_status":
+                status = message.get("status", "")
+                logger.info(f"[COACHING SERVICE] PIPELINE STATUS {status}")
+                if self._workout_active and self._coaching_orchestrator:
+                    self._coaching_orchestrator.on_pipeline_status(status)
             elif msg_type == "rest_complete":
                 logger.info("[COACHING SERVICE] REST COMPLETE — firing LLM prompt for next set")
                 # The pipeline counts reps as soon as its rest timer ends, so
@@ -701,6 +725,8 @@ class CoachingService:
                 finally:
                     if orchestrator:
                         orchestrator.cues_suppressed = False
+                        # A new exercise's setup lines follow its announcement
+                        orchestrator.play_clips_at_rest_end()
             elif msg_type == "assessment_rep":
                 rep = message.get("rep_number", 0)
                 total = message.get("total_required", 2)
@@ -797,7 +823,16 @@ class CoachingService:
         logger.info(f"[COACHING SERVICE] Pre-caching {len(cues)} cues for {exercise} ({profile})")
 
         if self._coaching_orchestrator:
-            self._coaching_orchestrator.set_exercise(exercise, is_squat=profile == "squat")
+            self._coaching_orchestrator.set_exercise(
+                exercise,
+                is_squat=profile == "squat",
+                fault_to_cue=message.get("fault_to_cue"),
+                reports_depth=message.get("reports_depth"),
+                profile_name=profile,
+                waits_for_diagnosis=message.get("waits_for_diagnosis"),
+                set_idle_timeout_s=message.get("set_idle_timeout_s"),
+                hedged_recap_faults=message.get("hedged_recap_faults"),
+            )
         # One DB session per exercise. The pipeline sends this after the
         # previous exercise's last set and diagnosis, so those stay with it.
         recorder = self._biomech_recorder
@@ -813,6 +848,9 @@ class CoachingService:
                 self._coaching_orchestrator.positive_cue_keys = available
         except Exception as e:
             logger.error(f"[COACHING SERVICE] TTS cache generation failed: {e}")
+        # The exercise's setup lines, once the pipeline is ready for it
+        if self._workout_active and self._coaching_orchestrator:
+            self._coaching_orchestrator.on_exercise_ready()
 
     async def _on_assessment_result(self, message: dict) -> None:
         """Handle assessment result — choreographed demo on first failure, else spoken feedback.
@@ -1152,8 +1190,9 @@ class CoachingService:
         self._coaching_orchestrator._get_set_load_fn = self._current_set_load
 
         exercise_name = self._current_exercise_name()
+        profile = _profile_name(exercise_name)
         self._coaching_orchestrator.set_exercise(
-            exercise_name, is_squat=_profile_name(exercise_name) == "squat",
+            exercise_name, is_squat=profile == "squat", profile_name=profile,
         )
         target_reps = self._get_current_target_reps()
         total_sets = self._get_total_sets()
@@ -1207,8 +1246,6 @@ class CoachingService:
     def _build_rest_complete_prompt(self) -> str:
         """The next-set line: calm, and names the set's one focus. Any reported
         pain reaches it through the SAFETY line on every coaching prompt."""
-        from biomechanics.coaching.cue_cache import FAULT_TO_CUE_MAP
-
         _, next_set, total_sets = self._get_set_numbers()
         parts = [f"[REST COMPLETE] Rest is over. Set {next_set} of {total_sets} starts now."]
         if next_set == 1:
@@ -1227,9 +1264,16 @@ class CoachingService:
                 f"This set's one focus: {fault_label(focus)}. Say it as the action to take — "
                 f"toward the floor, the bar or a direction — not as a fault."
             )
-            cue_text = CUE_TEXT_MAP.get(FAULT_TO_CUE_MAP.get(focus, ""))
+            cue_key = orchestrator.fault_to_cue.get(focus, "")
+            cue_text = CUE_TEXT_MAP.get(cue_key)
             if cue_text:
                 parts.append(f"Mid-set they'll hear the cue '{cue_text}' for it.")
+            preemptive = PREEMPTIVE_TEXT.get(cue_key)
+            if preemptive:
+                parts.append(f"The set-up line for it: '{preemptive}'")
+        setup_action = orchestrator.next_set_setup_action() if orchestrator and next_set > 1 else None
+        if setup_action:
+            parts.append(f"One setup change before they unrack: {setup_action}. Say it as one plain action.")
         parts.append(
             "Say it calmly in one or two short sentences, in your own words — never the same "
             "announcement twice in a session."

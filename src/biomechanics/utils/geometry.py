@@ -380,3 +380,49 @@ def knee_valgus_angle(
         angle = -angle
 
     return angle
+
+
+def level_camera_frame(points: np.ndarray, pitch_deg: float) -> np.ndarray:
+    """
+    Rotate camera-frame points about the camera X axis so a camera pitched by
+    pitch_deg (positive = lens tilted up, the sign of the standing-pitch
+    estimate) reads true heights: the world's up maps back onto WORLD_UP.
+
+    Levelling is not free: each levelled height mixes in the camera's depth
+    axis at sin(pitch), so monocular depth noise and bias enter with it.
+    """
+    pitch = np.radians(pitch_deg)
+    cos_pitch, sin_pitch = np.cos(pitch), np.sin(pitch)
+    rotation = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, cos_pitch, -sin_pitch],
+        [0.0, sin_pitch, cos_pitch],
+    ])
+    return np.asarray(points, dtype=np.float64) @ rotation.T
+
+
+def sagittal_forward(up: np.ndarray, lateral_right: np.ndarray) -> np.ndarray:
+    """
+    Unit forward axis of a lifter whose right-pointing lateral axis is given,
+    perpendicular to the physically-up vector `up` (never negated). With
+    up = WORLD_UP and lateral_right = (-1, 0, 0), forward is (0, 0, -1).
+    """
+    up_unit = normalize_vector(up)
+    lateral = lateral_right - np.dot(lateral_right, up_unit) * up_unit
+    return normalize_vector(np.cross(up_unit, lateral))
+
+
+def lean_back_deg(vector: np.ndarray, up: np.ndarray, forward: np.ndarray) -> float:
+    """
+    Signed sagittal tilt of `vector` (e.g. hip -> shoulder) from `up`, in
+    degrees: positive leaning back, negative leaning forward, 0 when parallel to up.
+    """
+    up_unit = normalize_vector(up)
+    return float(np.degrees(np.arctan2(-np.dot(vector, forward), np.dot(vector, up_unit))))
+
+
+def forward_offset(vector: np.ndarray, up: np.ndarray, forward: np.ndarray) -> float:
+    """Horizontal (perpendicular to up) component of `vector` along forward; + = ahead."""
+    up_unit = normalize_vector(up)
+    horizontal = vector - np.dot(vector, up_unit) * up_unit
+    return float(np.dot(horizontal, forward))

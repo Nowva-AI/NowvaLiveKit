@@ -9,6 +9,7 @@ Cached cues always take priority over LLM-generated speech.
 import asyncio
 import enum
 import logging
+import math
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -20,8 +21,13 @@ from agent.services.coaching_constants import (
     ADJUSTMENT_ON_TARGET_CUE,
     CUE_DISPLAY_LABELS,
     CUE_TEXT_MAP,
+    GRIP_SETUP_ACTION,
+    HINGE_FAULT_CONTEXT,
+    LEVEL_CAMERA_CUE,
+    SETUP_CUE_KEYS_BY_PROFILE,
     TRACKING_LOST_CUE,
 )
+from agent.services.fault_filters import is_recorded_only, reportable_faults
 from biomechanics.coaching.cue_cache import (
     DEFAULT_FAULT_CUE_PRIORITY,
     FAULT_TO_CUE_MAP,
@@ -32,6 +38,7 @@ from biomechanics.coaching.cue_cache import (
     fault_cue_priority,
 )
 from biomechanics.faults.observability import TRIANGULATED, capture_mode_from_env
+from biomechanics.utils.frame_context import CONCENTRIC_TIME_FEATURE
 from agent.services.progress_context import (
     build_progress_comparison_lines,
     build_session_comparison_line,
@@ -79,8 +86,11 @@ MAX_CUES_PER_FAULT_PER_SET = 2
 SAFETY_FAULT_TYPE = "knee_valgus"
 SAFETY_SEVERITY = "severe"
 # A cued fault counts as fixed once it stays gone this many reps in a row.
+# If a hold rep still showed it below its cue start tier (recorded-only), it
+# improved but isn't proven gone: "_better" praise, never "_fixed".
 FIX_HOLD_REPS = 2
 FIXED_CUE_SUFFIX = "_fixed"
+BETTER_CUE_SUFFIX = "_better"
 
 # Side-view faults are judged only on the 3-camera rig. On one camera Nova
 # says nothing about them: no cue mid-set and no mention in the recap.
@@ -102,6 +112,55 @@ SYMPTOM_FAULT_TYPES = {
     "fast_descent": "tempo",
     "velocity_loss": "velocity_loss",
 }
+
+# Each exercise's safety fault (cued outside the set focus at that severity),
+# side-view faults and diagnosis symptoms, by profile name. A profile not
+# listed uses the squat's.
+SAFETY_FAULTS_BY_PROFILE: Dict[str, tuple] = {
+    "squat": (SAFETY_FAULT_TYPE, SAFETY_SEVERITY),
+    "overhead_press": ("press_layback", "severe"),
+    # Approximate (never cued) until the rig validates bar drift
+    "romanian_deadlift": ("rdl_bar_drift", "severe"),
+}
+SIDE_VIEW_FAULTS_BY_PROFILE: Dict[str, frozenset] = {
+    "squat": SIDE_VIEW_FAULTS,
+    "overhead_press": frozenset({"press_layback", "press_bar_forward", "press_velocity_loss"}),
+    "romanian_deadlift": frozenset({"rdl_bar_drift", "rdl_lockout"}),
+}
+SYMPTOM_FAULT_TYPES_BY_PROFILE: Dict[str, Dict[str, str]] = {
+    "squat": SYMPTOM_FAULT_TYPES,
+    "overhead_press": {},
+    "romanian_deadlift": {},
+}
+
+# Exercises without depth name their best rep by the features' highlight_score
+# (higher is better): what that score means, by profile name.
+HIGHLIGHT_MEANINGS: Dict[str, str] = {
+    "overhead_press": "fastest clean press",
+    "romanian_deadlift": "most hips-back clean rep",
+}
+PRESS_PROFILE = "overhead_press"
+RDL_PROFILE = "romanian_deadlift"
+
+# Per-set events, not rep faults: a missed press (a rejected rep) and the press
+# grip (a between-set setup note). Never cued and never in per-rep counts.
+MISSED_REP_FAULT_TYPE = "press_missed"
+GRIP_FAULT_TYPE = "press_grip"
+SET_EVENT_FAULT_TYPES = frozenset({MISSED_REP_FAULT_TYPE, GRIP_FAULT_TYPE})
+
+# Judged on the next rep's setup (the RDL finish): rep N+1's verdict describes
+# rep N, so a cue's effect first shows on the rep after next.
+LAGGED_FAULT_TYPES = frozenset({"rdl_lockout"})
+
+# Pipeline status sent when an exercise's tripwire revoked the certified camera mount
+CAMERA_PITCH_STATUS = "camera_pitch"
+
+# Set-summary fields only some exercises have, carried into the exercise recap
+EXERCISE_RECAP_EXTRA_KEYS = ("missed_reps", "setup_note", "possible")
+
+# What the cameras can't judge on an RDL (one camera adds the foot); the recap never claims it
+RDL_UNOBSERVABLE_LINE = "Never say or imply anything about lower-back rounding or spine position"
+RDL_ONE_CAMERA_UNOBSERVABLE = " or where the weight sits on the foot"
 
 # A set stopped short of its target (failed rep, bar racked early) ends this
 # long after its last rep.
@@ -173,6 +232,8 @@ class PendingCueOutcome:
     cue_key: str
     after_rep: int
     clean_reps: int = 0
+    # A hold rep still showed the fault, below its cue start tier
+    improved_only: bool = False
 
 
 def ineffective_cue_faults(effectiveness: List[Dict[str, Any]]) -> Set[str]:
@@ -218,12 +279,63 @@ def _rep_span(rep_numbers: List[int]) -> str:
     return f"reps {rep_numbers[0]} to {rep_numbers[-1]}"
 
 
+def _finite_or_none(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _outcome_lag(fault_type: str) -> int:
+    return 1 if fault_type in LAGGED_FAULT_TYPES else 0
+
+
+def _grip_direction(details: Dict[str, Any]) -> Optional[str]:
+    # The way the hands should move: narrower when the signed grip reading is positive
+    if details.get("direction") in ("narrower", "wider"):
+        return details["direction"]
+    value = _finite_or_none(details.get("value"))
+    if value is None:
+        return None
+    return "narrower" if value > 0 else "wider"
+
+
+def _range_line(per_rep: List[Dict[str, Any]]) -> Optional[str]:
+    # The RDL's range against itself: hinge spread over the set's reps and
+    # where the bar usually reached. None when the reps carry neither.
+    hinges = [r["hinge_deg"] for r in per_rep if r.get("hinge_deg") is not None]
+    labels = [r["range_label"] for r in per_rep if r.get("range_label")]
+    clauses = []
+    if len(hinges) > 1:
+        clauses.append(f"range was {_depth_consistency_words(statistics.stdev(hinges))}")
+    if labels:
+        clauses.append(f"the bar usually reached {statistics.mode(labels)}")
+    if not clauses:
+        return None
+    line = "; ".join(clauses) + "."
+    return line[0].upper() + line[1:]
+
+
+def _plural(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _exercise_recap_extras(set_data: Dict[str, Any]) -> Dict[str, Any]:
+    # A set's press and hedged-mention fields, kept for the exercise recap when present
+    return {key: set_data[key] for key in EXERCISE_RECAP_EXTRA_KEYS if key in set_data}
+
+
 def _cue_outcome_line(outcome: Dict[str, Any]) -> Optional[str]:
     reps_after = outcome["reps_after"]
     if not reps_after:
         return None
     label = fault_label(outcome["fault_type"])
     faulted = len(outcome["faulted_after"])
+    if faulted == 0 and outcome.get("improved_after"):
+        return (
+            f"CUE OUTCOME: after your cue on {label} at rep {outcome['after_rep']}, "
+            f"it looked better on {_rep_span(reps_after)} but isn't proven gone — name the "
+            "improvement, never say it's fixed."
+        )
     if faulted == 0:
         return (
             f"CUE OUTCOME: after your cue on {label} at rep {outcome['after_rep']}, "
@@ -323,6 +435,12 @@ class CoachingOrchestrator:
         self._exercise_name: str = ""
         self._is_squat: bool = True
         self._next_exercise: Optional[Dict[str, Any]] = None
+        # The active profile's cue map, whether it reports depth and whether
+        # its sets get a diagnosis (from the pipeline's cache_cues)
+        self._profile_name: str = "squat"
+        self._fault_to_cue: Dict[str, str] = dict(FAULT_TO_CUE_MAP)
+        self._reports_depth: bool = True
+        self._waits_for_diagnosis: bool = True
 
         # Diagnosis data — populated by set_diagnosis_data(), consumed by recaps
         self._pending_diagnosis: Optional[Dict[str, Any]] = None
@@ -337,6 +455,18 @@ class CoachingOrchestrator:
         self._contextual_note_voiced: bool = False
         # Fault types the pipeline flagged approximate; the recap hedges them
         self._approximate_fault_types: Set[str] = set()
+        # Fault types whose recorded-only verdicts the recap may mention, hedged
+        self._hedged_recap_faults: frozenset = frozenset()
+        # Press per-set events: missed presses and the grip setup note
+        self._set_missed_count: int = 0
+        self._set_setup_note: Optional[Dict[str, Any]] = None
+        # Setup and camera lines play at most once per session; some wait for
+        # the set to end, or for the rest-complete announcement to finish
+        self._session_clips_played: Set[str] = set()
+        self._clips_at_set_end: List[str] = []
+        self._clips_at_rest_end: List[str] = []
+        # RDL focus-fault context sentences already voiced this session
+        self._hinge_context_voiced: Set[str] = set()
 
         # Latest frame data snapshot — for real-time form queries (Feature 3)
         self._latest_angles: Dict[str, Any] = {}
@@ -433,6 +563,8 @@ class CoachingOrchestrator:
         self._set_clean_count = 0
         self._set_shallow_count = 0
         self._set_shallow_depths = []
+        self._set_missed_count = 0
+        self._set_setup_note = None
         self._recent_faults = []
         self._last_motivation_rep = 0
         self._last_positive_rep = None
@@ -486,10 +618,85 @@ class CoachingOrchestrator:
         await self._complete_set("force_end")
         return True
 
-    def set_exercise(self, exercise_name: str, is_squat: bool) -> None:
-        """The exercise the pipeline is now analysing."""
+    def set_exercise(
+        self,
+        exercise_name: str,
+        is_squat: bool,
+        fault_to_cue: Optional[Dict[str, str]] = None,
+        reports_depth: Optional[bool] = None,
+        profile_name: Optional[str] = None,
+        waits_for_diagnosis: Optional[bool] = None,
+        set_idle_timeout_s: Optional[float] = None,
+        hedged_recap_faults: Optional[List[str]] = None,
+    ) -> None:
+        """The exercise the pipeline is now analysing. The pipeline sends only
+        the fields that differ from the squat's, so a missing one keeps the
+        squat behaviour: its cue map, depth, its idle timeout, a diagnosis
+        wait for the exercises the diagnosis engine models (is_squat), and no
+        hedged recap mentions."""
         self._exercise_name = exercise_name
         self._is_squat = is_squat
+        self._profile_name = profile_name or ("squat" if is_squat else "")
+        self._fault_to_cue = dict(FAULT_TO_CUE_MAP if fault_to_cue is None else fault_to_cue)
+        self._reports_depth = True if reports_depth is None else reports_depth
+        self._waits_for_diagnosis = is_squat if waits_for_diagnosis is None else waits_for_diagnosis
+        self._set_idle_timeout_s = (
+            SET_IDLE_TIMEOUT_S if set_idle_timeout_s is None else set_idle_timeout_s
+        )
+        self._hedged_recap_faults = frozenset(hedged_recap_faults or ())
+
+    def on_exercise_ready(self) -> None:
+        """The pipeline is set up for the active exercise: its setup lines play,
+        once per session. Between sets they wait for the rest-complete
+        announcement, so they land right before the exercise's first set."""
+        keys = [
+            key for key in SETUP_CUE_KEYS_BY_PROFILE.get(self._profile_name, ())
+            if key not in self._session_clips_played
+        ]
+        self._session_clips_played.update(keys)
+        if self.resting:
+            self._clips_at_rest_end.extend(keys)
+        else:
+            self._play_clips(keys)
+
+    def on_pipeline_status(self, status: str) -> None:
+        """A tilted camera (the exercise's pitch tripwire revoked its certified
+        mount) gets the level_camera line once per session, after the set."""
+        if status != CAMERA_PITCH_STATUS or LEVEL_CAMERA_CUE in self._session_clips_played:
+            return
+        self._session_clips_played.add(LEVEL_CAMERA_CUE)
+        if self.resting:
+            self._play_clips([LEVEL_CAMERA_CUE])
+        else:
+            self._clips_at_set_end.append(LEVEL_CAMERA_CUE)
+
+    def play_clips_at_rest_end(self) -> None:
+        """Called once the rest-complete announcement has played."""
+        keys, self._clips_at_rest_end = self._clips_at_rest_end, []
+        self._play_clips(keys)
+
+    def _play_clips(self, keys: List[str]) -> None:
+        # A line without a clip on disk is skipped, never synthesized
+        playable = [key for key in keys if self._get_cue_audio(key)]
+        for key in set(keys) - set(playable):
+            logger.info(f"[ORCHESTRATOR] No audio for {key} — skipped")
+        if playable:
+            asyncio.create_task(self._play_in_order(playable))
+
+    async def _play_in_order(self, keys: List[str]) -> None:
+        for key in keys:
+            await self._play_cached(key)
+            logger.info(f"[ORCHESTRATOR] ✓ Played {key}")
+
+    @property
+    def fault_to_cue(self) -> Dict[str, str]:
+        """The active exercise's fault type -> cue key map."""
+        return self._fault_to_cue
+
+    @property
+    def reports_depth(self) -> bool:
+        """Whether the active exercise has a depth to report."""
+        return self._reports_depth
 
     def set_next_exercise(self, exercise_name: str, total_sets: Optional[int]) -> None:
         """The workout plan moved on; the next exercise starts once this set is wrapped up."""
@@ -617,8 +824,11 @@ class CoachingOrchestrator:
             self._set_focus_fault = focus
             logger.info(f"[ORCHESTRATOR] Next set's focus from the diagnosis: {focus}")
 
-    def _is_unseen_side_view(self, fault_type: str) -> bool:
-        return not self._side_view_observable and fault_type in SIDE_VIEW_FAULTS
+    def _is_unseen_side_view(self, fault_type: str, profile_name: Optional[str] = None) -> bool:
+        side_view_faults = SIDE_VIEW_FAULTS_BY_PROFILE.get(
+            profile_name if profile_name is not None else self._profile_name, SIDE_VIEW_FAULTS,
+        )
+        return not self._side_view_observable and fault_type in side_view_faults
 
     def _visible_causes(self, causes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Drop causes only side-view symptoms point to, when there's one camera."""
@@ -632,11 +842,14 @@ class CoachingOrchestrator:
 
     def _focus_cause(self, diagnosis: Dict[str, Any]) -> Optional[tuple]:
         """(cause, fault type) for the top fixable cause the camera sees well enough to cue."""
+        symptom_fault_types = SYMPTOM_FAULT_TYPES_BY_PROFILE.get(
+            self._profile_name, SYMPTOM_FAULT_TYPES,
+        )
         for cause in self._visible_causes(diagnosis.get("immediate_causes") or []):
             if cause.get("observability") == "approximate":
                 continue
             for symptom_id in cause.get("implicated_by") or []:
-                fault_type = SYMPTOM_FAULT_TYPES.get(symptom_id)
+                fault_type = symptom_fault_types.get(symptom_id)
                 if fault_type and not self._is_unseen_side_view(fault_type):
                     return cause, fault_type
         return None
@@ -698,7 +911,8 @@ class CoachingOrchestrator:
         if len(ratios) < MIN_REPS_FOR_TEMPO_EFFORT:
             return None
         last_faults = self._set_rep_events[-1].get("faults") or []
-        if self._side_view_observable and "velocity_loss" in last_faults:
+        # The squat's velocity_loss or an exercise's own (press_velocity_loss)
+        if self._side_view_observable and any(ft.endswith("velocity_loss") for ft in last_faults):
             return "near_limit"
         if ratios[-1] >= EFFORT_NEAR_LIMIT_RATIO:
             return "near_limit"
@@ -726,8 +940,8 @@ class CoachingOrchestrator:
         (older callers), whatever is pending is used as before.
         """
         if expects_diagnosis is None:
-            expects_diagnosis = self._is_squat
-        # Only the squat is diagnosed; nothing is coming for other exercises.
+            expects_diagnosis = self._waits_for_diagnosis
+        # Only diagnosed exercises (the squat) get one; nothing is coming for the rest.
         if set_number is None or not expects_diagnosis:
             return self._consume_diagnosis()
         deadline = time.monotonic() + self._diagnosis_wait_s
@@ -914,12 +1128,20 @@ class CoachingOrchestrator:
         message: str = "",
         observability: Optional[str] = None,
         side: Optional[str] = None,
+        recorded_only: bool = False,
     ):
         """Collect a fault for this rep. Whether it gets a cue is decided at
         rep_complete, once the rep's faults are all in (some arrive mid-rep)."""
         if self._resting or self._exercise_done:
             return
-        if not self._add_fault_candidate(cue_key, fault_type, severity, observability, side):
+        if fault_type in SET_EVENT_FAULT_TYPES:
+            # The grip note is read from its rep's verdicts; a missed press has no rep
+            if fault_type == MISSED_REP_FAULT_TYPE and not recorded_only:
+                self._on_missed_rep()
+            return
+        if not self._add_fault_candidate(
+            cue_key, fault_type, severity, observability, side, recorded_only,
+        ):
             return
         self._recent_faults.append(fault_type)
         if len(self._recent_faults) > 10:
@@ -932,8 +1154,14 @@ class CoachingOrchestrator:
         severity: str,
         observability: Optional[str],
         side: Optional[str],
+        recorded_only: bool = False,
     ) -> bool:
         """Keep this rep's worst severity per fault; False if it is never cued mid-set."""
+        # Below its fault's cue start tier: kept for the record only. An empty
+        # cue would otherwise be refilled from the cue map below.
+        if recorded_only:
+            logger.info(f"[ORCHESTRATOR] Recorded-only verdict — no cue (type={fault_type})")
+            return False
         if self._is_unseen_side_view(fault_type):
             logger.info(f"[ORCHESTRATOR] Side-view fault on one camera — ignored (type={fault_type})")
             return False
@@ -944,9 +1172,9 @@ class CoachingOrchestrator:
             logger.info(f"[ORCHESTRATOR] Approximate fault — no cue (type={fault_type})")
             return False
         # The pipeline leaves cue empty when its own gap was closed; the
-        # decision is made here, so fall back to the fault's own cue.
-        if not cue_key and fault_type in FAULT_TO_CUE_MAP:
-            cue_key = FAULT_TO_CUE_MAP[fault_type]
+        # decision is made here, so fall back to the exercise's own cue.
+        if not cue_key and fault_type in self._fault_to_cue:
+            cue_key = self._fault_to_cue[fault_type]
             if side in SIDE_CUE_SIDES:
                 cue_key = f"{cue_key}_{side}"
         current = self._rep_fault_candidates.get(fault_type)
@@ -954,17 +1182,31 @@ class CoachingOrchestrator:
             self._rep_fault_candidates[fault_type] = {"cue_key": cue_key, "severity": severity}
         return True
 
+    def _on_missed_rep(self) -> None:
+        # A press that stalled before lockout: not counted, never cued, recapped
+        # as information about the load.
+        self._set_missed_count += 1
+        # Faults from an attempt that didn't count belong to no rep
+        self._rep_fault_candidates = {}
+        # Still pressing: the idle timeout counts from the last attempt
+        if self._set_rep_count > 0:
+            self._arm_idle_timer()
+        logger.info(f"[ORCHESTRATOR] Missed rep — {self._set_missed_count} this set, not counted")
+
     async def on_shallow_rep(
         self,
         cue_key: Optional[str],
         depth_class_name: str = "",
+        recorded_only: bool = False,
     ):
         """Cue a rep that was rejected for depth.
 
         Fires on every shallow rep and bypasses the fault-cue gap: this cue
         stands in for the rep-count callout the lifter didn't get, so
         rate-limiting it would leave them with nothing to explain why the
-        counter didn't move. Fire-and-forget on the rep audio track.
+        counter didn't move. Fire-and-forget on the rep audio track. An
+        attempt whose verdict sat below its cue start tier (recorded-only)
+        is counted for the recap but never cued.
         """
         if self._resting or self._exercise_done:
             return
@@ -982,6 +1224,9 @@ class CoachingOrchestrator:
         )
 
         if self.cues_suppressed:
+            return
+        if recorded_only:
+            logger.info(f"[ORCHESTRATOR] Recorded-only shallow rep — no cue ({cue_key})")
             return
         if not cue_key or not self._get_cue_audio(cue_key):
             logger.info(f"[ORCHESTRATOR] No cached audio for shallow cue: {cue_key}")
@@ -1007,22 +1252,46 @@ class CoachingOrchestrator:
         highlights: Optional[List[str]] = None,
         set_number: Optional[int] = None,
         faults_detailed: Optional[List[Dict[str, Any]]] = None,
+        features: Optional[Dict[str, Any]] = None,
     ):
         """Count the rep, then decide this rep's single cue and praise."""
         if self._resting or self._exercise_done:
             return
         # The pipeline rate-limits fault messages per type (3 s), so a fast
         # rep's fault may never arrive as one; its own verdicts always do.
-        for fault in faults_detailed or []:
+        # Recorded-only verdicts drop out here; approximate ones are dropped
+        # (and noted for the recap's hedge) by _add_fault_candidate.
+        verdicts = faults_detailed or []
+        reportable = reportable_faults(verdicts, spoken=False)
+        for fault in reportable:
+            if fault.get("fault_type") in SET_EVENT_FAULT_TYPES:
+                continue
             details = fault.get("details") or {}
             self._add_fault_candidate(
                 None, fault.get("fault_type", ""), fault.get("severity", ""),
                 details.get("observability"), details.get("side"),
             )
+        self._note_grip(verdicts)
+        # Faults this rep showed only below their cue start tier: never
+        # counted, never "persists", but a held cue is only "better".
+        recorded_only_types = frozenset(
+            {fault.get("fault_type") for fault in verdicts if is_recorded_only(fault)}
+            - {fault.get("fault_type") for fault in reportable}
+        )
+        # Per-set events (the grip note, a missed rep) are never rep faults; the
+        # pipeline already keeps a setup note from making the rep unclean.
+        faults = [
+            fault_type for fault_type in faults
+            if fault_type not in recorded_only_types and fault_type not in SET_EVENT_FAULT_TYPES
+        ]
         self._set_rep_count += 1  # Track relative reps per set (ignores absolute pipeline number)
         if set_number is not None:
             self._pipeline_set_number = set_number
 
+        if (features or {}).get("exercise"):
+            # An analyser's concentric phase. The counter's "ascent" of a press
+            # is its lowering, which says nothing about effort.
+            ascent_time_s = _finite_or_none(features.get(CONCENTRIC_TIME_FEATURE)) or 0.0
         # Concentric slowdown vs the fastest rep of the set is the effort signal (velocity-loss proxy)
         ascent_ratio = None
         if ascent_time_s and ascent_time_s > 0:
@@ -1044,8 +1313,12 @@ class CoachingOrchestrator:
             "max_depth_angle": max_depth_angle,
             "rep_duration_ms": rep_duration_ms,
             "faults": faults,
+            "recorded_only_faults": sorted(recorded_only_types),
             "ascent_time_s": ascent_time_s,
             "ascent_ratio": ascent_ratio,
+            "highlight_score": _finite_or_none((features or {}).get("highlight_score")),
+            "hinge_deg": _finite_or_none((features or {}).get("hinge_deg")),
+            "range_label": (features or {}).get("range_label"),
         })
 
         if is_clean:
@@ -1059,7 +1332,9 @@ class CoachingOrchestrator:
             and self._set_rep_count >= self._set_target_reps
         )
         # Praise for a fix never plays over the set's end: the recap says it.
-        fix_praise_key = self._resolve_cue_outcome(faults, can_praise=not completes_set)
+        fix_praise_key = self._resolve_cue_outcome(
+            faults, can_praise=not completes_set, recorded_only_types=recorded_only_types,
+        )
         candidates, self._rep_fault_candidates = self._rep_fault_candidates, {}
 
         # Rep count cue — fire-and-forget on separate audio track
@@ -1136,6 +1411,31 @@ class CoachingOrchestrator:
 
         self._arm_idle_timer()
 
+    def _note_grip(self, verdicts: List[Dict[str, Any]]) -> None:
+        # The press grip is judged once per set: a setup note for the recap and
+        # the next set, never a mid-set cue, never stated when approximate.
+        if self._set_setup_note is not None:
+            return
+        for fault in reportable_faults(verdicts, spoken=True):
+            if fault.get("fault_type") != GRIP_FAULT_TYPE:
+                continue
+            direction = _grip_direction(fault.get("details") or {})
+            if direction is not None:
+                self._set_setup_note = {
+                    "fault_id": GRIP_FAULT_TYPE,
+                    "direction": direction,
+                    "severity": fault.get("severity"),
+                }
+                return
+
+    def next_set_setup_action(self) -> Optional[str]:
+        """One setup action for the coming set: a moderate or worse grip note
+        from the set just finished, as the way to move the hands."""
+        note = (self.last_set_data or {}).get("setup_note")
+        if not note or note.get("severity") not in CUE_SEVERITIES:
+            return None
+        return GRIP_SETUP_ACTION.format(direction=note["direction"])
+
     def _passes_bandwidth(self, fault_type: str, severity: str) -> bool:
         if severity in CUE_SEVERITIES:
             return True
@@ -1150,11 +1450,15 @@ class CoachingOrchestrator:
 
         A fault qualifies when it is bad enough (moderate+, or mild on 2 of the
         last 3 reps) and hasn't used its cues for the set. Only the focus fault
-        is cued, except severe knee cave (safety). With no focus yet, the
+        is cued, except the exercise's safety fault (severe knee cave for the
+        squat, severe layback for the press). With no focus yet, the
         priority order picks, and the fault picked becomes the focus.
         """
         if self.cues_suppressed or self._tracking_lost:
             return None
+        safety_type, safety_severity = SAFETY_FAULTS_BY_PROFILE.get(
+            self._profile_name, (SAFETY_FAULT_TYPE, SAFETY_SEVERITY),
+        )
         eligible = []
         for fault_type, candidate in candidates.items():
             severity = candidate["severity"]
@@ -1162,7 +1466,7 @@ class CoachingOrchestrator:
                 continue
             if self._set_cue_count(fault_type) >= MAX_CUES_PER_FAULT_PER_SET:
                 continue
-            is_safety = fault_type == SAFETY_FAULT_TYPE and severity == SAFETY_SEVERITY
+            is_safety = fault_type == safety_type and severity == safety_severity
             if self._set_focus_fault not in (None, fault_type) and not is_safety:
                 continue
             cue_key = candidate["cue_key"]
@@ -1204,26 +1508,43 @@ class CoachingOrchestrator:
             data={"fault_type": fault_type, "severity": severity, "after_rep": self._set_rep_count},
         )
 
-    def _resolve_cue_outcome(self, faults: List[str], can_praise: bool) -> Optional[str]:
+    def _resolve_cue_outcome(
+        self, faults: List[str], can_praise: bool, recorded_only_types: frozenset = frozenset(),
+    ) -> Optional[str]:
         """Judge the last fault cue on the reps after it; returns the praise
         line to play, if any.
 
         The cue plays between reps, so the next rep is the first one the
         lifter can act on. The fix counts once it holds FIX_HOLD_REPS reps in
         a row; then a praise line for that fault plays. If the fault comes
-        back, nothing is said — the recap carries it.
+        back, nothing is said — the recap carries it. A hold rep that still
+        showed it below its cue start tier makes the praise "_better"; with no
+        such clip nothing plays, never "_fixed". Either way the outcome is done.
+        A lagged fault (the RDL finish, judged on the next rep's setup) is
+        judged from the rep after next.
         """
         outcome = self._pending_outcome
-        if outcome is None or self._set_rep_count <= outcome.after_rep:
+        if outcome is None or self._set_rep_count <= outcome.after_rep + _outcome_lag(outcome.fault_type):
             return None
         if outcome.fault_type in faults:
             self._pending_outcome = None
             logger.info(f"[ORCHESTRATOR] Cue outcome: {outcome.cue_key} persists (rep {self._set_rep_count})")
             return None
+        if outcome.fault_type in recorded_only_types:
+            outcome.improved_only = True
         outcome.clean_reps += 1
         if outcome.clean_reps < FIX_HOLD_REPS:
             return None
         self._pending_outcome = None
+        if outcome.improved_only:
+            logger.info(f"[ORCHESTRATOR] Cue outcome: {outcome.cue_key} better (rep {self._set_rep_count})")
+            if not can_praise or self.cues_suppressed or self._tracking_lost:
+                return None
+            praise_key = f"{base_cue_key(outcome.cue_key)}{BETTER_CUE_SUFFIX}"
+            if not self._get_cue_audio(praise_key):
+                logger.info(f"[ORCHESTRATOR] No audio for {praise_key} — skipped, never '_fixed'")
+                return None
+            return praise_key
         logger.info(f"[ORCHESTRATOR] Cue outcome: {outcome.cue_key} fixed (rep {self._set_rep_count})")
         if not can_praise or self.cues_suppressed or self._tracking_lost:
             return None
@@ -1315,6 +1636,9 @@ class CoachingOrchestrator:
         set_data = self._build_set_summary()
         set_data["trigger"] = trigger
         self.last_set_data = set_data
+        # Lines held back during the set (a tilted camera) play now that it's over
+        clips, self._clips_at_set_end = self._clips_at_set_end, []
+        self._play_clips(clips)
 
         is_last_set = (
             self._total_sets is not None
@@ -1400,6 +1724,7 @@ class CoachingOrchestrator:
             "depth_consistency": final_set_data.get("depth_consistency", 0),
             "avg_duration_ms": final_set_data.get("avg_duration_ms", 0),
             "fault_summary": final_set_data.get("fault_summary", {}),
+            **_exercise_recap_extras(final_set_data),
         })
 
         # Stash report data for the final set
@@ -1421,6 +1746,8 @@ class CoachingOrchestrator:
                 # Snapshotted: the next exercise may start before this plays
                 "exercise_name": self._exercise_name,
                 "is_squat": self._is_squat,
+                "profile_name": self._profile_name,
+                "waits_for_diagnosis": self._waits_for_diagnosis,
                 "next_exercise": (self._next_exercise or {}).get("exercise_name"),
             },
         ))
@@ -1434,10 +1761,12 @@ class CoachingOrchestrator:
         """Compute set stats from accumulated per-rep data."""
         depths = [
             r["max_depth_angle"] for r in self._set_rep_events
-            if r.get("max_depth_angle", 0) > 0
+            if (r.get("max_depth_angle") or 0) > 0
         ]
         avg_depth = round(statistics.mean(depths), 1) if depths else 0
         depth_consistency = round(statistics.stdev(depths), 1) if len(depths) > 1 else 0
+        if not self._reports_depth:
+            avg_depth = depth_consistency = None
 
         durations = [
             r["rep_duration_ms"] for r in self._set_rep_events
@@ -1455,7 +1784,7 @@ class CoachingOrchestrator:
             for ft, cnt in fault_counts.items()
         } if self._set_rep_events else {}
 
-        return {
+        summary = {
             "set_number": self._set_number,
             "exercise_name": self._exercise_name,
             "is_squat": self._is_squat,
@@ -1478,24 +1807,64 @@ class CoachingOrchestrator:
             "effort": self._tempo_effort(),
             "focus_fault": self._set_focus_fault,
             "cue_outcomes": self._cue_outcomes(),
-            "per_rep": [
-                {
-                    "rep": r["rep_number"],
-                    "depth": r["depth"],
-                    "depth_angle": round(r.get("max_depth_angle", 0), 1),
-                    "clean": r["is_clean"],
-                    "faults": r.get("faults", []),
-                    "duration_ms": r.get("rep_duration_ms", 0),
-                }
-                for r in self._set_rep_events
-            ],
+            "per_rep": [self._per_rep_entry(r) for r in self._set_rep_events],
         }
+        if self._profile_name == PRESS_PROFILE:
+            # A press is never too shallow; a stalled one is a missed rep
+            del summary["shallow_reps"], summary["shallow_depths"]
+            summary["missed_reps"] = self._set_missed_count
+            summary["setup_note"] = self._set_setup_note
+        if self._hedged_recap_faults:
+            summary["possible"] = self._possible_faults(fault_summary)
+        return summary
+
+    def _possible_faults(self, fault_summary: Dict[str, Any]) -> List[Dict[str, str]]:
+        # Fault types seen only recorded-only this set, among the exercise's
+        # hedged ones: mentioned "possibly", never with a size or a count.
+        fault_ids: List[str] = []
+        for rep in self._set_rep_events:
+            for fault_type in rep.get("recorded_only_faults") or []:
+                if (
+                    fault_type in self._hedged_recap_faults
+                    and fault_type not in fault_summary
+                    and fault_type not in fault_ids
+                    and not self._is_unseen_side_view(fault_type)
+                ):
+                    fault_ids.append(fault_type)
+        return [{"fault_id": fault_type, "label": fault_label(fault_type)} for fault_type in fault_ids]
+
+    def _per_rep_entry(self, rep: Dict[str, Any]) -> Dict[str, Any]:
+        """One rep for the recap. Exercises without depth carry no depth fields,
+        and their highlight_score, hinge_deg and range_label when the features
+        had them."""
+        if self._reports_depth:
+            return {
+                "rep": rep["rep_number"],
+                "depth": rep["depth"],
+                "depth_angle": round(rep.get("max_depth_angle", 0), 1),
+                "clean": rep["is_clean"],
+                "faults": rep.get("faults", []),
+                "duration_ms": rep.get("rep_duration_ms", 0),
+            }
+        entry = {
+            "rep": rep["rep_number"],
+            "clean": rep["is_clean"],
+            "faults": rep.get("faults", []),
+            "duration_ms": rep.get("rep_duration_ms", 0),
+        }
+        for key in ("highlight_score", "hinge_deg", "range_label"):
+            if rep.get(key) is not None:
+                entry[key] = rep[key]
+        return entry
 
     def _cue_outcome(self, cue: Dict[str, Any]) -> Dict[str, Any]:
-        """A spoken cue with the reps after it and which still showed the fault."""
+        """A spoken cue with the reps after it and which still showed the fault.
+        Reps that showed it only below its cue start tier are "improved_after"
+        (listed only when there are any). A lagged fault's reps start one later."""
         fault_type = cue["fault_type"]
-        reps_after = [r for r in self._set_rep_events if r["rep_number"] > cue["after_rep"]]
-        return {
+        first_judged_after = cue["after_rep"] + _outcome_lag(fault_type)
+        reps_after = [r for r in self._set_rep_events if r["rep_number"] > first_judged_after]
+        outcome = {
             "fault_type": fault_type,
             "cue_key": cue["cue_key"],
             "after_rep": cue["after_rep"],
@@ -1504,6 +1873,13 @@ class CoachingOrchestrator:
                 r["rep_number"] for r in reps_after if fault_type in (r.get("faults") or [])
             ],
         }
+        improved_after = [
+            r["rep_number"] for r in reps_after
+            if fault_type in (r.get("recorded_only_faults") or [])
+        ]
+        if improved_after:
+            outcome["improved_after"] = improved_after
+        return outcome
 
     def _cue_outcomes(self) -> List[Dict[str, Any]]:
         """The outcome of each fault's first cue this set."""
@@ -1541,6 +1917,8 @@ class CoachingOrchestrator:
                 result = "just given"
             elif faulted:
                 result = f"still showing on {len(faulted)} of {len(reps_after)} reps"
+            elif outcome.get("improved_after"):
+                result = "looking better"
             elif len(reps_after) >= FIX_HOLD_REPS:
                 result = "fixed"
             else:
@@ -1580,7 +1958,7 @@ class CoachingOrchestrator:
             if cue_age < RECENT_CUE_CONTEXT_WINDOW_S:
                 last_cue_text = CUE_TEXT_MAP.get(self._last_cue_context.get("cue_key", ""))
 
-        return {
+        context = {
             "rep_number": rep_number,
             "reps_remaining": reps_remaining,
             "target_reps": self._set_target_reps,
@@ -1591,6 +1969,9 @@ class CoachingOrchestrator:
             "last_cue_text": last_cue_text,
             "effort": self._tempo_effort(),
         }
+        if not self._reports_depth:
+            del context["last_depth"]
+        return context
 
     # ------------------------------------------------------------------
     # Queue processing
@@ -1859,11 +2240,13 @@ class CoachingOrchestrator:
         except Exception as e:
             logger.error(f"[ORCHESTRATOR] LLM motivation failed: {e}", exc_info=True)
 
-    def _spoken_fault_summary(self, fault_summary: Dict[str, Any]) -> Dict[str, Any]:
+    def _spoken_fault_summary(
+        self, fault_summary: Dict[str, Any], profile_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """The faults Nova may talk about: side-view faults drop out on one camera."""
         return {
             fault_type: stats for fault_type, stats in fault_summary.items()
-            if not self._is_unseen_side_view(fault_type)
+            if not self._is_unseen_side_view(fault_type, profile_name)
         }
 
     def _cue_history_lines(self, fault_types) -> List[str]:
@@ -1899,10 +2282,12 @@ class CoachingOrchestrator:
         for outcome in (data.get("cue_outcomes") or [])[:1]:
             cue_text = _spoken_cue_text(outcome["cue_key"]) or fault_label(outcome["fault_type"])
             if outcome["reps_after"]:
-                result = (
-                    "gone after" if not outcome["faulted_after"]
-                    else f"still on {len(outcome['faulted_after'])} of {len(outcome['reps_after'])} reps after"
-                )
+                if outcome["faulted_after"]:
+                    result = f"still on {len(outcome['faulted_after'])} of {len(outcome['reps_after'])} reps after"
+                elif outcome.get("improved_after"):
+                    result = "better after"
+                else:
+                    result = "gone after"
                 parts.append(f"cue '{cue_text}' at rep {outcome['after_rep']}, {result}")
         adjustment = self._top_adjustment(diagnosis)
         if adjustment:
@@ -1948,6 +2333,13 @@ class CoachingOrchestrator:
                 f"{shallow_reps} of {attempted} attempts were too shallow to count "
                 f"(never reached their depth target) — those did not go toward the rep total."
             )
+        elif shallow_reps and self._profile_name == RDL_PROFILE:
+            parts.append(
+                f"{_plural(shallow_reps, 'attempt', 'attempts')} stopped too high to count — "
+                "those did not go toward the rep total."
+            )
+        if data.get("missed_reps"):
+            parts.append(self._missed_reps_line(data["missed_reps"]))
         if data.get("load"):
             parts.append(f"Load: {data['load']}.")
         if avg_depth and is_squat:
@@ -1968,6 +2360,9 @@ class CoachingOrchestrator:
                     "Faults marked approximate are hard to judge from this camera setup — "
                     "if you mention one, say it looked like it, never state it as fact."
                 )
+        parts.extend(self._possible_fault_lines(data.get("possible")))
+        if data.get("setup_note"):
+            parts.append(self._setup_note_line(data["setup_note"]))
         if data.get("focus_fault"):
             parts.append(f"This set's focus was {fault_label(data['focus_fault'])}.")
         for outcome in data.get("cue_outcomes") or []:
@@ -1976,6 +2371,8 @@ class CoachingOrchestrator:
                 parts.append(line)
         parts.extend(self._cue_history_lines(spoken_faults))
         parts.extend(self._build_rep_highlights(per_rep))
+        if self._profile_name == RDL_PROFILE:
+            parts.extend(self._rdl_recap_lines(per_rep, data.get("focus_fault")))
 
         # Enrich with diagnosis data if available
         if diagnosis and scoring:
@@ -2017,8 +2414,9 @@ class CoachingOrchestrator:
 
         context_str = " ".join(parts)
 
+        # A missed press, like a shallow attempt, keeps the reply straight
         humor_line = self._humor_line(
-            total_reps, clean_reps, shallow_reps,
+            total_reps, clean_reps, shallow_reps + (data.get("missed_reps") or 0),
             affect=self._current_athlete_state().get("affect"),
             near_limit=effort == "near_limit",
         )
@@ -2081,6 +2479,7 @@ class CoachingOrchestrator:
                 "avg_duration_ms": avg_duration_ms,
                 "fault_summary": fault_summary,
             }
+            summary.update(_exercise_recap_extras(data))
             if diagnosis and scoring:
                 summary["diagnosis"] = diagnosis
                 summary["scoring"] = scoring
@@ -2106,15 +2505,64 @@ class CoachingOrchestrator:
             return "A light touch of dry humor is welcome if it comes naturally — never forced."
         return "No humor in this reply — keep it straight, supportive, and forward-looking."
 
+    @staticmethod
+    def _missed_reps_line(missed_reps: int) -> str:
+        return (
+            f"{_plural(missed_reps, 'press', 'presses')} stalled before lockout and didn't count — "
+            "treat that as information about the load, never as failure."
+        )
+
+    @staticmethod
+    def _setup_note_line(setup_note: Dict[str, Any]) -> str:
+        action = GRIP_SETUP_ACTION.format(direction=setup_note["direction"])
+        return f"Setup note: {fault_label(setup_note['fault_id'], setup_note)}. Next set: {action}."
+
+    @staticmethod
+    def _possible_fault_lines(possible: Optional[List[Dict[str, str]]]) -> List[str]:
+        # The hedge never states a size: a verdict can be recorded-only at moderate.
+        if not possible:
+            return []
+        labels = "; ".join(entry["label"] for entry in possible)
+        return [
+            f"Possibly also: {labels} — hard to judge from this camera. If you mention it, say "
+            "'possibly'; never state it as fact, how much, or how often."
+        ]
+
+    def _rdl_recap_lines(self, per_rep: list, focus_fault: Optional[str]) -> List[str]:
+        # The RDL's range against itself, the focus fault's why (once per
+        # session) and what the cameras can't see.
+        lines: List[str] = []
+        range_line = _range_line(per_rep)
+        if range_line:
+            lines.append(range_line)
+        context = HINGE_FAULT_CONTEXT.get(focus_fault or "")
+        if context and focus_fault not in self._hinge_context_voiced:
+            self._hinge_context_voiced.add(focus_fault)
+            lines.append(f"WHY IT HAPPENS (say once, briefly, in your own words): {context}")
+        lines.append(self._rdl_unobservable_line())
+        return lines
+
+    def _rdl_unobservable_line(self) -> str:
+        foot = "" if self._side_view_observable else RDL_ONE_CAMERA_UNOBSERVABLE
+        return f"{RDL_UNOBSERVABLE_LINE}{foot} — the cameras can't judge that."
+
     def _build_rep_highlights(self, per_rep: list) -> List[str]:
         """Compress the per-rep dump into best/roughest highlight lines."""
         highlights: List[str] = []
         if not per_rep:
             return highlights
         clean = [r for r in per_rep if r.get("clean")]
-        if clean:
-            best = max(clean, key=lambda r: r.get("depth_angle", 0))
-            highlights.append(f"Best rep: rep {best['rep']}, their deepest clean rep.")
+        if self._reports_depth:
+            if clean:
+                best = max(clean, key=lambda r: r.get("depth_angle", 0))
+                highlights.append(f"Best rep: rep {best['rep']}, their deepest clean rep.")
+        else:
+            # No depth claims: the exercise's own score names the best rep, or nothing does.
+            meaning = HIGHLIGHT_MEANINGS.get(self._profile_name)
+            scored = [r for r in clean if r.get("highlight_score") is not None]
+            if meaning and scored:
+                best = max(scored, key=lambda r: r["highlight_score"])
+                highlights.append(f"Best rep: rep {best['rep']}, their {meaning}.")
         faulted = [
             (r, [ft for ft in r.get("faults", []) if not self._is_unseen_side_view(ft)])
             for r in per_rep
@@ -2199,8 +2647,11 @@ class CoachingOrchestrator:
         set_coaching_moment("recap")
         # The final set's diagnosis follows workout_complete — wait for it
         diagnosis, scoring = await self._await_set_diagnosis(
-            data.get("diagnosis_set_number"), data.get("is_squat"),
+            data.get("diagnosis_set_number"),
+            data.get("waits_for_diagnosis", data.get("is_squat")),
         )
+        # Snapshotted: the next exercise's profile may be active by now
+        profile_name = data.get("profile_name")
 
         all_summaries = data.get("all_set_summaries", [])
         total_sets = data.get("total_sets", len(all_summaries))
@@ -2217,7 +2668,8 @@ class CoachingOrchestrator:
         # Aggregate the faults Nova may talk about across all sets
         all_faults: Dict[str, int] = {}
         for s in all_summaries:
-            for fault_type, stats in self._spoken_fault_summary(s.get("fault_summary", {})).items():
+            spoken = self._spoken_fault_summary(s.get("fault_summary", {}), profile_name)
+            for fault_type, stats in spoken.items():
                 all_faults[fault_type] = all_faults.get(fault_type, 0) + stats.get("count", 0)
 
         # Per-set breakdown
@@ -2226,7 +2678,7 @@ class CoachingOrchestrator:
             sn = s.get("set_number", 0)
             tr = s.get("total_reps", 0)
             cr = s.get("clean_reps", 0)
-            faults_in_set = self._spoken_fault_summary(s.get("fault_summary", {}))
+            faults_in_set = self._spoken_fault_summary(s.get("fault_summary", {}), profile_name)
             fault_str = ""
             if faults_in_set:
                 fault_parts = [
@@ -2252,6 +2704,14 @@ class CoachingOrchestrator:
             parts.append(
                 f"{total_shallow} attempts across the session were too shallow to count."
             )
+        elif total_shallow and profile_name == RDL_PROFILE:
+            parts.append(
+                f"{_plural(total_shallow, 'attempt', 'attempts')} across the session stopped too "
+                "high to count."
+            )
+        total_missed = sum(s.get("missed_reps") or 0 for s in all_summaries)
+        if total_missed:
+            parts.append(self._missed_reps_line(total_missed))
         if last_set.get("load"):
             parts.append(f"Load: {last_set['load']}.")
         if per_set_lines:
@@ -2262,10 +2722,24 @@ class CoachingOrchestrator:
                 f"{fault_label(ft)} {cnt} times across all sets" for ft, cnt in top_faults
             )
             parts.append(f"Most common faults: {fault_str}.")
+        possible: List[Dict[str, str]] = []
+        for s in all_summaries:
+            for entry in s.get("possible") or []:
+                if entry["fault_id"] not in all_faults and entry not in possible:
+                    possible.append(entry)
+        parts.extend(self._possible_fault_lines(possible))
+        setup_notes = [s["setup_note"] for s in all_summaries if s.get("setup_note")]
+        if setup_notes:
+            parts.append(self._setup_note_line(setup_notes[-1]))
         for outcome in last_set.get("cue_outcomes") or []:
             line = _cue_outcome_line(outcome)
             if line:
                 parts.append(f"Last set — {line}")
+        if profile_name == RDL_PROFILE:
+            range_line = _range_line(last_set.get("per_rep") or [])
+            if range_line:
+                parts.append(f"Last set — {range_line}")
+            parts.append(self._rdl_unobservable_line())
 
         # Diagnosis progression across sets
         diagnosed_sets = [s for s in all_summaries if "scoring" in s]
@@ -2333,7 +2807,7 @@ class CoachingOrchestrator:
 
         context_str = " ".join(parts)
 
-        humor_line = self._humor_line(total_reps, total_clean, total_shallow)
+        humor_line = self._humor_line(total_reps, total_clean, total_shallow + total_missed)
         closing = (
             f"End by telling them {next_exercise} is up next after the rest — the workout isn't over."
             if next_exercise

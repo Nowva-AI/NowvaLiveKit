@@ -209,10 +209,12 @@ class MainMenuAgent(BaseNovaAgent):
             f"[MAIN MENU] User wants quick exercise: {exercise_name} "
             f"(sets={sets}, reps={reps}, weight={weight}{weight_unit or ''}, rest={rest_seconds})"
         )
-        from biomechanics.profiles import find_profile_class
+        from biomechanics.profiles import coaching_ready_profiles, find_profile_class
 
+        # The same list the menu offers from, so the dev override, gated
+        # profiles and untracked variants decide here exactly as they do there.
         profile_class = find_profile_class(exercise_name)
-        if profile_class is None or not profile_class.coaching_ready:
+        if profile_class not in coaching_ready_profiles():
             logger.info(f"[MAIN MENU] {exercise_name} is not coached on camera yet")
             return None, (
                 f"Tell the user you can't coach {exercise_name} on camera yet and offer "

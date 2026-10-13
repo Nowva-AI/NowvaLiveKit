@@ -32,7 +32,6 @@ from biomechanics.pipeline import BiomechanicsPipeline
 from biomechanics.calibration import (
     CalibrationTracker,
     build_calibration_profile,
-    apply_calibration_to_rule_engine,
     extract_thresholds_from_rule_engine,
     get_movement_pattern,
 )
@@ -44,6 +43,7 @@ from biomechanics.diagnosis.demo_builder import build_demo_data
 from biomechanics.diagnosis.engine import HypothesisEngine
 from biomechanics.diagnosis.rep_scoring import score_set
 from biomechanics.utils.json_safe import nan_to_none
+from biomechanics.utils.standing_gate import PROFILE_CHECK_FAILURE
 from biomechanics.diagnosis.types import SetFeatures
 from biomechanics.faults.observability import SINGLE_CAMERA, capture_mode_from_env
 from biomechanics.triangulation.calibration import (
@@ -85,6 +85,11 @@ DEMO_FINISH_TIMEOUT_S = 6.0
 # Re-arm the readiness gate this long before rest ends, so the gate is
 # already latched when the timer expires and the user can start at once.
 GATE_PREARM_SECONDS = 3.0
+
+# NOWVA_RAW_RECORD=1 records every processed frame's raw skeleton and the
+# control events into the session output for replay (biomechanics.replay).
+RAW_RECORD_ENV = "NOWVA_RAW_RECORD"
+RAW_RECORDING_FILENAME = "raw_skeleton.jsonl"
 
 # ROM baseline used until calibration reps measure the real peaks.
 DEFAULT_ROM_BASELINE = {"peakDorsi": 35.0, "peakKneeFlex": 120.0, "peakHipFlex": 120.0}
@@ -287,22 +292,72 @@ def _extract_athlete_params(pipeline) -> dict | None:
     return pipeline.body_calibration.to_athlete_params()
 
 
-def _switch_exercise(
+def _activate_profile(
     pipeline: BiomechanicsPipeline,
     session_tracker: SessionTracker,
     bridge: IPCBridge,
     exercise_name: str,
+    meta: dict | None = None,
+    *,
+    startup: bool = False,
 ) -> None:
-    """Move the running pipeline to another exercise between sets.
+    """The one activation path, at startup and on every set_exercise.
 
-    The new profile's rules and rep counting take over, the diagnosis engine
-    only runs for exercises it models, and the voice agent gets the new
-    exercise's cues, which also tells it which profile is active.
+    A switch moves the running pipeline to the exercise (fresh rules, counter,
+    analyser and session reference; startup already built them). The diagnosis
+    engine only runs for exercises it models, the profile's set diagnosis and
+    the session metadata are installed, the rig keeps buffering views for camera
+    refines only while the exercise allows them, and the voice agent gets the
+    exercise's cues, which also tell it which profile is active.
     """
-    pipeline.set_exercise(exercise_name)
-    session_tracker.on_exercise_changed(pipeline.profile.uses_diagnosis_engine)
-    bridge.prepare_exercise(exercise_name)
-    print(f"[PIPELINE] Exercise set to {exercise_name} ({pipeline.profile.name})")
+    if not startup:
+        pipeline.set_exercise(exercise_name)
+    profile = pipeline.profile
+    session_tracker.on_exercise_changed(profile.uses_diagnosis_engine, reports_depth=profile.reports_depth)
+    session_tracker.set_diagnosis = profile.create_set_diagnosis()
+    session_tracker.exercise_meta = dict(meta or {})
+    set_view_recording = getattr(pipeline._multi_camera_provider, "set_view_recording", None)
+    if callable(set_view_recording):
+        set_view_recording(profile.allows_camera_refine)
+    bridge.prepare_exercise(exercise_name, profile, pipeline.config)
+    if not startup:
+        print(f"[PIPELINE] Exercise set to {exercise_name} ({profile.name})")
+
+
+def _send_shallow_rep(bridge: IPCBridge, result: PipelineFrame, set_number: int) -> None:
+    """A rejected rep's shallow_rep message: the squat's depth class and "deeper",
+    or an analyser profile's cue (None = cue-less) and range label."""
+    shallow_fault = next((f for f in result.faults if f.details.get("shallow_rep")), None)
+    if result.analyzer_shallow_rep:
+        bridge.send_shallow_rep(
+            result.shallow_rep_class,
+            fault=shallow_fault,
+            set_number=set_number,
+            cue_key=result.shallow_rep_cue,
+            label=shallow_fault.details.get("range_label") if shallow_fault is not None else None,
+        )
+        print(f"[SHALLOW REP] {shallow_fault.fault_type if shallow_fault else 'rejected'} — not counted")
+        return
+    bridge.send_shallow_rep(result.shallow_rep_class, fault=shallow_fault, set_number=set_number)
+    print(f"[SHALLOW REP] depth_class={result.shallow_rep_class} — not counted")
+
+
+# pipeline_status "camera_pitch" (the agent plays level_camera once) when a
+# delta tripwire revoked the certified mount or a gross tripwire found an
+# uncertified camera far off level.
+def _send_camera_pitch_status(bridge: IPCBridge, result: PipelineFrame) -> None:
+    if result.pitch_certification_revoked_deg is not None:
+        bridge.send_pipeline_status("camera_pitch", {}, {"delta_deg": result.pitch_certification_revoked_deg})
+    if result.camera_pitch_untrusted_deg is not None:
+        bridge.send_pipeline_status("camera_pitch", {}, {"pitch_deg": result.camera_pitch_untrusted_deg})
+
+
+def _readiness_hint(pipeline: BiomechanicsPipeline, default: str) -> str:
+    """The HUD hint for a failed readiness frame; the profile's own hint when its setup check failed."""
+    failure = pipeline._readiness_gate.last_failure
+    if failure == PROFILE_CHECK_FAILURE and pipeline.profile.readiness_hint:
+        return pipeline.profile.readiness_hint
+    return GATE_FAILURE_HINTS.get(failure, default)
 
 
 def _adopt_measured_athlete_params(pipeline, session_tracker, bridge, baseline: dict) -> dict | None:
@@ -1011,10 +1066,9 @@ def run_biomechanics_pipeline(
 
         bridge = IPCBridge(ipc_client)
         session_tracker = SessionTracker(bridge, config=config.coaching)
-        session_tracker.diagnosis_enabled = pipeline.profile.uses_diagnosis_engine
 
-        # Pre-cache coaching cues for the exercise
-        bridge.prepare_exercise(exercise_name)
+        # Diagnosis, set diagnosis and the exercise's coaching cues
+        _activate_profile(pipeline, session_tracker, bridge, exercise_name, startup=True)
 
         ipc_client.send_message({"type": "status", "value": "initialized"})
         bridge.send_pipeline_status("running", {})
@@ -1041,6 +1095,11 @@ def run_biomechanics_pipeline(
         ipc_client = valgus_recorder.tap(ipc_client)
         bridge.ipc_client = ipc_client
 
+    if os.environ.get(RAW_RECORD_ENV) == "1":
+        raw_recording_path = Path(out_dir) / RAW_RECORDING_FILENAME
+        pipeline.enable_raw_recording(raw_recording_path)
+        print(f"[RECORD] Raw skeletons and control events -> {raw_recording_path}")
+
     pipeline_inspector = build_inspector(
         out_dir, config.target_fps, pipeline._multi_camera, pipeline.preik_stage_names,
     )
@@ -1062,7 +1121,7 @@ def run_biomechanics_pipeline(
             # Newer files nest thresholds alongside the athlete's body
             # proportions; older flat files are just the thresholds.
             cal_profile = stored.get("thresholds", stored)
-            apply_calibration_to_rule_engine(pipeline._rule_engine, cal_profile)
+            pipeline.apply_calibration(cal_profile)
             stored_target = (stored.get("baseline") or {}).get("depthTargetRatio")
             if cal_profile.get("depth_target_ratio") is None and stored_target is not None:
                 pipeline.set_depth_target(stored_target)
@@ -1124,9 +1183,8 @@ def run_biomechanics_pipeline(
                     fps_counter.update()
                     draw_fps(display, fps_counter.fps)
 
-                    readiness_gate = pipeline._readiness_gate
-                    current, required = readiness_gate.progress
-                    hint = GATE_FAILURE_HINTS.get(readiness_gate.last_failure, "HOLD STILL")
+                    current, required = pipeline._readiness_gate.progress
+                    hint = _readiness_hint(pipeline, "HOLD STILL")
                     _draw_hud_pill(display, f"{hint}  {current}/{required}", accent=HUD_VIOLET)
                     _draw_wordmark(display)
 
@@ -1226,10 +1284,8 @@ def run_biomechanics_pipeline(
             while not assessment_passed:
                 assessment_round += 1
                 assessment_reps_done = 0
-                pipeline.rep_counter.reset()
-                pipeline.rep_counter.set_assessment_mode(True)
-                if pipeline._bilstm is not None:
-                    pipeline._bilstm.set_assessment_mode(True)
+                pipeline.reset_rep_counter()
+                pipeline.set_assessment_mode(True)
                 session_tracker.set_assessment_mode(True)
                 session_tracker.reset_rep_buffers()
                 session_tracker.current_set_reps = []
@@ -1464,11 +1520,9 @@ def run_biomechanics_pipeline(
 
         # Reset pipeline state for calibration
         pipeline.reset_readiness_gate()
-        pipeline.rep_counter.reset()
-        pipeline.rep_counter.set_assessment_mode(False)
-        if pipeline._bilstm is not None:
-            pipeline._bilstm.reset()
-            pipeline._bilstm.set_assessment_mode(False)
+        pipeline.reset_rep_counter()
+        pipeline.reset_bilstm()
+        pipeline.set_assessment_mode(False)
         session_tracker.set_assessment_mode(False)
         session_tracker.reset_rep_buffers()
         session_tracker.current_set_reps = []
@@ -1545,7 +1599,7 @@ def run_biomechanics_pipeline(
             # --- Calibration complete ---
             peaks = tracker.get_peaks()
             cal_profile = build_calibration_profile(peaks, config)
-            apply_calibration_to_rule_engine(pipeline._rule_engine, cal_profile)
+            pipeline.apply_calibration(cal_profile)
 
             # Body measurements are session-scoped (per-set resets never touch
             # them); the params adopted during assessment back that up.
@@ -1599,11 +1653,10 @@ def run_biomechanics_pipeline(
             # Reset pipeline for workout phase
             pipeline.reset_readiness_gate()
             gate_knee = tracker.standing_knee_flexion + 10.0
-            pipeline._readiness_gate.max_knee_flexion_deg = gate_knee
+            pipeline.set_readiness_knee_limit(gate_knee)
             print(f"  [GATE] Standing knee threshold raised to {gate_knee:.1f}°")
-            pipeline.rep_counter.reset()
-            if pipeline._bilstm is not None:
-                pipeline._bilstm.reset()
+            pipeline.reset_rep_counter()
+            pipeline.reset_bilstm()
 
         except KeyboardInterrupt:
             print("\nCalibration stopped by user")
@@ -1666,7 +1719,10 @@ def run_biomechanics_pipeline(
             _draw_hud_pill(frame, "COLLECTING", accent=HUD_CYAN)
         else:
             current, required = progress
-            _draw_hud_pill(frame, f"WAITING {current}/{required}", accent=HUD_VIOLET)
+            label = "WAITING"
+            if pipeline._readiness_gate.last_failure == PROFILE_CHECK_FAILURE and pipeline.profile.readiness_hint:
+                label = pipeline.profile.readiness_hint
+            _draw_hud_pill(frame, f"{label} {current}/{required}", accent=HUD_VIOLET)
 
     def _format_set_summary(summary):
         """Format a set summary dict into a context_str-style log line."""
@@ -1713,6 +1769,7 @@ def run_biomechanics_pipeline(
             if incoming:
                 if incoming.get("type") == "rest_start":
                     rest_seconds = incoming.get("rest_seconds", 30)
+                    pipeline.record_event("rest_start", rest_seconds=rest_seconds)
                     rest_end_time = time.time() + rest_seconds
                     rest_total_seconds = float(rest_seconds)
                     resting = True
@@ -1736,7 +1793,9 @@ def run_biomechanics_pipeline(
                     else:
                         set_collector.reset()
 
-                    if camera_calibration is not None:
+                    # No refine, and no drift check, on frames of an exercise
+                    # whose poses would degrade the rig calibration.
+                    if camera_calibration is not None and pipeline.profile.allows_camera_refine:
                         camera_calibration.on_rest_start()
 
                     print(f"[REST] Starting {rest_seconds}s rest timer")
@@ -1744,7 +1803,7 @@ def run_biomechanics_pipeline(
                     # Sent during rest, after rest_start finalized the last set
                     # of the previous exercise.
                     exercise_name = incoming.get("exercise_name") or exercise_name
-                    _switch_exercise(pipeline, session_tracker, bridge, exercise_name)
+                    _activate_profile(pipeline, session_tracker, bridge, exercise_name, incoming.get("meta"))
                     set_collector.thresholds = extract_thresholds_from_rule_engine(pipeline._rule_engine)
                 elif incoming.get("type") == "assessment_mode":
                     session_tracker.set_assessment_mode(incoming.get("enabled", False))
@@ -1938,19 +1997,10 @@ def run_biomechanics_pipeline(
                         bridge.send_fault(fault)
                     set_collector.record_fault(fault)
 
-                if result.shallow_rep_class is not None:
-                    shallow_fault = next(
-                        (f for f in result.faults if f.details.get("shallow_rep")),
-                        None,
-                    )
-                    bridge.send_shallow_rep(
-                        result.shallow_rep_class,
-                        fault=shallow_fault,
-                        set_number=session_tracker.current_set_number,
-                    )
-                    print(
-                        f"[SHALLOW REP] depth_class={result.shallow_rep_class} — not counted"
-                    )
+                if result.shallow_rep_class is not None or result.analyzer_shallow_rep:
+                    _send_shallow_rep(bridge, result, session_tracker.current_set_number)
+
+                _send_camera_pitch_status(bridge, result)
 
                 if result.rep_data:
                     bottom_kpts, bottom_angles = pipeline.consume_bottom_frame()
@@ -2005,9 +2055,8 @@ def run_biomechanics_pipeline(
                             pipeline.reset_readiness_gate()
                         # Rep counters reset at rest end so anything done
                         # while settling in doesn't count into the new set.
-                        pipeline.rep_counter.reset()
-                        if pipeline._bilstm is not None:
-                            pipeline._bilstm.reset()
+                        pipeline.reset_rep_counter()
+                        pipeline.reset_bilstm()
                         ipc_client.send_message({"type": "rest_complete"})
                         print("[REST] Timer expired — sent rest_complete")
                     else:

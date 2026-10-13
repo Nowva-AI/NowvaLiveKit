@@ -3,6 +3,8 @@
 Concentric velocity loss is how strength coaches read proximity to failure
 (20% loss ≈ moderate fatigue, 40% ≈ near failure; Sánchez-Medina &
 González-Badillo 2011). Velocity is the shoulder midpoint, the bar's proxy.
+Another lift reuses the rule under its own fault type and concentric phase
+name (e.g. press_velocity_loss, "press").
 """
 
 from __future__ import annotations
@@ -20,14 +22,18 @@ class VelocityLossRule(RepFaultRule):
         mild_pct: float = 20.0,
         moderate_pct: float = 30.0,
         severe_pct: float = 40.0,
+        fault_type: FaultType = FaultType.VELOCITY_LOSS,
+        phase: str = "ascent",
     ) -> None:
         self.mild_pct = mild_pct
         self.moderate_pct = moderate_pct
         self.severe_pct = severe_pct
+        self._fault_type = fault_type
+        self._verdict_phase = phase
 
     @property
     def fault_type(self) -> FaultType:
-        return FaultType.VELOCITY_LOSS
+        return self._fault_type
 
     def judge_rep(self, features, reference, angles: JointAngles) -> Optional[FaultEvent]:
         loss = features.velocity_loss_pct
@@ -39,7 +45,7 @@ class VelocityLossRule(RepFaultRule):
             angles,
             features.rep_number,
             unit="pct",
-            phase="ascent",
+            phase=self._verdict_phase,
             is_drift=True,
             velocity_mps=features.concentric_velocity_mps,
             reference_velocity_mps=reference.velocity_reference_mps,

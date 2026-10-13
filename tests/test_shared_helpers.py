@@ -73,6 +73,34 @@ class TestNormalizeExerciseName:
 
         assert get_movement_pattern("Bodyweight Squat") == "squat"
 
+    @pytest.mark.parametrize("alias", [
+        "ohp", "OHPs", "overhead press", "overhead presses", "press", "military press",
+        "strict press", "strict presses", "standing press", "standing overhead press",
+        "barbell overhead press", "Barbell Overhead Presses",
+    ])
+    def test_press_aliases_name_the_standing_barbell_press(self, alias):
+        assert normalize_exercise_name(alias) == "Barbell Overhead Press"
+
+    @pytest.mark.parametrize("alias", ["push press", "shoulder press", "seated press", "dumbbell press"])
+    def test_press_variants_stay_unmapped(self, alias):
+        assert normalize_exercise_name(alias) is None
+
+    @pytest.mark.parametrize("alias", [
+        "rdl", "RDLs", "romanian deadlift", "Romanian Deadlifts", "barbell rdl",
+        "barbell rdls", "barbell romanian deadlift", "barbell romanian deadlifts",
+    ])
+    def test_rdl_aliases_name_the_romanian_deadlift(self, alias):
+        assert normalize_exercise_name(alias) == "Romanian Deadlift"
+
+    @pytest.mark.parametrize("canonical,profile", [
+        ("Barbell Overhead Press", "overhead_press"),
+        ("Romanian Deadlift", "romanian_deadlift"),
+    ])
+    def test_canonical_names_resolve_to_their_profile(self, canonical, profile):
+        from biomechanics.profiles import find_profile_class
+
+        assert find_profile_class(canonical).name == profile
+
 
 class TestServiceHeaders:
     def test_reads_service_api_key_from_env(self, monkeypatch):

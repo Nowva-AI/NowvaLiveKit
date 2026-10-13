@@ -655,3 +655,154 @@ class TestExtractFaultSeries:
         assert series[0]["severity_score"] == pytest.approx(
             0.5, abs=SCORE_TOLERANCE
         )
+
+
+# ------------------------------------------------------------------
+# Recorded-only verdicts: stored, flagged, never aggregated
+# ------------------------------------------------------------------
+
+def _recorded_only_detail(fault_type="press_uneven", severity_score=1.0):
+    detail = _fault_detail(fault_type, severity_score)
+    detail["details"] = {"observability": "observable", "recorded_only": True}
+    return detail
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *args):
+        return self
+
+    def order_by(self, *args):
+        return self
+
+    def limit(self, *args):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeQueryDb:
+    """Returns preset rows per model; filters and ordering are the caller's concern."""
+
+    def __init__(self, rows_by_model: dict):
+        self._rows_by_model = rows_by_model
+
+    def query(self, model):
+        return _FakeQuery(self._rows_by_model.get(model, []))
+
+
+def _session_row(session_id):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=session_id)
+
+
+def _trend_rep(session_id, faults):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(session_id=session_id, faults=faults)
+
+
+class TestRecordedOnlyIsNeverAggregated:
+    def test_top_faults_and_per_set_counts_skip_it(self):
+        from datetime import datetime
+
+        summary = build_baseline_summary(
+            started_at=datetime.utcnow(),
+            mean_session_score=None,
+            total_reps=2,
+            total_sets=1,
+            set_rows=[_FakeSetRow(set_number=1)],
+            rep_rows=[
+                _FakeBaselineRep(faults=[_recorded_only_detail()]),
+                _FakeBaselineRep(faults=[_recorded_only_detail(), _fault_detail("press_lockout", 2.0)]),
+            ],
+        )
+        assert [entry["fault_type"] for entry in summary["top_faults"]] == ["press_lockout"]
+        assert summary["per_set"][0]["faults"] == {"press_lockout": 1}
+
+    def test_fault_progress_series_skips_it(self):
+        reps = [
+            _FakeRepRow("t1", 1, [_recorded_only_detail()]),
+            _FakeRepRow("t2", 2, [_fault_detail("press_uneven", 2.0)]),
+        ]
+        series = _extract_fault_series(reps, "press_uneven")
+        assert [point["rep_number"] for point in series] == [2]
+
+    def test_get_fault_progress_has_no_entry_for_a_recorded_only_fault(self):
+        from db.biomechanics_persistence import get_fault_progress
+        from db.models import BiomechanicsRep
+
+        db = _FakeQueryDb({BiomechanicsRep: [_FakeRepRow("t1", 1, [_recorded_only_detail()])]})
+        assert get_fault_progress(db, USER_ID, "press_uneven") == []
+
+    def test_multi_session_trends_have_no_entry_for_a_recorded_only_fault(self):
+        from db.biomechanics_persistence import get_multi_session_fault_trends
+        from db.models import BiomechanicsRep, BiomechanicsSession
+
+        sessions = [_session_row(uuid.uuid4()) for _ in range(3)]
+        reps = [
+            _trend_rep(s.id, [_recorded_only_detail(), _fault_detail("press_lockout", 2.0)])
+            for s in sessions
+        ]
+        db = _FakeQueryDb({BiomechanicsSession: sessions, BiomechanicsRep: reps})
+        trends = get_multi_session_fault_trends(db, USER_ID, exercise="overhead_press")
+        assert [entry["fault_type"] for entry in trends["fault_profile"]] == ["press_lockout"]
+        assert trends["chronic_faults"] == ["press_lockout"]
+
+    def test_the_rep_row_keeps_the_flagged_verdict(self):
+        row = _build_rep_row(_rep_msg(faults_detailed=[_recorded_only_detail()]))
+        assert row["faults"][0]["details"]["recorded_only"] is True
+
+    def test_a_top_level_flag_on_a_message_counts_as_recorded_only(self):
+        from db.biomechanics_persistence import _counted_faults
+
+        shallow_rep = {"type": "shallow_rep", "fault_type": "rdl_partial", "recorded_only": True}
+        counted = _fault_detail("press_lockout", 2.0)
+        assert _counted_faults([shallow_rep, counted]) == [counted]
+
+
+def _setup_note_detail(fault_type="press_grip", severity_score=1.0):
+    detail = _fault_detail(fault_type, severity_score)
+    detail["details"] = {"setup_note": True}
+    return detail
+
+
+class TestSetupNoteIsNeverAggregated:
+    def test_top_faults_and_per_set_counts_skip_it(self):
+        from datetime import datetime
+
+        summary = build_baseline_summary(
+            started_at=datetime.utcnow(),
+            mean_session_score=None,
+            total_reps=2,
+            total_sets=1,
+            set_rows=[_FakeSetRow(set_number=1)],
+            rep_rows=[
+                _FakeBaselineRep(faults=[_setup_note_detail()]),
+                _FakeBaselineRep(faults=[_fault_detail("press_lockout", 2.0)]),
+            ],
+        )
+        assert [entry["fault_type"] for entry in summary["top_faults"]] == ["press_lockout"]
+        assert summary["per_set"][0]["faults"] == {"press_lockout": 1}
+
+    def test_fault_progress_series_skips_it(self):
+        reps = [_FakeRepRow("t1", 1, [_setup_note_detail()])]
+        assert _extract_fault_series(reps, "press_grip") == []
+
+
+class TestEndOfRepFaultTypes:
+    def test_rdl_lockout_and_missed_press_are_end_of_rep(self):
+        from db.biomechanics_persistence import END_OF_REP_FAULT_TYPES
+
+        assert {"rdl_lockout", "press_missed"} <= END_OF_REP_FAULT_TYPES
+
+    def test_other_rdl_and_press_faults_carry_their_own_rep(self):
+        from db.biomechanics_persistence import END_OF_REP_FAULT_TYPES
+
+        for fault_type in ("rdl_hip_sink", "rdl_bar_drift", "rdl_bar_tilt", "rdl_range_drift",
+                           "rdl_tempo", "press_uneven", "press_lockout", "press_leg_drive"):
+            assert fault_type not in END_OF_REP_FAULT_TYPES

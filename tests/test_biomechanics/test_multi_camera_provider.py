@@ -340,6 +340,24 @@ class TestCalibrationViewBuffer:
         assert [frame_views["0"].frame_index for frame_views in provider.calibration_views()] == [3, 4]
 
 
+class TestViewRecordingSwitch:
+    def test_views_stop_buffering_while_recording_is_off(self, provider: MultiCameraPoseProvider) -> None:
+        _pump(provider, range(0, 2))
+        provider.set_view_recording(False)
+        _pump(provider, range(2, 4))
+        provider.set_view_recording(True)
+        _pump(provider, range(4, 5))
+
+        assert [frame_views["0"].frame_index for frame_views in provider.calibration_views()] == [0, 1, 4]
+
+    def test_a_capture_window_buffers_even_with_recording_off(self, provider: MultiCameraPoseProvider) -> None:
+        provider.set_view_recording(False)
+        provider.begin_calibration_capture()
+        _pump(provider, range(0, 2))
+
+        assert provider.calibration_frame_count == 2
+
+
 class TestBarDetectionWindow:
     def test_no_bar_detection_outside_a_capture_window(
         self, provider: MultiCameraPoseProvider, bar_detector: _FakeBarDetector

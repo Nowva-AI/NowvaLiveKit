@@ -17,8 +17,9 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from openai.types import Reasoning
 
 STT_KEYTERMS = [
-    "Barbell Back Squat", "Romanian Deadlift", "Barbell Bench Press",
-    "Barbell Overhead Press", "Barbell Front Squat", "Goblet Squat",
+    "Barbell Back Squat", "Romanian Deadlift", "Barbell Romanian Deadlift", "RDL",
+    "Barbell Bench Press", "Barbell Overhead Press", "Overhead Press", "OHP",
+    "Strict Press", "Military Press", "Barbell Front Squat", "Goblet Squat",
     "Sumo Deadlift", "Barbell Deadlift",
     "reps", "sets", "RPE", "deload", "hypertrophy",
 ]

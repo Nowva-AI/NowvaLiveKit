@@ -1,0 +1,212 @@
+{
+  "heard": [
+    "knees_out_left",
+    "knees_out_fixed",
+    "knees_out_right",
+    "knees_out_right"
+  ],
+  "prompts": [
+    {
+      "instructions": "Your athlete just finished a set. Give three beats in 2-3 short sentences, in whatever order feels natural: one takeaway about the set, ONE specific thing to do next set if a fault kept repeating, and one specific thing that went well — a CUE OUTCOME where the fix held is the best one. Plain qualitative words: whole numbers only where they help (a rep number, a cm adjustment, a score change), never decimals, degrees or seconds. Open differently than you did after the last set. No humor in this reply — keep it straight, supportive, and forward-looking. Here is the data: Set 1 of 2 just finished: 2 of 4 reps clean. Next up is set 2 of 2. Load: 60 kg. Depth was very consistent from rep to rep. Rep speed: the last reps slowed down a lot — close to their limit. Faults: knees caving in on 1 of 4 reps; hips sliding to one side on 1 of 4 reps (approximate); heels lifting on 1 of 4 reps. Faults marked approximate are hard to judge from this camera setup — if you mention one, say it looked like it, never state it as fact. This set's focus was knees caving in. CUE OUTCOME: after your cue on knees caving in at rep 1, it was gone on reps 2 to 4 — name that improvement. Best rep: rep 2, their deepest clean rep. Roughest rep: rep 4 — hips sliding to one side, heels lifting. ATHLETE STATE: rep speed says they're near their limit — keep it calm and brief, lead with what went right, no humor.",
+      "last_set_note": "Set 1: 2 of 4 reps clean; load 60 kg; focus knees caving in; cue 'Left knee out' at rep 1, gone after."
+    },
+    {
+      "instructions": "[REST COMPLETE] Rest is over. Set 2 of 2 starts now. Say it calmly in one or two short sentences, in your own words — never the same announcement twice in a session.",
+      "last_set_note": null
+    },
+    {
+      "instructions": "Your athlete just finished their entire exercise. Give them a recap. Barbell Back Squat complete! 2 sets finished. Total: 4 of 8 reps clean. Load: 60 kg. Per-set breakdown: Set 1: 2 of 4 clean, faults: knees caving in 1 times; hips sliding to one side 1 times; heels lifting 1 times; Set 2: 2 of 4 clean, faults: knees caving in 2 times. Most common faults: knees caving in 3 times across all sets, hips sliding to one side 1 times across all sets, heels lifting 1 times across all sets. Last set — CUE OUTCOME: after your cue on knees caving in at rep 1, it still showed on 1 of the 3 reps after. Give honest feedback in 2-3 short sentences, in whatever order feels natural: how the sets went, one takeaway for next session, and one specific thing that went well. Plain qualitative words: whole numbers only where they help (a rep number, a score change), never decimals, degrees or seconds. No humor in this reply — keep it straight, supportive, and forward-looking. End warm and steady — they just finished.",
+      "last_set_note": "Exercise done: 2 sets, 4 of 8 reps clean; most common fault knees caving in."
+    }
+  ],
+  "set_data": [
+    {
+      "set_number": 1,
+      "exercise_name": "Barbell Back Squat",
+      "is_squat": true,
+      "diagnosis_set_number": 1,
+      "total_reps": 4,
+      "target_reps": 4,
+      "clean_reps": 2,
+      "shallow_reps": 0,
+      "shallow_depths": [],
+      "avg_depth": 94.5,
+      "depth_consistency": 1.4,
+      "avg_duration_ms": 2000,
+      "fault_summary": {
+        "knee_valgus": {
+          "count": 1,
+          "pct": 25
+        },
+        "hip_shift": {
+          "count": 1,
+          "pct": 25
+        },
+        "heel_rise": {
+          "count": 1,
+          "pct": 25
+        }
+      },
+      "load": "60 kg",
+      "effort": "near_limit",
+      "focus_fault": "knee_valgus",
+      "cue_outcomes": [
+        {
+          "fault_type": "knee_valgus",
+          "cue_key": "knees_out_left",
+          "after_rep": 1,
+          "reps_after": [
+            2,
+            3,
+            4
+          ],
+          "faulted_after": []
+        }
+      ],
+      "per_rep": [
+        {
+          "rep": 1,
+          "depth": "parallel",
+          "depth_angle": 95.2,
+          "clean": false,
+          "faults": [
+            "knee_valgus"
+          ],
+          "duration_ms": 2000
+        },
+        {
+          "rep": 2,
+          "depth": "parallel",
+          "depth_angle": 96.0,
+          "clean": true,
+          "faults": [],
+          "duration_ms": 2000
+        },
+        {
+          "rep": 3,
+          "depth": "parallel",
+          "depth_angle": 94.1,
+          "clean": true,
+          "faults": [],
+          "duration_ms": 2000
+        },
+        {
+          "rep": 4,
+          "depth": "parallel",
+          "depth_angle": 92.7,
+          "clean": false,
+          "faults": [
+            "hip_shift",
+            "heel_rise"
+          ],
+          "duration_ms": 2000
+        }
+      ],
+      "trigger": "rep_count"
+    }
+  ],
+  "last_set_data": {
+    "set_number": 2,
+    "exercise_name": "Barbell Back Squat",
+    "is_squat": true,
+    "diagnosis_set_number": 1,
+    "total_reps": 4,
+    "target_reps": 4,
+    "clean_reps": 2,
+    "shallow_reps": 0,
+    "shallow_depths": [],
+    "avg_depth": 93.5,
+    "depth_consistency": 1.7,
+    "avg_duration_ms": 2000,
+    "fault_summary": {
+      "velocity_loss": {
+        "count": 1,
+        "pct": 25
+      },
+      "knee_valgus": {
+        "count": 2,
+        "pct": 50
+      }
+    },
+    "load": "60 kg",
+    "effort": "near_limit",
+    "focus_fault": "knee_valgus",
+    "cue_outcomes": [
+      {
+        "fault_type": "knee_valgus",
+        "cue_key": "knees_out_right",
+        "after_rep": 1,
+        "reps_after": [
+          2,
+          3,
+          4
+        ],
+        "faulted_after": [
+          2
+        ]
+      }
+    ],
+    "per_rep": [
+      {
+        "rep": 1,
+        "depth": "parallel",
+        "depth_angle": 93.0,
+        "clean": false,
+        "faults": [
+          "velocity_loss",
+          "knee_valgus"
+        ],
+        "duration_ms": 2000
+      },
+      {
+        "rep": 2,
+        "depth": "parallel",
+        "depth_angle": 91.5,
+        "clean": false,
+        "faults": [
+          "knee_valgus"
+        ],
+        "duration_ms": 2000
+      },
+      {
+        "rep": 3,
+        "depth": "parallel",
+        "depth_angle": 94.0,
+        "clean": true,
+        "faults": [],
+        "duration_ms": 2000
+      },
+      {
+        "rep": 4,
+        "depth": "parallel",
+        "depth_angle": 95.5,
+        "clean": true,
+        "faults": [],
+        "duration_ms": 2000
+      }
+    ],
+    "trigger": "rep_count"
+  },
+  "verdict": {
+    "rep_number": 4,
+    "faults": [
+      {
+        "fault_type": "hip_shift",
+        "side": "left",
+        "observability": "approximate"
+      },
+      {
+        "fault_type": "heel_rise",
+        "side": "right",
+        "observability": "observable"
+      }
+    ]
+  },
+  "fragments": [
+    "last set 2/4 clean",
+    "top issue knees caving in",
+    "last cue 'Left knee out' after rep 1: fixed"
+  ],
+  "rest_prompt": "[REST COMPLETE] Rest is over. Set 2 of 2 starts now. Say it calmly in one or two short sentences, in your own words — never the same announcement twice in a session.",
+  "focus_prompt": "[REST COMPLETE] Rest is over. Set 2 of 2 starts now. This set's one focus: knees caving in. Say it as the action to take — toward the floor, the bar or a direction — not as a fault. Mid-set they'll hear the cue 'Knees out!' for it. Say it calmly in one or two short sentences, in your own words — never the same announcement twice in a session."
+}

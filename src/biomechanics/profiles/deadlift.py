@@ -22,7 +22,7 @@ from biomechanics.utils.types import CocoKeypoints, JointAngles, Skeleton3D
 logger = logging.getLogger(__name__)
 
 
-@register_profile("deadlift", "conventional_deadlift", "sumo_deadlift")
+@register_profile("deadlift", "conventional_deadlift")
 class DeadliftProfile(ExerciseProfile):
     """Profile for conventional and sumo deadlift."""
 

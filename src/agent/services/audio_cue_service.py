@@ -12,7 +12,8 @@ via the WebRTC track.
 
 Fallback: when the pipeline's cue list names a cue with no file on disk,
 cache_cues() generates it once via the OpenAI TTS API at workout start.
-Nothing is synthesized during a set: a cue without audio is skipped.
+Nothing is synthesized during a set: a cue without audio is skipped. The
+agent-side setup and camera lines are never synthesized.
 """
 
 import asyncio
@@ -28,7 +29,7 @@ from livekit import rtc
 from livekit.agents.utils.audio import audio_frames_from_file
 from openai import AsyncOpenAI
 
-from agent.services.coaching_constants import CUE_TEXT_MAP
+from agent.services.coaching_constants import AGENT_SIDE_CUE_KEYS, CUE_TEXT_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -284,11 +285,13 @@ class AudioCueService:
         self._load_from_disk()
 
         # Find cues that need runtime generation (no disk files)
-        # Skip rep cues — they use the single validation sound
+        # Skip rep cues — they use the single validation sound — and the
+        # agent-side lines, which play from disk or not at all
         keys_to_generate = [
             k for k in cues
             if k in CUE_TEXT_MAP
             and not k.startswith("rep_")
+            and k not in AGENT_SIDE_CUE_KEYS
             and k not in self._disk_cache
             and k not in self._fallback_cache
         ]

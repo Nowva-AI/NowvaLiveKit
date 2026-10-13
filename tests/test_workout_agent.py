@@ -484,3 +484,55 @@ class TestEndSetEarly:
         agent, _ = _make_agent(state, coaching)
         _, instruction = asyncio.run(agent.end_set_early(5))
         assert "end_workout" not in instruction
+
+
+def _untrusted_rep_faults() -> list[dict]:
+    """A one-camera press rep: uneven only below its start tier, lockout approximate."""
+    return [
+        {"fault_type": "press_uneven", "severity": "mild", "severity_score": 1.0,
+         "details": {"side": "left", "observability": "observable", "recorded_only": True}},
+        {"fault_type": "press_lockout", "severity": "moderate", "severity_score": 2.0,
+         "details": {"side": "both", "observability": "approximate"}},
+    ]
+
+
+def _replay_coaching(faults: list[dict]) -> MagicMock:
+    coaching = _coaching()
+    coaching.request_last_rep_replay = AsyncMock(return_value={"rep_data": {"rep_number": 3, "faults": faults}})
+    return coaching
+
+
+class TestUntrustedVerdictsAreNeverStated:
+    def test_check_my_form_has_nothing_to_correct(self, state: AgentState) -> None:
+        from agent.services.coaching_service import CoachingService
+
+        coaching = CoachingService(session=None, state=None)
+        coaching._last_rep_message = {"rep_number": 3, "faults_detailed": _untrusted_rep_faults()}
+        agent, _ = _make_agent(state, coaching)
+        _, instruction = asyncio.run(agent.check_my_form())
+        assert "nothing to correct in what this camera can see" in instruction
+        assert "one hand lagging" not in instruction
+        assert "locking the elbows" not in instruction
+
+    def test_show_me_last_rep_has_nothing_to_correct(self, state: AgentState) -> None:
+        agent, _ = _make_agent(state, _replay_coaching(_untrusted_rep_faults()))
+        _, instruction = asyncio.run(agent.show_me("last_rep"))
+        assert "nothing to correct in what this camera can see" in instruction
+        assert "one hand lagging" not in instruction
+        assert "locking the elbows" not in instruction
+        assert "clean form" not in instruction
+
+    def test_show_me_still_names_an_observable_fault(self, state: AgentState) -> None:
+        faults = _untrusted_rep_faults() + [{
+            "fault_type": "press_leg_drive", "severity": "moderate",
+            "details": {"side": "both", "observability": "observable"},
+        }]
+        agent, _ = _make_agent(state, _replay_coaching(faults))
+        _, instruction = asyncio.run(agent.show_me("last_rep"))
+        assert "bending the knees to drive the bar up" in instruction
+        assert "one hand lagging" not in instruction
+
+    def test_show_me_a_rep_without_verdicts_is_clean(self, state: AgentState) -> None:
+        agent, _ = _make_agent(state, _replay_coaching([]))
+        _, instruction = asyncio.run(agent.show_me("last_rep"))
+        assert "clean form" in instruction

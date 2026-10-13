@@ -56,6 +56,7 @@ class SquatProfile(ExerciseProfile):
     uses_diagnosis_engine = True
     uses_bilstm_counter = True
     coaching_ready = True
+    reports_depth = True
     display_name = "squats and squat variations (back, front, goblet, bodyweight)"
 
     def get_fault_to_cue_map(self) -> Dict[str, str]:

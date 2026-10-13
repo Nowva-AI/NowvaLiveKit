@@ -112,6 +112,9 @@ class MultiCameraPoseProvider:
         self._bar_detection_stride = bar_detection_stride
         self._capture_window_open = False
         self._window_frame_count = 0
+        # Off while an exercise whose poses would degrade a refine is active;
+        # a capture window records regardless (bootstrap calibration).
+        self._view_recording = True
 
     @property
     def is_calibrated(self) -> bool:
@@ -369,6 +372,8 @@ class MultiCameraPoseProvider:
     ) -> None:
         if len(views) < MIN_CALIBRATION_VIEWS:
             return
+        if not self._view_recording and not self._capture_window_open:
+            return
         bar_ends: dict[str, BarbellDetection] = {}
         if self._capture_window_open and self._bar_detector is not None:
             if self._window_frame_count % self._bar_detection_stride == 0:
@@ -381,6 +386,10 @@ class MultiCameraPoseProvider:
                         bar_ends[cam_id] = detection
             self._window_frame_count += 1
         self._view_buffer.append((views, bar_ends))
+
+    def set_view_recording(self, enabled: bool) -> None:
+        """Buffer views for between-set refines (outside a capture window) or not."""
+        self._view_recording = enabled
 
     def begin_calibration_capture(self) -> None:
         """
