@@ -45,7 +45,9 @@ class ExerciseProfile:
 
     Subclasses override methods to customize behavior for their exercise.
     The pipeline calls these methods during initialization and per-frame
-    processing — profiles are factories, not owners.
+    processing — profiles are factories, not owners: a hook that needs a
+    threshold receives the pipeline's config, and a profile keeps no config
+    or session state of its own.
     """
 
     name: str = "default"
@@ -181,7 +183,7 @@ class ExerciseProfile:
     def observe_frame(self, ctx: FrameContext) -> None:
         """Sees every analysed frame after the readiness latch. Default: nothing."""
 
-    def create_session_reference(self) -> Optional[SessionReference]:
+    def create_session_reference(self, config: BiomechanicsConfig) -> Optional[SessionReference]:
         """The exercise's session reference; None lets the engine build the squat's."""
         return None
 
@@ -190,12 +192,14 @@ class ExerciseProfile:
         return None
 
     def on_rep_rejected(
-        self, reason: str, features: BaseModel, angles: JointAngles,
+        self, reason: str, features: BaseModel, angles: JointAngles, config: BiomechanicsConfig,
     ) -> List[FaultEvent]:
         """Faults explaining a rep the analyser rejected (not counted)."""
         return []
 
-    def shallow_rep_cue(self, fault: FaultEvent, streak: int, cued_this_set: int) -> Optional[str]:
+    def shallow_rep_cue(
+        self, fault: FaultEvent, streak: int, cued_this_set: int, config: BiomechanicsConfig,
+    ) -> Optional[str]:
         """Cue for a rejected rep's shallow_rep message. streak counts consecutive
         rejections with this reason this set (from 1); cued_this_set counts the
         set's shallow_rep messages that carried a cue. None = cue-less."""
@@ -206,7 +210,7 @@ class ExerciseProfile:
         (the exercise's faults.<exercise>.hedged_recap_faults). Default: none."""
         return frozenset()
 
-    def cue_start_tier(self, fault_type: str, ctx: FrameContext) -> FaultSeverity:
+    def cue_start_tier(self, fault_type: str, ctx: FrameContext, config: BiomechanicsConfig) -> FaultSeverity:
         """The lowest severity at which a verdict may be cued, given this frame.
 
         Override when a start tier depends on session state (a certified mount,

@@ -72,6 +72,10 @@ tight. They depend on the camera mount (SHARED §3):
     uneven to moderate (≈ 5.5 cm lag).
   - The pooled tilt reference (§3.2) puts the level-mount P95 at 1.9–2.1°, right at the 2.0° allowance,
     which is why uneven stays at severe until proven.
+  - **Measured (implementation, 2026-10-04):** the synthetic budget (`test_press_synthetic.py`, 200
+    clean reps at the central σ) reads a mono uneven P95 of **2.34–2.38°** at 0–3°, **2.47–2.59°** with the
+    depth bias and the inclinometer residual. That is above the 2.0° moderate allowance, so promotion to
+    moderate is **unlikely**: plan the demo around "Keep your knees locked", not the uneven loop.
 
 **Triangulated rig (≥30 fps):**
 - adds **layback** and **bar finishing forward of mid-foot**, the two faults a coach fixes first;
@@ -86,7 +90,8 @@ squat golden masters, both fresh and after a press switch.
 > unrack → press (knees dip) → "Keep your knees locked" → two strict reps (the hold window) → "Legs stayed locked, good."
 
 The uneven-press loop ("Drive your left hand up" → "Bar stayed level, nice.") joins the demo once replay
-promotes uneven to moderate (§8.3). Until then it fires only on a hand-height lag.
+promotes uneven to moderate (§8.3), which the measured synthetic P95 (2.5–2.6°) makes unlikely. Until then
+it fires only on a hand-height lag.
 
 **Demo setup:** the rack mount, or a webcam kept level within 3° with the pitch entered. Run the mono
 validation replay before filming, so the promotion decision is made first (§8, Sequencing).
@@ -354,12 +359,24 @@ Then `profile.on_rep_rejected(reason, features, angles)` runs:
     - the delta tripwire: if the standing-pitch estimate in the rack posture moves more than **3°** from
       its certification reading, certification is revoked for the session (`ctx.pitch_certified`
       becomes False).
+      - **As implemented:** the reading is a set's mean over its rack-hold frames (the latch frames plus
+        each rack-start rep's setup frames), checked **once per set** when it rests on
+        `camera.tripwire_min_frames` (24) frames, against a reference pooled over the first
+        `camera.tripwire_reference_sets` (2) sets. Comparing each rep's 4–10-frame setup median with one
+        5-frame latch reading false-tripped clean noisy sessions (about 1 in 12).
+      - Synthetic (anisotropic keypoint noise, 0–3° rack lean per rep, 0.5° posture per set): 0 false
+        trips over 180 checks (clean |Δ| p99 1.6°); a 4° knock between sets trips the next set in 93%
+        of 60 sessions. The residual band is 3–4.3°, like the RDL's.
+      - The reference lives in the session's `PitchCertification`, keyed by profile, so it survives
+        exercise switches (press → squat or RDL → press compares against the press's own reference).
+      - A trip found in a rep's own rack hold judges that rep's verdicts uncertified (the pipeline
+        polls the tripwire again after `finish_rep`, before stamping).
   - **Start tiers are session-dependent, so the profile overrides
     `cue_start_tier(fault_type, ctx)`** (SHARED §4).
     - For mono `press_leg_drive` and `press_uneven`, it returns the tier for the band:
       - `level`: leg drive moderate; uneven severe, or moderate when `faults.press.uneven_promoted` (§8.3);
-      - `tilted`: severe if `faults.press.tilted_band_validated` (default False, set by the §8.4 tilted-band
-        gate); otherwise the observability cap applies (recap-only);
+      - `tilted`: severe if the fault is in `faults.press.tilted_band_validated_faults` (default empty, set
+        per fault by the §8.4 tilted-band gate); otherwise the observability cap applies (recap-only);
       - `unknown`: severe.
     - In the `unknown` band, and in the `tilted` band until it is validated, the two rules also cap
       `observability` at `approximate`, which makes them recap-only and hedged.
@@ -537,7 +554,9 @@ gives **3.75 cm** of fake forward offset. Layback takes the error 1:1.
         even when level, so replay decides).
       - Uneven exceeds the moderate allowance at every pitch, so it starts at severe on mono and is
         promoted only by replay.
-      - Both stay within the severe allowances up to 10°.
+      - Leg drive stays within its severe allowance up to 10°. **Uneven does not:** the synthetic
+        budget measures 3.13° at 10° (P95 2.50° + depth bias 0.54° + residual 0.09°) against 3.0°, so the
+        tilted band is validated per fault and uneven's stays recap-only.
       - Above 10° they are recap-only.
   - **Uncertified mount** (pitch unknown; the unlevelled leak reaches 1.6 cm / 1.4° at 15°): no tier
     can be guaranteed, so mono leg drive and uneven are capped at `approximate`, recap-only and hedged.
@@ -706,7 +725,9 @@ gives **3.75 cm** of fake forward offset. Layback takes the error 1:1.
 - **Direction:** `direction = "narrower"` if the value is > 0, else `"wider"`.
 - **Delivery:**
   - no mid-set cue;
-  - excluded from per-rep counts;
+  - excluded from per-rep counts: the rule stamps `details["setup_note"] = True`, which keeps it out of
+    `RepData.is_clean` (so the best rep and `clean_reps` ignore it) and out of both set-summary
+    `fault_summary` loops;
   - appears as the recap `setup_note`;
   - the next-set prompt carries one action, e.g. "Next set, hands a thumb wider".
 - **Label:** direction-aware `fault_label("press_grip", details)`: "grip too wide — forearms leaning in"
@@ -892,8 +913,8 @@ No raw angles.
 
 **Config, maps, registry.**
 - Config lives in `faults.press`: thresholds, the §3.5 constants, `arm_to_torso_ratio`, `counter`,
-  `hedged_recap_faults` (empty by default), `tilted_band_validated` (False) and `uneven_promoted` (False;
-  set from the §8.3 promotion row and read by `cue_start_tier`).
+  `hedged_recap_faults` (empty by default), `tilted_band_validated_faults` (empty; per fault) and
+  `uneven_promoted` (False; set from the §8.3 promotion row and read by `cue_start_tier`).
 - Ranks 50–55; `press_*` measurement rows.
 - The spec's press variant list, plus the longest-match additions in Step 4.
 
@@ -1080,14 +1101,16 @@ update .` once.**
       every pitch;
     - adding the stated bias and residual terms, leg drive is ≤ 1.9 cm at 0° and 3° (central 1.60 /
       1.77);
-    - both metrics are within the severe allowances (3.1 cm / 3.0°) at 10°;
+    - leg drive is within its severe allowance (3.1 cm) at 10°; uneven's 3.13° against 3.0° is an
+      expected failure (strict xfail carrying the measured value);
     - the test asserts nothing about moderate above 3°;
     - at 15°, the test only asserts that the band is `unknown` and the faults are recap-only.
-  - **Tripwire mid-set** (`test_press_start_tiers.py`):
+  - **Tripwire between sets** (`test_press_start_tiers.py`):
     - On a level certified mount with uneven promoted to moderate, a moderate (7°) `press_uneven`
-      verdict is cueable.
-    - Then a tripwire delta of 4° sets `ctx.pitch_certified=False`.
-    - The **next** moderate uneven verdict has `recorded_only=True` and `observability="approximate"`,
+      verdict is cueable over the reference sets.
+    - Then a 4° knock: the rep whose rack hold completes the set's reading (the first at 30 fps, about
+      the second at 12 fps) sets `ctx.pitch_certified=False`.
+    - **That** rep's moderate uneven verdict has `recorded_only=True` and `observability="approximate"`,
       and is not cued. The same holds for a moderate leg-drive verdict.
     - `min_cue_severity` is unchanged; only `cue_start_tier(…, ctx)` changed.
 - **Start tiers and recorded-only** (`test_press_start_tiers.py`):
@@ -1584,3 +1607,15 @@ are absent on mono.
      - §5.4/§5.5 band tiers are labelled `cue_start_tier`.
   3. **Scorer follow-ups recorded:** run the mono replay before filming (§8.1 Sequencing, §1); the demo
      uses the rack mount or a webcam level within 3°.
+- **Implementation follow-ups (2026-10-04):**
+  1. Grip is a setup note (`details["setup_note"]`), never a rep fault: `RepData.is_clean` and both
+     `fault_summary` loops skip it; the orchestrator's grip-only override is gone.
+  2. The press tripwire pools a set's rack-hold readings and checks once per set against the first two
+     sets (§4.1); its reference is session-owned, keyed by profile, and survives exercise switches.
+  3. A trip found in `finish_rep` is stamped on that rep, not one frame late.
+  4. `tilted_band_validated_faults` replaces the single flag; uneven's tilted band measures 3.13° vs 3.0°.
+  5. The press no longer feeds the body measurement (`feeds_body_calibration = False`).
+  6. **Still open:** mono uneven promotion (synthetic P95 2.5–2.6° says unlikely), every §8 replay and
+     acceptance gate, the press clips (the flip-gate test enforces them once `coaching_ready` flips), and
+     validating the tripwire's 24-frame / 2-set pooling on real sessions (the synthetic noise is
+     uncorrelated, so real false-trip rates will be higher).

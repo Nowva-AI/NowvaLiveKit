@@ -342,6 +342,16 @@ def _send_shallow_rep(bridge: IPCBridge, result: PipelineFrame, set_number: int)
     print(f"[SHALLOW REP] depth_class={result.shallow_rep_class} — not counted")
 
 
+def _send_camera_pitch_status(bridge: IPCBridge, result: PipelineFrame) -> None:
+    """pipeline_status "camera_pitch" (the agent plays level_camera once) when a
+    delta tripwire revoked the certified mount or a gross tripwire found an
+    uncertified camera far off level."""
+    if result.pitch_certification_revoked_deg is not None:
+        bridge.send_pipeline_status("camera_pitch", {"delta_deg": result.pitch_certification_revoked_deg})
+    if result.camera_pitch_untrusted_deg is not None:
+        bridge.send_pipeline_status("camera_pitch", {"pitch_deg": result.camera_pitch_untrusted_deg})
+
+
 def _readiness_hint(pipeline: BiomechanicsPipeline, default: str) -> str:
     """The HUD hint for a failed readiness frame; the profile's own hint when its setup check failed."""
     failure = pipeline._readiness_gate.last_failure
@@ -1990,10 +2000,7 @@ def run_biomechanics_pipeline(
                 if result.shallow_rep_class is not None or result.analyzer_shallow_rep:
                     _send_shallow_rep(bridge, result, session_tracker.current_set_number)
 
-                if result.pitch_certification_revoked_deg is not None:
-                    bridge.send_pipeline_status(
-                        "camera_pitch", {"delta_deg": result.pitch_certification_revoked_deg},
-                    )
+                _send_camera_pitch_status(bridge, result)
 
                 if result.rep_data:
                     bottom_kpts, bottom_angles = pipeline.consume_bottom_frame()

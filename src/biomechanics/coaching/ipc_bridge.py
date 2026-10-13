@@ -425,11 +425,11 @@ class IPCBridge:
             depth_consistency = round(statistics.stdev(depths) if len(depths) > 1 else 0.0, 1)
 
         # Build per-fault-type summary. Recorded-only verdicts are not trusted
-        # enough to count on the display.
+        # enough to count on the display, and a setup note is not a rep fault.
         fault_summary: Dict[str, Dict[str, Any]] = {}
         for rep in reps:
             for fault in rep.faults:
-                if _is_recorded_only(fault):
+                if _is_recorded_only(fault) or fault.details.get("setup_note"):
                     continue
                 key = fault.fault_type
                 if key not in fault_summary:

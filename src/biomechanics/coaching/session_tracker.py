@@ -431,10 +431,11 @@ class SessionTracker:
             avg_depth = round(statistics.mean(depths) if depths else 0.0, 1)
             depth_consistency = round(statistics.stdev(depths) if len(depths) > 1 else 0.0, 1)
 
+        # Recorded-only verdicts and setup notes (between-set) are not rep faults.
         fault_summary: Dict[str, Dict[str, Any]] = {}
         for rep in reps:
             for fault in rep.faults:
-                if fault.details.get("recorded_only"):
+                if fault.details.get("recorded_only") or fault.details.get("setup_note"):
                     continue
                 key = fault.fault_type
                 if key not in fault_summary:

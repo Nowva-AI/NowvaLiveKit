@@ -52,6 +52,11 @@ class TestRegistry:
         assert OverheadPressProfile.gate_until_ready
         assert isinstance(get_profile("Barbell Overhead Press"), UntrackedProfile)
 
+    def test_gated_stand_in_never_feeds_body_calibration(self):
+        stand_in = get_profile("Barbell Overhead Press")
+        assert isinstance(stand_in, UntrackedProfile)
+        assert not stand_in.feeds_body_calibration
+
     def test_ready_press_resolves_to_its_profile(self, press_ready):
         assert isinstance(get_profile("Barbell Overhead Press"), OverheadPressProfile)
 
@@ -64,6 +69,7 @@ class TestProfileHooks:
         assert profile.create_set_diagnosis() is None
         assert profile.get_readiness_check() is None
         assert profile.readiness_hint
+        assert not profile.feeds_body_calibration
         assert set(LEG_KEYPOINTS) < set(profile.tracking_keypoints)
         assert {CK.LEFT_WRIST, CK.RIGHT_WRIST} <= set(profile.tracking_keypoints)
 
@@ -71,7 +77,7 @@ class TestProfileHooks:
         config = BiomechanicsConfig()
         profile = OverheadPressProfile()
         assert isinstance(profile.create_rep_analyzer(config), PressRepAnalyzer)
-        assert isinstance(profile.create_session_reference(), PressSessionReference)
+        assert isinstance(profile.create_session_reference(config), PressSessionReference)
         assert profile.create_rep_counter_config(config) is config.faults.press.counter
 
     def test_depth_metric_is_the_elbow_angle(self):

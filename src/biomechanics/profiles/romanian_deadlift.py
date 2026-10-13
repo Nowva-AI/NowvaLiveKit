@@ -19,7 +19,7 @@ from biomechanics.analysis.hinge_features import (
     hip_sink_start_tier,
     skeleton_signal_cm,
 )
-from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig, RdlConfig
+from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
 from biomechanics.faults.fault_types import FaultRule, FaultType
 from biomechanics.faults.hinge_reference import HingeSessionReference
 from biomechanics.faults.rules.rdl_bar_drift import RdlBarDriftRule
@@ -52,8 +52,7 @@ RIG_ONLY_FAULTS = frozenset({FaultType.RDL_BAR_DRIFT.value, FaultType.RDL_LOCKOU
 @register_profile("romanian_deadlift", "rdl")
 class RomanianDeadliftProfile(ExerciseProfile):
     """The thresholds the session-aware hooks read (start tiers, partial cues,
-    the session reference) come from the config the pipeline builds the rules
-    with; until then, the defaults."""
+    the session reference) come from the config each hook receives."""
 
     name = "romanian_deadlift"
     movement_pattern = "hip_hinge"
@@ -67,13 +66,9 @@ class RomanianDeadliftProfile(ExerciseProfile):
     feeds_body_calibration = False
     readiness_hint = "HANDS IN VIEW"
 
-    def __init__(self) -> None:
-        self._rdl = RdlConfig()
-
     def create_fault_rules(self, config: BiomechanicsConfig) -> list[FaultRule]:
         """RDL rules in cue priority order."""
-        self._rdl = config.faults.rdl
-        rdl = self._rdl
+        rdl = config.faults.rdl
         return [
             RdlHipSinkRule(rdl.hip_sink),
             RdlBarDriftRule(rdl.bar_drift),
@@ -84,11 +79,10 @@ class RomanianDeadliftProfile(ExerciseProfile):
         ]
 
     def create_rep_analyzer(self, config: BiomechanicsConfig) -> RdlRepAnalyzer:
-        self._rdl = config.faults.rdl
         return RdlRepAnalyzer(config.faults.rdl, config.readiness_gate)
 
-    def create_session_reference(self) -> HingeSessionReference:
-        return HingeSessionReference(self._rdl.rom)
+    def create_session_reference(self, config: BiomechanicsConfig) -> HingeSessionReference:
+        return HingeSessionReference(config.faults.rdl.rom)
 
     def create_rep_counter_config(self, config: BiomechanicsConfig) -> HipPositionCounterConfig:
         return config.faults.rdl.counter
@@ -107,26 +101,29 @@ class RomanianDeadliftProfile(ExerciseProfile):
     def get_hedged_recap_faults(self, config: BiomechanicsConfig) -> frozenset[str]:
         return frozenset(config.faults.rdl.hedged_recap_faults)
 
-    def cue_start_tier(self, fault_type: str, ctx: FrameContext) -> FaultSeverity:
+    def cue_start_tier(self, fault_type: str, ctx: FrameContext, config: BiomechanicsConfig) -> FaultSeverity:
         """Hip sink starts at mild only on a certified mount whose lens checks
         pass (rdl.md §3.2); the rig-only faults at the rig start tier."""
+        rdl = config.faults.rdl
         if fault_type == FaultType.RDL_HIP_SINK.value:
-            return hip_sink_start_tier(ctx, self._rdl.camera)
+            return hip_sink_start_tier(ctx, rdl.camera)
         if fault_type in RIG_ONLY_FAULTS:
-            return FaultSeverity(self._rdl.rig_min_cue_severity)
-        return super().cue_start_tier(fault_type, ctx)
+            return FaultSeverity(rdl.rig_min_cue_severity)
+        return super().cue_start_tier(fault_type, ctx, config)
 
     def on_rep_rejected(
-        self, reason: str, features: HingeRepFeatures, angles: JointAngles,
+        self, reason: str, features: HingeRepFeatures, angles: JointAngles, config: BiomechanicsConfig,
     ) -> list[FaultEvent]:
         if reason == REJECT_PARTIAL:
             return build_rejected_faults(features, angles)
         return []
 
-    def shallow_rep_cue(self, fault: FaultEvent, streak: int, cued_this_set: int) -> str | None:
+    def shallow_rep_cue(
+        self, fault: FaultEvent, streak: int, cued_this_set: int, config: BiomechanicsConfig,
+    ) -> str | None:
         """The fault's cue from the second partial in a row, at most twice a set:
         a lone unrack or re-rack dip is never cued."""
-        rom = self._rdl.rom
+        rom = config.faults.rdl.rom
         if streak < rom.partial_cue_streak or cued_this_set >= rom.max_partial_cues_per_set:
             return None
         return RDL_FAULT_TO_CUE.get(fault.fault_type)

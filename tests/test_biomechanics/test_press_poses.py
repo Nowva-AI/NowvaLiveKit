@@ -421,7 +421,7 @@ class AnalyzerHarness:
                 self.engine.discard_rep()
                 self.analyzer.discard_rep()
                 self.rejections.append((reason, features))
-                rejected = [f for f in self.profile.on_rep_rejected(reason, features, angles) if self.engine.tag_observability(f)]
+                rejected = [f for f in self.profile.on_rep_rejected(reason, features, angles, self.config) if self.engine.tag_observability(f)]
                 self.rejected_faults.extend(rejected)
         elif feedback == "go_deeper":
             self.engine.discard_rep()
@@ -434,7 +434,7 @@ class AnalyzerHarness:
 
     def _stamp(self, faults: list, ctx: FrameContext) -> None:
         for fault in faults:
-            start_tier = self.profile.cue_start_tier(fault.fault_type, ctx)
+            start_tier = self.profile.cue_start_tier(fault.fault_type, ctx, self.config)
             if SEVERITY_ORDER.index(fault.severity) < SEVERITY_ORDER.index(start_tier):
                 fault.details["recorded_only"] = True
 

@@ -21,7 +21,7 @@ from biomechanics.diagnosis.lean_model import MIDFOOT_FRACTION_OF_ANKLE_TO_TOE
 from biomechanics.faults.fault_types import FAULT_MESSAGES, FaultType
 from biomechanics.faults.observability import APPROXIMATE, SINGLE_CAMERA, TRIANGULATED
 from biomechanics.faults.session_reference import SessionReference
-from biomechanics.utils.camera_mount import PitchDeltaTripwire
+from biomechanics.utils.camera_mount import PitchCertification, PitchDeltaTripwire
 from biomechanics.utils.frame_context import GRAVITY_BODY, GRAVITY_MEASURED, FrameContext
 from biomechanics.utils.geometry import WORLD_UP, forward_offset, lean_back_deg, level_camera_frame, sagittal_forward
 from biomechanics.utils.types import CocoKeypoints as CK
@@ -333,7 +333,11 @@ class PressRepAnalyzer:
     """Rack readiness, the rep signal and every per-rep press feature.
 
     Session state (survives reset_set): the facing reference of past sets and the
-    certified-mount tripwire. Everything else is per set.
+    certified-mount tripwire, which is the session's once bound
+    (bind_pitch_certification), so its reference reading also survives
+    exercise switches. Everything else is per set, including the set's
+    rack-hold pitch readings: their mean is checked against the tripwire once
+    the set has enough of them, and the first sets' means pool its reference.
     """
 
     def __init__(self, config: PressConfig) -> None:
@@ -377,6 +381,9 @@ class PressRepAnalyzer:
             self._freeze_rack()
         return self._rack.bar_cm if self._rack is not None else None
 
+    def bind_pitch_certification(self, certification: PitchCertification, profile_name: str) -> None:
+        self._tripwire = certification.tripwire(profile_name, self.cfg.camera.tripwire_deg)
+
     def pitch_tripwire_delta(self) -> float | None:
         delta_deg, self._tripped_delta_deg = self._tripped_delta_deg, None
         return delta_deg
@@ -388,12 +395,6 @@ class PressRepAnalyzer:
         points, raw_points, confidences = self._points(ctx)
         sample = self._sample(ctx, points, raw_points, confidences, self._torso_ref_m(), ctx.angles)
         self.rep_signal = sample.bar_cm
-        if self._ring and sample.timestamp <= self._ring[-1].timestamp:
-            # The Kalman warm-up after a latch repeats the latched frame: keep its
-            # latest estimate once (the counter ignores the repeats too).
-            stale = self._ring.pop()
-            if self._rep_samples and self._rep_samples[-1] is stale:
-                self._rep_samples.pop()
         self._track_re_rack(sample)
         self._ring.append(sample)
         while sample.timestamp - self._ring[0].timestamp > SETUP_RING_S:
@@ -455,6 +456,9 @@ class PressRepAnalyzer:
         set_width = _median(self._set_widths)
         if math.isfinite(set_width):
             self._set_width_medians.append(set_width)
+        camera = self.cfg.camera
+        if not math.isfinite(self._tripwire.reference_deg) and len(self._set_pitch_readings) >= camera.tripwire_min_frames:
+            self._tripwire.pool_reference(float(np.mean(self._set_pitch_readings)), camera.tripwire_reference_sets)
         self._reset_set_state()
 
     # ------------------------------------------------------------------
@@ -481,6 +485,8 @@ class PressRepAnalyzer:
         self._pending_commit: _Commit | None = None
         self._last_signal_time = NAN
         self._last_finish_time = NAN
+        self._set_pitch_readings: list[float] = []
+        self._set_pitch_checked = False
 
     def _note_context(self, ctx: FrameContext) -> None:
         self._capture_mode = ctx.capture_mode
@@ -662,17 +668,27 @@ class PressRepAnalyzer:
         self._set_torsos = list(_finite([sample.torso_m for sample in samples]))
         self._set_legs = list(_finite([sample.leg_m for sample in samples]))
         self._first_rep_pending = True
-        self._check_tripwire(_median([sample.standing_pitch_deg for sample in samples]))
+        self._note_rack_pitch(samples)
 
-    def _check_tripwire(self, reading_deg: float) -> None:
-        if self._capture_mode != SINGLE_CAMERA or not self._pitch_certified or not math.isfinite(reading_deg):
-            return
-        if not math.isfinite(self._tripwire.reference_deg):
-            self._tripwire.set_reference(reading_deg)
-            return
-        delta_deg = self._tripwire.check(reading_deg)
-        if delta_deg is not None:
-            self._tripped_delta_deg = delta_deg
+    def _note_rack_pitch(self, samples: list[PressFrameSample]) -> bool:
+        """Pools rack-hold standing pitch readings into the set's; True when the
+        set's one tripwire check, due once enough are in, finds the camera moved."""
+        if self._capture_mode != SINGLE_CAMERA or not self._pitch_certified:
+            return False
+        self._set_pitch_readings.extend(_finite([sample.standing_pitch_deg for sample in samples]))
+        camera = self.cfg.camera
+        if (
+            self._set_pitch_checked
+            or not math.isfinite(self._tripwire.reference_deg)
+            or len(self._set_pitch_readings) < camera.tripwire_min_frames
+        ):
+            return False
+        self._set_pitch_checked = True
+        delta_deg = self._tripwire.check(float(np.mean(self._set_pitch_readings)))
+        if delta_deg is None:
+            return False
+        self._tripped_delta_deg = delta_deg
+        return True
 
     # ------------------------------------------------------------------
     # Normalizers
@@ -861,11 +877,10 @@ class PressRepAnalyzer:
         if frontal_ok and new_setup:
             self._tilt_pool.extend(_finite([sample.tilt_deg for sample in new_setup]))
         self._pending_commit = commit
-        if new_setup:
-            self._check_tripwire(_median([sample.standing_pitch_deg for sample in new_setup]))
-            if self._tripped_delta_deg is not None:
-                # This rep's own rack hold showed the camera moved: no certified band.
-                self._pitch_band = features.pitch_band = PITCH_BAND_UNKNOWN
+        # A rep with no rack start held no rack posture worth a pitch reading.
+        if new_setup and features.rack_start and self._note_rack_pitch(new_setup):
+            # This rep's rack hold completed the set's reading and showed the camera moved.
+            self._pitch_band = features.pitch_band = PITCH_BAND_UNKNOWN
 
         # Leg drive: the hip's lowest point around the press start against the setup.
         hip = _med3(np.array([sample.hip_cm for sample in valid]))

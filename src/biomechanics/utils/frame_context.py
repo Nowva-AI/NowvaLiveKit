@@ -80,6 +80,13 @@ class RepAnalyzer(Protocol):
     observe. Optional methods, checked with hasattr: is_ready(ctx) -> bool
     (ANDed into the readiness gate) and counter_baseline() -> float | None
     (seeds the counter at the latch and after every counter reset).
+
+    Single-camera pitch, also optional: bind_pitch_certification(certification,
+    profile_name) hands the analyser the session's tripwire for its profile (it
+    outlives exercise switches),
+    pitch_tripwire_delta() -> float | None reports a delta trip once (it revokes
+    certification for the session), and camera_pitch_untrusted: bool is the
+    gross tripwire on an uncertified camera (signalled once a session).
     """
 
     rep_signal: float

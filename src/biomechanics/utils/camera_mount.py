@@ -1,6 +1,7 @@
 """
-Single-camera mount: the installation's measured pitch and lens height, and the
-delta tripwire that revokes a certified mount when the camera is knocked.
+Single-camera mount: the installation's measured pitch and lens height, the
+delta tripwire that revokes a certified mount when the camera is knocked, and
+the session's certification state that every exercise's tripwire feeds.
 
 On one camera the world frame is the camera's, so a pitched camera leaks
 forward-back motion into every height (Δy·cos θ + Δz·sin θ). A measured mount
@@ -15,6 +16,8 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+
+import numpy as np
 
 from biomechanics.config import CaptureConfig
 from biomechanics.utils.frame_context import MOUNT_INCLINOMETER, MOUNT_NONE, MOUNT_RACK
@@ -64,13 +67,17 @@ class PitchDeltaTripwire:
         self.tolerance_deg = tolerance_deg
         self.reference_deg = math.nan
         self.tripped_delta_deg: float | None = None
+        self._pooled_readings: list[float] = []
 
     @property
     def tripped(self) -> bool:
         return self.tripped_delta_deg is not None
 
-    def set_reference(self, reading_deg: float) -> None:
-        self.reference_deg = reading_deg
+    def pool_reference(self, reading_deg: float, readings_needed: int) -> None:
+        """Pools readings until readings_needed are in; their mean becomes the reference."""
+        self._pooled_readings.append(reading_deg)
+        if len(self._pooled_readings) >= readings_needed:
+            self.reference_deg = float(np.mean(self._pooled_readings))
 
     def check(self, reading_deg: float) -> float | None:
         """The change from the reference when this reading trips the wire, else None."""
@@ -81,3 +88,32 @@ class PitchDeltaTripwire:
             return None
         self.tripped_delta_deg = delta_deg
         return delta_deg
+
+
+class PitchCertification:
+    """The session's pitch certification state on one camera: each exercise's
+    delta tripwire (its own posture-matched reading and tolerance) and whether
+    a trip revoked certification. It outlives exercise switches, so a camera
+    knocked between exercises trips when an exercise next checks its reading
+    against the one it recorded at certification."""
+
+    def __init__(self) -> None:
+        self._tripwires: dict[str, PitchDeltaTripwire] = {}
+        self.revoked_delta_deg: float | None = None
+
+    @property
+    def revoked(self) -> bool:
+        return self.revoked_delta_deg is not None
+
+    def tripwire(self, profile_name: str, tolerance_deg: float) -> PitchDeltaTripwire:
+        """The profile's tripwire for this session, created on first use."""
+        if profile_name not in self._tripwires:
+            self._tripwires[profile_name] = PitchDeltaTripwire(tolerance_deg)
+        return self._tripwires[profile_name]
+
+    def revoke(self, delta_deg: float) -> bool:
+        """Revokes certification for the session; True only the first time."""
+        if self.revoked:
+            return False
+        self.revoked_delta_deg = delta_deg
+        return True

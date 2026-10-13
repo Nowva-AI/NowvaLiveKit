@@ -48,7 +48,16 @@ VERTICAL_SHIN_BOTTOM = RdlPose(70.0, 33.0, 0.0)
 MILD_SQUAT_BOTTOM = RdlPose(70.0, 53.0, 12.0)
 MODERATE_SQUAT_BOTTOM = RdlPose(70.0, 60.0, 15.0)
 UNRACK_TRAVEL = 0.14
-PARTIAL_TRAVEL = 0.35
+# A grip or re-rack dip at the top of the bias budget (rdl.md §3.6, §4.3).
+WORST_DIP_TRAVEL = 0.19
+# Soft-knee RDLs a tight-hamstring lifter reaches (rdl.md §3.6): all count.
+SOFT_KNEE_BOTTOMS = [
+    pytest.param(RdlPose(45.0, 20.0, 5.0), id="45deg-k20-s5"),
+    pytest.param(RdlPose(50.0, 15.0, 4.0), id="50deg-k15-s4"),
+    pytest.param(RdlPose(50.0, 20.0, 5.0), id="50deg-k20-s5"),
+]
+# Inside the partial band [0.25, 0.33): above any dip, short of the count floor.
+PARTIAL_TRAVEL = 0.29
 DIP_S = 0.6
 FAST_DESCENT_S = 0.5
 CONTROLLED_DESCENT_S = 2.0
@@ -68,6 +77,8 @@ LINEAR_CROSSING_FRACTION = 0.9
 SETUP_STAND_S = 2.0
 KNOCK_DEG = -4.0
 KNOCKED_MILD_BOTTOM = RdlPose(70.0, 46.5, 0.0)
+# Uncertified: the standing reading lands beyond |camera_pitch - 4°| > 8° (the gross tripwire).
+GROSS_PITCH_DEG = -8.0
 RATIO_TOLERANCE = 0.005
 HINGE_TOLERANCE_DEG = 1.0
 TRIP_DELTA_TOLERANCE_DEG = 0.5
@@ -278,6 +289,25 @@ class TestRejections:
         assert _faults(results) == []
         assert _shallow(results) == []
 
+    @pytest.mark.parametrize("multi_camera, fps", MODES)
+    @pytest.mark.parametrize("bottom", SOFT_KNEE_BOTTOMS)
+    def test_a_45_to_50_degree_soft_knee_rep_counts(self, monkeypatch, multi_camera: bool, fps: float, bottom: RdlPose):
+        run = _RdlRun(monkeypatch, multi_camera, fps)
+        results = run.run([STANDING] * 10 + _reps_to(bottom, 3, fps))
+
+        assert [rep.rep_number for rep in _reps(results)] == [1, 2, 3]
+        assert _shallow(results) == []
+
+    @pytest.mark.parametrize("travel", [UNRACK_TRAVEL, WORST_DIP_TRAVEL])
+    def test_a_slow_grip_or_re_rack_dip_never_counts_or_cues(self, monkeypatch, travel: float):
+        run = _RdlRun(monkeypatch, False, MONO_FPS)
+        dip = RdlPose(hinge_for_travel(travel, 10.0, 3.0), 10.0, 3.0)
+        results = run.run([STANDING] * 10 + _reps_to(dip, 2, MONO_FPS))
+
+        assert _reps(results) == []
+        assert _shallow(results) == []
+        assert _faults(results) == []
+
     def test_partials_send_a_shallow_rep_each_and_cue_from_the_second(self, monkeypatch):
         run = _RdlRun(monkeypatch, False, MONO_FPS)
         results = run.run([STANDING] * 10 + _partial(MONO_FPS) + _partial(MONO_FPS))
@@ -430,3 +460,31 @@ class TestCertificationRevokedMidSession:
         after = _faults(knocked, "rdl_hip_sink")
         assert [fault.severity for fault in after] == [FaultSeverity.MILD]
         assert after[0].details["recorded_only"]
+
+
+class TestGrossPitchTripwire:
+    def test_an_uncertified_camera_far_off_level_is_signalled_once_a_session(self, monkeypatch):
+        run = _RdlRun(monkeypatch, False, MONO_FPS)
+        run.view = lambda points: camera_view(points, GROSS_PITCH_DEG)
+        first = run.run([STANDING] * 10 + _reps_to(VERTICAL_SHIN_BOTTOM, 1, MONO_FPS))
+        run.end_set()
+        # A fresh analyser trips its own gross tripwire again; the session signals once.
+        run.pipeline.set_exercise(RDL_NAME)
+        second = run.run([STANDING] * 10 + _reps_to(VERTICAL_SHIN_BOTTOM, 1, MONO_FPS))
+
+        camera = BiomechanicsConfig().faults.rdl.camera
+        results = first + second
+        assert run.pipeline._rep_analyzer.camera_pitch_untrusted
+        signalled = [result.camera_pitch_untrusted_deg for result in results if result.camera_pitch_untrusted_deg is not None]
+        assert signalled == [pytest.approx(run.pipeline.camera_pitch_deg)]
+        assert abs(signalled[0] - camera.posture_offset_deg) > camera.tripwire_deg
+        assert all(result.pitch_certification_revoked_deg is None for result in results)
+
+    def test_an_uncertified_camera_near_level_is_never_signalled(self, monkeypatch):
+        run = _RdlRun(monkeypatch, False, MONO_FPS)
+        run.view = lambda points: camera_view(points, MOUNT_PITCH_DEG)
+        results = run.run([STANDING] * 10 + _reps_to(VERTICAL_SHIN_BOTTOM, 1, MONO_FPS))
+
+        assert len(_reps(results)) == 1
+        assert not run.pipeline._rep_analyzer.camera_pitch_untrusted
+        assert all(result.camera_pitch_untrusted_deg is None for result in results)

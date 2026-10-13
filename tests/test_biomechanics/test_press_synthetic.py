@@ -240,6 +240,19 @@ class TestInjectedFaultTiers:
         assert grip.severity == FaultSeverity.MODERATE
         assert grip.details["direction"] == "narrower"
 
+    def test_a_cueable_grip_note_alone_keeps_the_rep_clean(self, monkeypatch):
+        session = press_session(monkeypatch, multi_camera=True)
+        grip = {"grip_tilt_deg": 17.0}
+        poses = _unrack(FPS_RIG, **grip) + press_rep(FPS_RIG, **grip) + press_rep(FPS_RIG, dip_m=0.07, **grip)
+        results = run_session(session, poses + hold(1.0, FPS_RIG, **grip), FPS_RIG)
+        first, second = counted_reps(results)
+        [grip_note] = [fault for fault in first.faults if fault.fault_type == "press_grip"]
+        assert grip_note.severity == FaultSeverity.MODERATE
+        assert grip_note.details["setup_note"] is True
+        assert not grip_note.details.get("recorded_only")
+        assert first.is_clean
+        assert not second.is_clean
+
 
 def _budget_noise(rng: np.random.Generator):
     """Central-budget noise in the camera frame: hips move as one (pelvis), wrists apart."""
@@ -335,6 +348,16 @@ class TestPitchLeakAndLevelling:
         drop, _, _ = clean_rep_budget[10.0]
         bias_cm = DEPTH_BIAS_CM * math.sin(math.radians(10.0))
         assert drop + bias_cm + RESIDUAL_LEG_DRIVE_CM <= SEVERE_ALLOWANCE_CM
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="measured 3.13° (P95 2.50° + depth bias 0.54° + residual 0.09°) against the 3.0° severe "
+        "allowance: uneven's tilted band stays recap-only (tilted_band_validated_faults excludes it)",
+    )
+    def test_tilted_band_uneven_fits_the_severe_allowance(self, clean_rep_budget):
+        _, tilt, _ = clean_rep_budget[10.0]
+        bias_deg = math.degrees(math.atan(DEPTH_BIAS_CM * math.sin(math.radians(10.0)) / GRIP_SPACING_CM))
+        assert tilt + bias_deg + RESIDUAL_TILT_DEG <= SEVERE_ALLOWANCE_DEG
 
     def test_fifteen_degrees_is_the_unknown_band_and_recap_only(self, clean_rep_budget):
         _, _, features = clean_rep_budget[15.0]

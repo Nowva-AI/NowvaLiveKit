@@ -379,6 +379,29 @@ class TestShallowRepDelivery:
         assert message["set_number"] == 2
 
 
+class TestCameraPitchStatus:
+    def test_a_revoked_mount_and_a_far_off_level_camera_each_send_camera_pitch(self, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.pipeline_process import _send_camera_pitch_status
+        from biomechanics.utils.types import PipelineFrame
+
+        bridge = IPCBridge(mock_ipc_client)
+        _send_camera_pitch_status(bridge, PipelineFrame(frame_index=0, timestamp=0.0, pitch_certification_revoked_deg=4.0))
+        _send_camera_pitch_status(bridge, PipelineFrame(frame_index=1, timestamp=0.1, camera_pitch_untrusted_deg=-12.0))
+
+        statuses = [message for message in mock_ipc_client.messages if message["type"] == "pipeline_status"]
+        assert [message["status"] for message in statuses] == ["camera_pitch", "camera_pitch"]
+        assert [message["latency_ms"] for message in statuses] == [{"delta_deg": 4.0}, {"pitch_deg": -12.0}]
+
+    def test_an_ordinary_frame_sends_nothing(self, mock_ipc_client):
+        from biomechanics.coaching.ipc_bridge import IPCBridge
+        from biomechanics.pipeline_process import _send_camera_pitch_status
+        from biomechanics.utils.types import PipelineFrame
+
+        _send_camera_pitch_status(IPCBridge(mock_ipc_client), PipelineFrame(frame_index=0, timestamp=0.0))
+        assert mock_ipc_client.messages == []
+
+
 class TestReadinessHint:
     def test_the_profiles_hint_names_its_own_setup_failure(self, monkeypatch):
         from biomechanics.config import BiomechanicsConfig

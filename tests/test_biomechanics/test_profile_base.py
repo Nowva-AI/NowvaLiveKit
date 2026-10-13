@@ -43,11 +43,11 @@ class TestHookDefaults:
 
         assert profile.create_rep_analyzer(config) is None
         assert profile.observe_frame(_context()) is None
-        assert profile.create_session_reference() is None
+        assert profile.create_session_reference(config) is None
         assert profile.create_set_diagnosis() is None
         assert profile.get_readiness_check() is None
-        assert profile.on_rep_rejected("partial", None, JointAngles()) == []
-        assert profile.shallow_rep_cue(_fault(), streak=3, cued_this_set=0) is None
+        assert profile.on_rep_rejected("partial", None, JointAngles(), config) == []
+        assert profile.shallow_rep_cue(_fault(), streak=3, cued_this_set=0, config=config) is None
         assert profile.get_hedged_recap_faults(config) == frozenset()
 
     def test_flag_defaults_keep_the_squat_unchanged(self):
@@ -67,19 +67,20 @@ class TestHookDefaults:
     def test_existing_profiles_keep_the_defaults(self, exercise_name: str):
         profile = get_profile(exercise_name)
         assert profile.create_rep_analyzer(BiomechanicsConfig()) is None
-        assert profile.cue_start_tier("knee_valgus", _context()) == FaultSeverity.MILD
+        assert profile.cue_start_tier("knee_valgus", _context(), BiomechanicsConfig()) == FaultSeverity.MILD
 
 
 class TestStartTier:
     def test_a_missing_fault_starts_at_mild(self):
-        assert ExerciseProfile().cue_start_tier("press_uneven", _context()) == FaultSeverity.MILD
+        assert ExerciseProfile().cue_start_tier("press_uneven", _context(), BiomechanicsConfig()) == FaultSeverity.MILD
 
     def test_min_cue_tiers_set_the_static_start(self):
         class _Tiered(ExerciseProfile):
             min_cue_tiers = MappingProxyType({"press_uneven": FaultSeverity.SEVERE})
 
-        assert _Tiered().cue_start_tier("press_uneven", _context()) == FaultSeverity.SEVERE
-        assert _Tiered().cue_start_tier("press_grip", _context()) == FaultSeverity.MILD
+        config = BiomechanicsConfig()
+        assert _Tiered().cue_start_tier("press_uneven", _context(), config) == FaultSeverity.SEVERE
+        assert _Tiered().cue_start_tier("press_grip", _context(), config) == FaultSeverity.MILD
 
     def test_the_default_table_cannot_be_mutated_by_accident(self):
         with pytest.raises(TypeError):

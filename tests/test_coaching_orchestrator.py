@@ -2507,7 +2507,7 @@ async def _feature_rep(orch, rep_number: int, features: dict, *verdicts: dict, a
 
 def _grip_verdict(severity: str = "moderate", direction: str | None = "wider", value: float | None = None,
                   observability: str = "observable") -> dict:
-    details = {"side": None, "observability": observability}
+    details = {"side": None, "observability": observability, "setup_note": True}
     if direction is not None:
         details["direction"] = direction
     if value is not None:
@@ -2803,8 +2803,9 @@ class TestPressRecapLines:
 
         async def _run():
             await orch.on_fault(None, "press_grip", "moderate", observability="observable")
+            # The pipeline's RepData.is_clean skips the setup note: the rep arrives clean.
             await orch.on_rep_complete(
-                1, "", False, ["press_grip"], max_depth_angle=None,
+                1, "", True, ["press_grip"], max_depth_angle=None,
                 faults_detailed=[_grip_verdict()], features={"exercise": "overhead_press"},
             )
             heard = [e.cue_key for e in _drain_events(orch) if e.event_type == "cached_cue"]

@@ -41,6 +41,7 @@ from test_rdl_poses import (
     NUM_KEYPOINTS,
     STANDING,
     RdlPose,
+    bar_offset_ratio,
     bar_travel,
     camera_view,
     cosine_crossing_time_s,
@@ -64,6 +65,7 @@ HINGE_TOLERANCE_DEG = 1.0
 TILT_TOLERANCE_DEG = 0.5
 PITCH_TOLERANCE_DEG = 0.5
 HAND_DROP_DEG = 7.0
+GRADUAL_DROP_DEG = 12.0
 YAW_DEG = 25.0
 BAR_AHEAD_M = 0.12
 MEASURED_UP_TILT_DEG = 3.0
@@ -74,8 +76,6 @@ TURNAROUND_DESCENT_S = 1.5
 TRIPWIRE_STANDING_FRAMES = 40
 TOO_FEW_STANDING_FRAMES = 30
 GROSS_PITCH_DEG = 13.0
-# A bar touching the shin sits 0.15 ankle-to-toe lengths behind midfoot (rdl.md §5.2).
-BAR_ON_SHIN_OFFSET = -0.15
 OFFSET_TOLERANCE = 0.01
 MIN_SHOULDER_DROP_CM = 35.0
 TRIP_DELTA_TOLERANCE_DEG = 0.1
@@ -199,15 +199,15 @@ class TestFrameSample:
         )
         assert sample.bar_tilt_signed_deg == pytest.approx(HAND_DROP_DEG, abs=TILT_TOLERANCE_DEG)
 
-    def test_bar_on_the_shin_sits_behind_midfoot_and_a_bar_ahead_reads_positive(self):
+    def test_a_bar_on_the_legs_reads_its_offset_and_a_bar_ahead_reads_more(self):
         readiness = _config().readiness_gate
         on_legs = build_hinge_sample(_ctx(CLEAN_BOTTOM.points(), capture_mode=TRIANGULATED), readiness, True)
         ahead = build_hinge_sample(
             _ctx(RdlPose(75.0, 20.0, 5.0, bar_forward_m=BAR_AHEAD_M).points(), capture_mode=TRIANGULATED),
             readiness, True,
         )
-        assert on_legs.bar_offset_ratio == pytest.approx(BAR_ON_SHIN_OFFSET, abs=OFFSET_TOLERANCE)
-        assert ahead.bar_offset_ratio > 0.0
+        assert on_legs.bar_offset_ratio == pytest.approx(bar_offset_ratio(CLEAN_BOTTOM.points()), abs=OFFSET_TOLERANCE)
+        assert ahead.bar_offset_ratio > on_legs.bar_offset_ratio
 
     @pytest.mark.parametrize("gravity_source, tilt_deg", [(GRAVITY_BODY, 0.0), (GRAVITY_MEASURED, MEASURED_UP_TILT_DEG)])
     def test_upright_trunk_reads_zero_pitch_whatever_the_up(self, gravity_source: str, tilt_deg: float):
@@ -329,6 +329,12 @@ class TestRepFeatures:
         assert features.bar_tilt_deg == pytest.approx(HAND_DROP_DEG, abs=TILT_TOLERANCE_DEG)
         assert features.bar_tilt_side == side
 
+    @pytest.mark.parametrize("fps", FPS_RATES)
+    def test_a_gradual_drop_reads_in_full_against_the_standing_pre_roll(self, fps: float):
+        driver = _Driver(_analyzer(), fps)
+        driver.view_fn = dropping_hand(GRADUAL_DROP_DEG)
+        assert driver.rep().bar_tilt_deg == pytest.approx(GRADUAL_DROP_DEG, abs=TILT_TOLERANCE_DEG)
+
     def test_a_grip_asymmetry_present_from_the_start_cancels(self):
         driver = _Driver(_analyzer(), 30.0)
         driver.view_fn = lambda points: dropping_hand(HAND_DROP_DEG)(points, constant=True)
@@ -350,7 +356,7 @@ class TestRepFeatures:
     def test_a_bar_off_the_legs_raises_the_offset(self):
         on_legs = _Driver(_analyzer(), 30.0, TRIANGULATED).rep()
         off = _Driver(_analyzer(), 30.0, TRIANGULATED).rep(bottom=RdlPose(75.0, 20.0, 5.0, bar_forward_m=BAR_AHEAD_M))
-        assert on_legs.bar_offset_ratio_p80 == pytest.approx(BAR_ON_SHIN_OFFSET, abs=OFFSET_TOLERANCE)
+        assert on_legs.bar_offset_ratio_p80 == pytest.approx(bar_offset_ratio(CLEAN_BOTTOM.points()), abs=OFFSET_TOLERANCE)
         assert off.bar_offset_ratio_p80 > _config().faults.rdl.bar_drift.moderate
 
 
@@ -430,9 +436,9 @@ class TestTurnaroundStarts:
 class TestRejection:
     def test_counted_partial_and_ignored_reps(self):
         analyzer = _analyzer()
-        assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.45)) is None
-        assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.35, duration_s=1.5)) == REJECT_PARTIAL
-        assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.35, duration_s=0.8)) == REJECT_IGNORE
+        assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.35)) is None
+        assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.29, duration_s=1.5)) == REJECT_PARTIAL
+        assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.29, duration_s=0.8)) == REJECT_IGNORE
         assert analyzer.rejection_reason(rdl_features(bar_travel_ratio=0.14, duration_s=1.5)) == REJECT_IGNORE
 
     def test_unseen_wrists_fall_back_to_the_hinge_floor(self):
@@ -443,7 +449,7 @@ class TestRejection:
 
     def test_rejection_reason_is_pure(self):
         analyzer = _analyzer()
-        partial = rdl_features(bar_travel_ratio=0.35, duration_s=1.5)
+        partial = rdl_features(bar_travel_ratio=0.29, duration_s=1.5)
         assert [analyzer.rejection_reason(partial) for _ in range(3)] == [REJECT_PARTIAL] * 3
 
     def test_a_rejected_rep_keeps_the_setups(self):

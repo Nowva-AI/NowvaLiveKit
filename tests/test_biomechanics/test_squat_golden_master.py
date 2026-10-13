@@ -8,9 +8,9 @@ again after a second of overhead-press frames and a switch back. With the
 athlete's stored body measurements applied, the switched run must reproduce
 the fresh golden exactly: the documented carry-overs (the depth target
 survives, SessionReference restarts on every switch) leave the squat
-unchanged. A first-time user's body measurement is session-scoped, so press
-frames feed it while the press profile allows (feeds_body_calibration); that
-run has its own golden, and a profile that opts out reproduces the fresh one.
+unchanged. A first-time user's body measurement is session-scoped, but press
+frames never feed it (feeds_body_calibration False), so that run reproduces
+the fresh golden too.
 
 The overhead press is still gated, so that switch only reaches an untracked
 stand-in. A second switch goes through a test-only analyser profile that
@@ -265,19 +265,19 @@ class _FakeLiftProfile(ExerciseProfile):
     def create_rep_analyzer(self, config) -> _FakeLiftAnalyzer:
         return _FakeLiftAnalyzer()
 
-    def create_session_reference(self) -> SessionReference:
+    def create_session_reference(self, config) -> SessionReference:
         return _FakeLiftReference()
 
     def get_fault_to_cue_map(self):
         return {"press_uneven": "press_uneven"}
 
-    def on_rep_rejected(self, reason, features, angles):
+    def on_rep_rejected(self, reason, features, angles, config):
         return [FaultEvent(
             fault_type="rdl_partial", severity=FaultSeverity.MODERATE, severity_score=1.5,
             message="rejected", rep_number=features.rep_number, details={"shallow_rep": True},
         )]
 
-    def shallow_rep_cue(self, fault, streak, cued_this_set):
+    def shallow_rep_cue(self, fault, streak, cued_this_set, config):
         return FAKE_SHALLOW_CUE
 
 
@@ -527,18 +527,6 @@ VARIANTS = [
     ),
     pytest.param(False, False, True, "squat_single_camera_athlete_params", id="mono-hip_counter-athlete_params"),
 ]
-# After a switch the expected snapshot is the fresh one, except where body
-# measurement carries over (first-time user, press frames feed it).
-AFTER_SWITCH_VARIANTS = [
-    pytest.param(True, False, True, "squat_hip_counter_athlete_params", id="rig-hip_counter-athlete_params"),
-    pytest.param(
-        True, False, False, "squat_hip_counter_first_time_after_switch", id="rig-hip_counter-first_time",
-    ),
-    pytest.param(
-        True, True, True, "squat_bilstm_athlete_params", id="rig-bilstm-athlete_params", marks=_bilstm_model,
-    ),
-    pytest.param(False, False, True, "squat_single_camera_athlete_params", id="mono-hip_counter-athlete_params"),
-]
 
 
 class TestSquatGoldenMaster:
@@ -548,21 +536,13 @@ class TestSquatGoldenMaster:
     ):
         _check_golden(golden, _fresh_run(monkeypatch, multi_camera, bilstm, athlete_params))
 
-    @pytest.mark.parametrize("multi_camera, bilstm, athlete_params, golden", AFTER_SWITCH_VARIANTS)
-    def test_session_after_switching_away_and_back_matches_golden(
+    @pytest.mark.parametrize("multi_camera, bilstm, athlete_params, golden", VARIANTS)
+    def test_session_after_switching_away_and_back_matches_the_fresh_golden(
         self, monkeypatch, multi_camera: bool, bilstm: bool, athlete_params: bool, golden: str,
     ):
-        if os.getenv(REGEN_ENV) == "1" and not golden.endswith("_after_switch"):
-            pytest.skip("the fresh run writes this golden")
-        _check_golden(golden, _after_switch_run(monkeypatch, multi_camera, bilstm, athlete_params))
-
-    def test_press_frames_that_do_not_feed_body_calibration_leave_a_first_time_squat_unchanged(self, monkeypatch):
-        from biomechanics.profiles.overhead_press import OverheadPressProfile
-
         if os.getenv(REGEN_ENV) == "1":
             pytest.skip("the fresh run writes this golden")
-        monkeypatch.setattr(OverheadPressProfile, "feeds_body_calibration", False)
-        _check_golden("squat_hip_counter_first_time", _after_switch_run(monkeypatch, True, False, False))
+        _check_golden(golden, _after_switch_run(monkeypatch, multi_camera, bilstm, athlete_params))
 
     @pytest.mark.parametrize("multi_camera, bilstm, athlete_params, golden", VARIANTS)
     def test_session_after_an_analyser_profile_and_back_matches_the_fresh_golden(

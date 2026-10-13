@@ -5,8 +5,9 @@ knee flexion and shin angle, and the shoulder drop. Other RDL tests import the
 generators from here.
 
 Frame: Y-down metres, X = the lifter's left, forward = -Z, ankles on y = 0.
-Winter proportions; the bar stays on the legs (wrists over the shin front)
-unless pushed forward, and the arms reach it from the shoulders.
+Winter proportions; the bar hangs over midfoot, or against the front of the
+legs where they reach further forward (forward shins: around the knee), unless
+pushed forward, and the arms reach it from the shoulders.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from typing import Callable
 import numpy as np
 import pytest
 
+from biomechanics.config import BiomechanicsConfig
+from biomechanics.diagnosis.lean_model import MIDFOOT_FRACTION_OF_ANKLE_TO_TOE
 from biomechanics.utils.geometry import level_camera_frame
 from biomechanics.utils.types import CocoKeypoints as CK
 
@@ -34,9 +37,11 @@ GRIP_HALF_WIDTH_RATIO = 0.13
 TOE_FORWARD_RATIO = 0.10
 HEEL_BACK_RATIO = 0.035
 HEAD_RATIO = 0.12
-# The bar touching the shin front sits 0.2 ankle-to-toe lengths ahead of the
-# ankle, i.e. -0.15 from midfoot (rdl.md §5.2).
-BAR_ON_SHIN_FOOT_FRACTION = 0.2
+# The front of the leg sits 0.2 ankle-to-toe lengths ahead of its centre line
+# (the shin front at the ankle, rdl.md §5.2).
+LEG_FRONT_FOOT_FRACTION = 0.2
+# Fixed-point passes placing the bar against the legs at the wrists' height.
+BAR_PLACEMENT_PASSES = 20
 STANDING_KNEE_FLEX_DEG = 3.0
 STANDING_HINGE_DEG = 0.0
 
@@ -53,6 +58,12 @@ HIP_SINK_TABLE = {
 }
 HIP_SINK_TABLE_TOLERANCE_PCT = 0.15
 SHOULDER_DROP_TOLERANCE_CM = 2.0
+FLOOR_HINGE_TOLERANCE_DEG = 0.3
+# A grip or re-rack dip to the hooks (rdl.md §3.6), the hand-travel bias budget
+# (§4.3), and the margin the floor keeps above the biased dip.
+GRIP_DIP_TRAVEL = 0.14
+TRAVEL_BIAS = 0.05
+MIN_DIP_MARGIN = 0.09
 
 
 def _unit_up() -> np.ndarray:
@@ -61,6 +72,19 @@ def _unit_up() -> np.ndarray:
 
 def _unit_forward() -> np.ndarray:
     return np.array([0.0, 0.0, -1.0])
+
+
+def _leg_centre_forward_m(height_m: float, knee: np.ndarray, hip: np.ndarray) -> float:
+    """Forward position of the leg's centre line at a height above the ankle:
+    the shin below the knee, the thigh up to the hip."""
+    up, forward = _unit_up(), _unit_forward()
+    knee_h, knee_f = float(np.dot(knee, up)), float(np.dot(knee, forward))
+    hip_h, hip_f = float(np.dot(hip, up)), float(np.dot(hip, forward))
+    if height_m <= knee_h:
+        return knee_f * max(height_m, 0.0) / knee_h
+    if height_m <= hip_h:
+        return knee_f + (hip_f - knee_f) * (height_m - knee_h) / (hip_h - knee_h)
+    return hip_f
 
 
 def world_rdl_points(
@@ -86,7 +110,20 @@ def world_rdl_points(
     hip = knee + femur * (math.cos(thigh) * up - math.sin(thigh) * forward)
     shoulder = hip + torso * (math.cos(trunk) * up + math.sin(trunk) * forward)
     toe_forward = TOE_FORWARD_RATIO * height_m
-    bar_forward = BAR_ON_SHIN_FOOT_FRACTION * toe_forward + bar_forward_m
+    lateral_reach = (GRIP_HALF_WIDTH_RATIO - SHOULDER_HALF_WIDTH_RATIO) * height_m
+    shoulder_forward = float(np.dot(shoulder, forward))
+
+    def wrist_height_m(bar_forward_m_: float) -> float:
+        forward_reach = shoulder_forward - bar_forward_m_
+        return float(np.dot(shoulder, up)) - math.sqrt(max(arm ** 2 - lateral_reach ** 2 - forward_reach ** 2, 0.0))
+
+    # Over midfoot, or against the legs where they reach further forward.
+    midfoot_forward = MIDFOOT_FRACTION_OF_ANKLE_TO_TOE * toe_forward
+    on_legs = midfoot_forward
+    for _ in range(BAR_PLACEMENT_PASSES):
+        leg_front = _leg_centre_forward_m(wrist_height_m(on_legs), knee, hip) + LEG_FRONT_FOOT_FRACTION * toe_forward
+        on_legs = max(midfoot_forward, leg_front)
+    bar_forward = on_legs + bar_forward_m
 
     points = np.zeros((NUM_KEYPOINTS, 3))
     sides = (
@@ -95,10 +132,6 @@ def world_rdl_points(
         (-1.0, CK.RIGHT_HIP, CK.RIGHT_KNEE, CK.RIGHT_ANKLE, CK.RIGHT_SHOULDER, CK.RIGHT_ELBOW,
          CK.RIGHT_WRIST, CK.RIGHT_FOOT_INDEX, CK.RIGHT_HEEL),
     )
-    lateral_reach = (GRIP_HALF_WIDTH_RATIO - SHOULDER_HALF_WIDTH_RATIO) * height_m
-    shoulder_forward = float(np.dot(shoulder, forward))
-    forward_reach = shoulder_forward - bar_forward
-    arm_drop = math.sqrt(max(arm ** 2 - lateral_reach ** 2 - forward_reach ** 2, 0.0))
     for sign, hip_i, knee_i, ankle_i, shoulder_i, elbow_i, wrist_i, toe_i, heel_i in sides:
         lateral = np.array([sign * HIP_HALF_WIDTH_RATIO * height_m, 0.0, 0.0])
         points[ankle_i] = lateral
@@ -106,7 +139,7 @@ def world_rdl_points(
         points[hip_i] = lateral + hip
         points[shoulder_i] = shoulder + [sign * SHOULDER_HALF_WIDTH_RATIO * height_m, 0.0, 0.0]
         tilt_rise = sign * GRIP_HALF_WIDTH_RATIO * height_m * math.sin(math.radians(tilt_deg))
-        wrist_height = float(np.dot(shoulder, up)) - arm_drop + tilt_rise
+        wrist_height = wrist_height_m(bar_forward) + tilt_rise
         points[wrist_i] = [sign * GRIP_HALF_WIDTH_RATIO * height_m, -wrist_height, -bar_forward]
         points[elbow_i] = (points[shoulder_i] + points[wrist_i]) / 2.0 + [sign * 0.04, 0.0, 0.03]
         points[toe_i] = lateral + [sign * 0.02, 0.0, -toe_forward]
@@ -129,9 +162,9 @@ def world_rdl_points(
 
 
 def dropping_hand(degrees: float, height_m: float = TALL_HEIGHT_M) -> Callable[..., np.ndarray]:
-    """A view of a pose whose right hand (negative: left) drops as the
-    shoulders go down, by `degrees` of bar tilt at the clean bottom; with
-    constant=True the drop is there from the start (a grip asymmetry)."""
+    """A view of a pose whose right hand (negative: left) drops gradually,
+    in step with the shoulders, to `degrees` of bar tilt at the clean bottom;
+    with constant=True the drop is there from the start (a grip asymmetry)."""
     standing_cm = height_cm(STANDING.points(height_m), CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER)
     bottom_cm = height_cm(CLEAN_BOTTOM.points(height_m), CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER)
 
@@ -139,7 +172,7 @@ def dropping_hand(degrees: float, height_m: float = TALL_HEIGHT_M) -> Callable[.
         shoulder_cm = height_cm(points, CK.LEFT_SHOULDER, CK.RIGHT_SHOULDER)
         depth = 1.0 if constant else min(1.0, max(0.0, (standing_cm - shoulder_cm) / (standing_cm - bottom_cm)))
         half_grip_m = abs(points[CK.LEFT_WRIST][0] - points[CK.RIGHT_WRIST][0]) / 2.0
-        rise_m = half_grip_m * math.sin(math.radians(degrees * depth ** 2))
+        rise_m = half_grip_m * math.sin(math.radians(degrees * depth))
         dropped = points.copy()
         dropped[CK.LEFT_WRIST, 1] -= rise_m
         dropped[CK.RIGHT_WRIST, 1] += rise_m
@@ -164,6 +197,13 @@ def hip_sink_pct(knee_flex_deg: float, shank_deg: float, height_m: float = TALL_
     bottom = world_rdl_points(60.0, knee_flex_deg, shank_deg, height_m=height_m)
     standing_cm = height_cm(standing, CK.LEFT_HIP, CK.RIGHT_HIP)
     return (standing_cm - height_cm(bottom, CK.LEFT_HIP, CK.RIGHT_HIP)) / standing_cm * 100.0
+
+
+def bar_offset_ratio(points: np.ndarray, height_m: float = TALL_HEIGHT_M) -> float:
+    """The bar (wrist midpoint) ahead of midfoot, in ankle-to-toe lengths, of a generated pose."""
+    toe_forward = TOE_FORWARD_RATIO * height_m
+    wrist_forward = -(points[CK.LEFT_WRIST][2] + points[CK.RIGHT_WRIST][2]) / 2.0
+    return (wrist_forward - MIDFOOT_FRACTION_OF_ANKLE_TO_TOE * toe_forward) / toe_forward
 
 
 def bar_travel(hinge_deg: float, knee_flex_deg: float, shank_deg: float, height_m: float = TALL_HEIGHT_M) -> float:
@@ -296,6 +336,45 @@ class TestShoulderDrop:
     def test_the_travel_solver_inverts_bar_travel(self):
         hinge = hinge_for_travel(0.35, 20.0, 5.0)
         assert bar_travel(hinge, 20.0, 5.0) == pytest.approx(0.35, abs=1e-6)
+
+    @pytest.mark.parametrize(("knee_flex_deg", "shank_deg", "floor_hinge_deg"), [
+        (20.0, 5.0, 43.2), (15.0, 4.0, 48.0), (15.0, 8.0, 58.8),
+    ])
+    def test_the_count_floor_maps_to_the_documented_hinge(
+        self, knee_flex_deg: float, shank_deg: float, floor_hinge_deg: float,
+    ):
+        floor = BiomechanicsConfig().faults.rdl.rom.count_floor_travel
+        assert hinge_for_travel(floor, knee_flex_deg, shank_deg) == pytest.approx(floor_hinge_deg, abs=FLOOR_HINGE_TOLERANCE_DEG)
+
+    def test_the_worst_dip_sits_well_below_the_floor(self):
+        rom = BiomechanicsConfig().faults.rdl.rom
+        assert rom.count_floor_travel - (GRIP_DIP_TRAVEL + TRAVEL_BIAS) >= MIN_DIP_MARGIN
+        assert GRIP_DIP_TRAVEL + TRAVEL_BIAS < rom.partial_min_travel
+
+
+class TestBarPlacement:
+    @pytest.mark.parametrize("pose", [
+        RdlPose(70.0, 15.0, 8.0), RdlPose(60.0, 30.0, 15.0), RdlPose(45.0, 20.0, 10.0), CLEAN_BOTTOM,
+    ])
+    def test_the_bar_never_passes_through_the_legs(self, pose: RdlPose):
+        points = pose.points()
+        wrist = (points[CK.LEFT_WRIST] + points[CK.RIGHT_WRIST]) / 2.0
+        knee = (points[CK.LEFT_KNEE] + points[CK.RIGHT_KNEE]) / 2.0
+        hip = (points[CK.LEFT_HIP] + points[CK.RIGHT_HIP]) / 2.0
+        height = -wrist[1]
+        knee_height, hip_height = -knee[1], -hip[1]
+        if height <= knee_height:
+            leg_forward = -knee[2] * height / knee_height
+        else:
+            leg_forward = -knee[2] + (-hip[2] + knee[2]) * (height - knee_height) / (hip_height - knee_height)
+        assert -wrist[2] >= leg_forward + LEG_FRONT_FOOT_FRACTION * TOE_FORWARD_RATIO * TALL_HEIGHT_M - 1e-9
+
+    def test_with_vertical_shins_the_bar_hangs_over_midfoot(self):
+        assert bar_offset_ratio(STANDING.points()) == pytest.approx(0.0, abs=1e-9)
+        assert bar_offset_ratio(RdlPose(45.0, 20.0, 0.0).points()) == pytest.approx(0.0, abs=1e-9)
+
+    def test_forward_shins_push_the_bar_ahead_of_midfoot(self):
+        assert bar_offset_ratio(RdlPose(70.0, 30.0, 15.0).points()) > 0.0
 
 
 class TestRepGenerator:

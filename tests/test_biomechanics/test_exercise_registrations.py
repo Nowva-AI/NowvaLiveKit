@@ -86,14 +86,15 @@ class TestExerciseConfig:
         assert press.acceptance.top_height_min_ratio == pytest.approx(0.80)
         assert press.camera.tripwire_deg == pytest.approx(3.0)
         assert press.hedged_recap_faults == set()
-        assert not press.uneven_promoted and not press.tilted_band_validated
+        assert not press.uneven_promoted and press.tilted_band_validated_faults == set()
 
     def test_rdl_defaults_follow_the_plan(self):
         rdl = BiomechanicsConfig().faults.rdl
         assert rdl.counter.min_depth_cm == pytest.approx(8.0)
         assert rdl.counter.velocity_window_s is None
         assert (rdl.hip_sink.mild, rdl.hip_sink.moderate, rdl.hip_sink.severe) == (0.12, 0.15, 0.19)
-        assert rdl.rom.count_floor_travel == pytest.approx(0.45)
+        assert rdl.rom.count_floor_travel == pytest.approx(0.33)
+        assert (rdl.partial.moderate, rdl.partial.severe) == (0.04, 0.08)
         assert rdl.rig_min_cue_severity == "moderate"
         assert rdl.camera.delta_tripwire_deg == pytest.approx(2.5)
         assert rdl.tempo.mild_seconds == pytest.approx(0.67)

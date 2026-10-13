@@ -275,8 +275,13 @@ class PressAcceptanceConfig(BaseModel):
 
 
 class PressCameraConfig(BaseModel):
-    """Single-camera mount bands and the certification delta tripwire (ohp.md §4.1)."""
+    """Single-camera mount bands and the certification delta tripwire (ohp.md §4.1).
+    The tripwire compares a set's mean rack-hold standing pitch, once it rests on
+    tripwire_min_frames frames, against the mean of the first
+    tripwire_reference_sets sets: once per set, never rep by rep."""
     tripwire_deg: float = 3.0
+    tripwire_min_frames: int = 24
+    tripwire_reference_sets: int = 2
     level_band_deg: float = 3.0
     tilted_band_deg: float = 10.0
 
@@ -302,7 +307,13 @@ class PressConfig(BaseModel):
     velocity_loss_pct: SeverityTiers = _tiers(20.0, 30.0, 40.0)
     # Recorded-only fault types the recap may mention, hedged (filled from validation).
     hedged_recap_faults: Set[str] = Field(default_factory=set)
-    tilted_band_validated: bool = False
+    # Mono faults whose tilted pitch band (3-10°) passed its own §8.4 gate. Per
+    # fault: synthetic budgets put leg drive inside its 3.1 cm severe allowance
+    # at 10°, but uneven over its 3.0° one (P95 2.50° + bias + residual = 3.13°).
+    tilted_band_validated_faults: Set[str] = Field(default_factory=set)
+    # Mono uneven from moderate on a level mount (§8.3). Unlikely: the synthetic
+    # level-mount P95 is 2.34-2.38° (2.47-2.59° with depth bias and the
+    # inclinometer residual) against the 2.0° moderate allowance.
     uneven_promoted: bool = False
 
 
@@ -322,8 +333,13 @@ def _rdl_counter() -> HipPositionCounterConfig:
 
 
 class RdlRomConfig(BaseModel):
-    """When an RDL counts and when a partial is cued (rdl.md §3.6)."""
-    count_floor_travel: float = 0.45
+    """When an RDL counts and when a partial is cued (rdl.md §3.6). Hand travel
+    with the bar on the legs (over midfoot, or against the legs where they reach
+    further forward), Winter proportions: the 0.33 floor is a 43° hinge at knee
+    20° / shin 5° (45° reads 0.35), 48° at knee 15° / shin 4°, 59° with the
+    knees forward (knee 15° / shin 8°). A grip or re-rack dip reads 0.14 (0.19
+    with bias), 0.14 below the floor; partials start above it at 0.25."""
+    count_floor_travel: float = 0.33
     partial_min_travel: float = 0.25
     fallback_floor_deg: float = 50.0
     partial_min_duration_s: float = 1.0
@@ -338,7 +354,6 @@ class RdlCameraConfig(BaseModel):
     # Gross tripwire on uncertified installs: |camera_pitch - posture_offset| beyond this.
     tripwire_deg: float = 8.0
     posture_offset_deg: float = 4.0
-    correct_by_mount_angle: bool = False
     # Certified mounts: delta tripwire on the set-averaged ankle->hip tilt.
     delta_tripwire_deg: float = 2.5
     delta_min_frames: int = 36
@@ -361,9 +376,10 @@ class RdlLockoutConfig(BaseModel):
 
 
 class RdlPartialConfig(BaseModel):
-    """Bar travel short of the count floor; any shortfall is mild."""
-    moderate: float = 0.07
-    severe: float = 0.14
+    """Bar travel short of the count floor; any shortfall is mild. About 4° and
+    8° of hinge at ~0.0096 travel per degree near the floor (knee 20° / shin 5°)."""
+    moderate: float = 0.04
+    severe: float = 0.08
 
 
 class RdlTempoConfig(BaseModel):

@@ -1278,14 +1278,12 @@ class CoachingOrchestrator:
             {fault.get("fault_type") for fault in verdicts if is_recorded_only(fault)}
             - {fault.get("fault_type") for fault in reportable}
         )
-        event_types = SET_EVENT_FAULT_TYPES.intersection(faults)
+        # Per-set events (the grip note, a missed rep) are never rep faults; the
+        # pipeline already keeps a setup note from making the rep unclean.
         faults = [
             fault_type for fault_type in faults
-            if fault_type not in recorded_only_types and fault_type not in event_types
+            if fault_type not in recorded_only_types and fault_type not in SET_EVENT_FAULT_TYPES
         ]
-        # A per-set event (the grip note) alone never makes a rep unclean
-        if event_types and not faults:
-            is_clean = True
         self._set_rep_count += 1  # Track relative reps per set (ignores absolute pipeline number)
         if set_number is not None:
             self._pipeline_set_number = set_number

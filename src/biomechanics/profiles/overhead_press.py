@@ -22,7 +22,7 @@ from biomechanics.analysis.press_features import (
     missed_rep_event,
     pitch_band,
 )
-from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig, PressConfig
+from biomechanics.config import BiomechanicsConfig, HipPositionCounterConfig
 from biomechanics.faults.fault_types import FaultRule, FaultType
 from biomechanics.faults.observability import TRIANGULATED, capture_mode_from_env
 from biomechanics.faults.rules.press_bar_forward import PressBarForwardRule
@@ -91,13 +91,14 @@ class OverheadPressProfile(ExerciseProfile):
     # NOWVA_DEV_COACHING_READY override marks it ready at registration.
     gate_until_ready = True
     reports_depth = False
+    # Arms overhead migrate the shoulder keypoints, which would bias the torso
+    # length and shoulder width the squat and the press normaliser read.
+    feeds_body_calibration = False
     readiness_hint = "BAR ON SHOULDERS"
     tracking_keypoints = PRESS_TRACKING_KEYPOINTS
 
     def __init__(self) -> None:
         self.min_cue_tiers = RIG_START_TIERS if capture_mode_from_env() == TRIANGULATED else SINGLE_CAMERA_START_TIERS
-        # Set from the pipeline's config when it builds this profile's layers.
-        self._press_config = PressConfig()
 
     def get_feature_extractor(self):
         from biomechanics.ml.upper_body_feature_extractor import UpperBodyFeatureExtractor
@@ -105,13 +106,13 @@ class OverheadPressProfile(ExerciseProfile):
 
     def create_fault_rules(self, config: BiomechanicsConfig) -> list[FaultRule]:
         press = config.faults.press
-        self._press_config = press
+        tilted_validated = press.tilted_band_validated_faults
         return [
             PressLaybackRule(press.layback),
             PressBarForwardRule(press.bar_forward),
             PressLockoutRule(press.lockout, press.lockout_side_min_difference_deg),
-            PressLegDriveRule(press.leg_drive, press.tilted_band_validated),
-            PressUnevenRule(press.uneven, press.tilted_band_validated),
+            PressLegDriveRule(press.leg_drive, FaultType.PRESS_LEG_DRIVE.value in tilted_validated),
+            PressUnevenRule(press.uneven, FaultType.PRESS_UNEVEN.value in tilted_validated),
             VelocityLossRule(
                 mild_pct=press.velocity_loss_pct.mild,
                 moderate_pct=press.velocity_loss_pct.moderate,
@@ -123,10 +124,9 @@ class OverheadPressProfile(ExerciseProfile):
         ]
 
     def create_rep_analyzer(self, config: BiomechanicsConfig) -> PressRepAnalyzer:
-        self._press_config = config.faults.press
         return PressRepAnalyzer(config.faults.press)
 
-    def create_session_reference(self) -> SessionReference:
+    def create_session_reference(self, config: BiomechanicsConfig) -> SessionReference:
         return PressSessionReference()
 
     def get_rep_signal(self, skeleton_3d: Skeleton3D, angles: JointAngles | None = None) -> float:
@@ -146,24 +146,24 @@ class OverheadPressProfile(ExerciseProfile):
         return {"wrist_height": abs(angles.wrist_y_l - angles.wrist_y_r)}
 
     def on_rep_rejected(
-        self, reason: str, features: PressRepFeatures, angles: JointAngles,
+        self, reason: str, features: PressRepFeatures, angles: JointAngles, config: BiomechanicsConfig,
     ) -> list[FaultEvent]:
         if reason != REJECT_NO_LOCKOUT:
             return []
-        event = missed_rep_event(features, angles, self._press_config.acceptance.missed_min_travel_cm)
+        event = missed_rep_event(features, angles, config.faults.press.acceptance.missed_min_travel_cm)
         return [event] if event is not None else []
 
     def get_hedged_recap_faults(self, config: BiomechanicsConfig) -> frozenset[str]:
         return frozenset(config.faults.press.hedged_recap_faults)
 
-    def cue_start_tier(self, fault_type: str, ctx: FrameContext) -> FaultSeverity:
+    def cue_start_tier(self, fault_type: str, ctx: FrameContext, config: BiomechanicsConfig) -> FaultSeverity:
         """Rig: the static rig tiers. Single camera: leg drive and uneven follow the
         mount's pitch band; outside a validated band their rules also cap
         observability at approximate, so they stay recap-only."""
         if ctx.capture_mode == TRIANGULATED:
             return RIG_START_TIERS.get(fault_type, MILD)
         if fault_type in PITCH_BANDED_FAULTS:
-            press = self._press_config
+            press = config.faults.press
             if pitch_band(ctx.pitch_certified, ctx.mount_pitch_deg, press.camera) != PITCH_BAND_LEVEL:
                 return SEVERE
             if fault_type == FaultType.PRESS_UNEVEN.value and not press.uneven_promoted:

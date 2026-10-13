@@ -222,34 +222,34 @@ class TestFrontalRules:
 
 class TestRejectedFaults:
     def test_a_partial_gets_one_shallow_rdl_partial_fault(self):
-        faults = build_rejected_faults(_measured(bar_travel_ratio=0.35, hip_sink_ratio=0.05, range_label="at the knee"), _angles())
+        faults = build_rejected_faults(_measured(bar_travel_ratio=0.28, hip_sink_ratio=0.05, range_label="at the knee"), _angles())
         assert [fault.fault_type for fault in faults] == [FaultType.RDL_PARTIAL.value]
         details = faults[0].details
         assert details["shallow_rep"] and details["counted"] is False
         assert details["range_label"] == "at the knee"
         assert faults[0].severity == FaultSeverity.MODERATE
 
-    @pytest.mark.parametrize("travel, severity", [(0.44, FaultSeverity.MILD), (0.38, FaultSeverity.MODERATE), (0.31, FaultSeverity.SEVERE)])
+    @pytest.mark.parametrize("travel, severity", [(0.31, FaultSeverity.MILD), (0.27, FaultSeverity.MODERATE), (0.24, FaultSeverity.SEVERE)])
     def test_partial_severity_is_the_shortfall(self, travel: float, severity: FaultSeverity):
         assert build_rejected_faults(_measured(bar_travel_ratio=travel), _angles())[0].severity == severity
 
     def test_a_squatted_partial_is_a_hip_sink_fault(self):
-        faults = build_rejected_faults(_measured(bar_travel_ratio=0.35, hip_sink_ratio=0.16), _angles())
+        faults = build_rejected_faults(_measured(bar_travel_ratio=0.29, hip_sink_ratio=0.16), _angles())
         assert [fault.fault_type for fault in faults] == [FaultType.RDL_HIP_SINK.value]
         assert faults[0].details["shallow_rep"]
 
     def test_a_hip_sink_below_the_session_start_tier_stays_a_partial(self):
-        features = _measured(bar_travel_ratio=0.35, hip_sink_ratio=0.16, hip_sink_start_tier="severe")
+        features = _measured(bar_travel_ratio=0.29, hip_sink_ratio=0.16, hip_sink_start_tier="severe")
         assert [fault.fault_type for fault in build_rejected_faults(features, _angles())] == [FaultType.RDL_PARTIAL.value]
 
     def test_an_approximate_hip_sink_stays_a_partial(self):
-        features = _measured(bar_travel_ratio=0.35, hip_sink_ratio=0.2, camera_pitch_untrusted=True)
+        features = _measured(bar_travel_ratio=0.29, hip_sink_ratio=0.2, camera_pitch_untrusted=True)
         assert [fault.fault_type for fault in build_rejected_faults(features, _angles())] == [FaultType.RDL_PARTIAL.value]
 
     def test_profile_routes_partials_and_ignores_the_rest(self):
-        profile = RomanianDeadliftProfile()
-        assert len(profile.on_rep_rejected("partial", _measured(bar_travel_ratio=0.35), _angles())) == 1
-        assert profile.on_rep_rejected("ignore", _measured(bar_travel_ratio=0.1), _angles()) == []
+        profile, config = RomanianDeadliftProfile(), BiomechanicsConfig()
+        assert len(profile.on_rep_rejected("partial", _measured(bar_travel_ratio=0.29), _angles(), config)) == 1
+        assert profile.on_rep_rejected("ignore", _measured(bar_travel_ratio=0.1), _angles(), config) == []
 
 
 class TestShallowRepCue:
@@ -265,7 +265,14 @@ class TestShallowRepCue:
         ],
     )
     def test_cue_matrix(self, fault_type: str, streak: int, cued: int, cue: str | None):
-        assert RomanianDeadliftProfile().shallow_rep_cue(_fault(fault_type), streak, cued) == cue
+        assert RomanianDeadliftProfile().shallow_rep_cue(_fault(fault_type), streak, cued, BiomechanicsConfig()) == cue
+
+    def test_the_cue_limits_follow_the_config_each_call_receives(self):
+        config = BiomechanicsConfig()
+        config.faults.rdl.rom.partial_cue_streak = 1
+        profile = RomanianDeadliftProfile()
+        assert profile.shallow_rep_cue(_fault("rdl_partial"), 1, 0, config) == "rdl_lower"
+        assert profile.shallow_rep_cue(_fault("rdl_partial"), 1, 0, BiomechanicsConfig()) is None
 
 
 class TestStartTier:
@@ -301,20 +308,24 @@ class TestStartTier:
         ],
     )
     def test_hip_sink_start_tier_truth_table(self, ctx: FrameContext, tier: FaultSeverity):
-        assert RomanianDeadliftProfile().cue_start_tier(FaultType.RDL_HIP_SINK.value, ctx) == tier
+        assert RomanianDeadliftProfile().cue_start_tier(FaultType.RDL_HIP_SINK.value, ctx, BiomechanicsConfig()) == tier
 
     def test_rig_only_faults_start_at_the_rig_tier(self):
-        profile = RomanianDeadliftProfile()
+        profile, config = RomanianDeadliftProfile(), BiomechanicsConfig()
         for fault_type in ("rdl_bar_drift", "rdl_lockout"):
-            assert profile.cue_start_tier(fault_type, _ctx(capture_mode=TRIANGULATED)) == FaultSeverity.MODERATE
+            assert profile.cue_start_tier(fault_type, _ctx(capture_mode=TRIANGULATED), config) == FaultSeverity.MODERATE
 
-    def test_the_rig_tier_follows_the_config(self):
+    def test_the_rig_tier_follows_the_config_each_call_receives(self):
         config = BiomechanicsConfig()
         config.faults.rdl.rig_min_cue_severity = "mild"
         profile = RomanianDeadliftProfile()
-        profile.create_fault_rules(config)
-        assert profile.cue_start_tier("rdl_bar_drift", _ctx(capture_mode=TRIANGULATED)) == FaultSeverity.MILD
+        rig = _ctx(capture_mode=TRIANGULATED)
+        assert profile.cue_start_tier("rdl_bar_drift", rig, config) == FaultSeverity.MILD
+        # Building rules from another config leaves nothing behind in the profile.
+        profile.create_fault_rules(BiomechanicsConfig())
+        assert profile.cue_start_tier("rdl_bar_drift", rig, config) == FaultSeverity.MILD
+        assert profile.cue_start_tier("rdl_bar_drift", rig, BiomechanicsConfig()) == FaultSeverity.MODERATE
 
     @pytest.mark.parametrize("fault_type", ["rdl_bar_tilt", "rdl_range_drift", "rdl_tempo", "rdl_partial"])
     def test_other_faults_start_at_mild(self, fault_type: str):
-        assert RomanianDeadliftProfile().cue_start_tier(fault_type, _ctx()) == FaultSeverity.MILD
+        assert RomanianDeadliftProfile().cue_start_tier(fault_type, _ctx(), BiomechanicsConfig()) == FaultSeverity.MILD

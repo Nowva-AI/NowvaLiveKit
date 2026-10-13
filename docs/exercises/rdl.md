@@ -379,19 +379,27 @@ Coaching uses the athlete's own range.
   - It is pitch- and perspective-robust: the hands move only ~5–8 cm horizontally, so the bias is
     ≤ ±0.05 (§4.3).
   - Arm length varies the hinge at a given value by ±0.045, about ±3°.
-- **rep**: `bar_travel_ratio ≥ 0.45`, which is ≈ 45° of hinge for Winter proportions (§4.4).
-  - Any healthy adult reaches this with soft knees.
-  - A grip or re-rack dip to mid-thigh hooks reads 0.14 (≤ 0.19 with bias).
-  - If the wrists are unseen in the bottom window, fall back to `hinge_deg ≥ 50°`. The 5° margin covers
-    hinge bias.
-- **partial**: `0.25 ≤ bar_travel_ratio < 0.45` and `duration_s ≥ 1.0`. Not counted.
+- **rep**: `bar_travel_ratio ≥ 0.33`, a **43° hinge at knee 20° / shin 5°** for Winter proportions with
+  the bar on the legs (§4.4). The earlier 0.45 needed 54–68° there (58–76° on the old generator) and
+  rejected 50° soft-knee reps, which would push a tight-hamstring lifter toward rounding.
+  - Mapping of the 0.33 floor (bar over midfoot, or against the front of the legs where they reach
+    further forward): k20/s5 → 43.2°, k15/s4 → 48.0°, k20/s0 → 35.5°, k15/s8 → 58.8°, k20/s10 → 55.2°.
+    A 45° hinge at k20/s5 reads 0.35; 50° at k15/s4 reads 0.35.
+  - Knees forward lower the travel at a given hinge (the hips stay higher and further forward), so a
+    knees-forward RDL needs ~10–15° more hinge to count; hip sink coaches that pattern.
+  - A grip or re-rack dip to mid-thigh hooks reads 0.14 (≤ 0.19 with bias): 0.14 below the floor, more
+    than the 0.09 margin required, and below the 0.25 partial start.
+  - If the wrists are unseen in the bottom window, fall back to `hinge_deg ≥ 50°`, kept conservative
+    (≥ 5° above the floor's hinge) because hinge bias is larger than travel bias.
+- **partial**: `0.25 ≤ bar_travel_ratio < 0.33` and `duration_s ≥ 1.0`. Not counted.
   - `on_rep_rejected("partial", …)` returns **one** fault for **every** partial, with
     `details["shallow_rep"]=True` and `counted=False`. So every partial produces a `shallow_rep` message,
     and the recap count is complete.
   - The fault is `rdl_partial`, or `rdl_hip_sink` when `hip_sink_ratio ≥ features.hip_sink_bands[1]`
     (moderate).
-  - `on_rep_rejected` receives no config, so the analyser stamps `hip_sink_bands`,
-    `count_floor_travel` and `partial_bands` into the features. Faults go through the public
+  - The analyser stamps `hip_sink_bands`, `count_floor_travel` and `partial_bands` into the features,
+    so the rejected-rep faults read the features alone (`on_rep_rejected` now also receives the
+    config, like every profile hook; profiles hold no config). Faults go through the public
     `tag_observability` (spec §2).
   - **Cue.** `shallow_rep_cue(fault, streak, cued_this_set)`. The pipeline owns the streak (spec §2): it
     counts consecutive "partial" rejections in the set; a counted rep resets it; "ignore" leaves it
@@ -629,8 +637,20 @@ the scorer's 0° reference reads ~0.1 higher.
 - The metric therefore measures **hip sink, i.e. combined shin + thigh inclination**. At fixed k it is
   largest with a vertical shin, and *falls* as the knees travel forward.
 
-**Hand travel vs hinge** (k 20°, shin 5°): 25° → 0.15, 35° → 0.28, 45° → 0.44, 50° → 0.53, 60° → 0.74,
-70° → 0.96, 80° → 1.21.
+**Hand travel vs hinge, bar on the legs** (`test_rdl_poses.world_rdl_points`: the bar hangs over
+midfoot, or against the front of the legs, 0.2 ankle-to-toe lengths ahead of their centre line, where
+they reach further forward; the old generator held it 3.8 cm ahead of the ankle, through a forward knee):
+
+| k / s | 35° | 40° | 43° | 45° | 50° | 55° | 60° | floor 0.33 at |
+|---|---|---|---|---|---|---|---|---|
+| 20° / 0° | 0.33 | 0.38 | 0.42 | 0.44 | 0.51 | 0.58 | 0.66 | 35.5° |
+| 20° / 5° | 0.26 | 0.30 | 0.33 | 0.35 | 0.40 | 0.46 | 0.53 | 43.2° |
+| 15° / 4° | 0.22 | 0.26 | 0.28 | 0.30 | 0.35 | 0.41 | 0.47 | 48.0° |
+| 20° / 10° | 0.18 | 0.20 | 0.22 | 0.24 | 0.28 | 0.33 | 0.39 | 55.2° |
+| 15° / 8° | 0.15 | 0.18 | 0.20 | 0.21 | 0.24 | 0.29 | 0.34 | 58.8° |
+
+- The plan's earlier row (k20/s5: 45° → 0.44) did not match its own generator (0.31).
+- Near the floor at k20/s5 the travel grows ≈ 0.0096 per degree of hinge.
 - A grip dip to mid-thigh hooks reads 0.14.
 - Arm length ±0.02H moves the 45° value by ±0.045.
 
@@ -812,6 +832,9 @@ is never told "hips not through".
 **Metric.** `bar_tilt_deg`; side = the side that dropped.
 
 **Thresholds.** mild ≥ 4°, moderate ≥ 7°, severe ≥ 10°.
+- The start tilt is the median over the rep's **standing pre-roll** (the first in-rep samples only for a
+  rep started at a turnaround): a hand that drops gradually has already dropped in the rep's first
+  samples, so a gradual 12° drop read 8.3–8.7° against them.
 - Squat detector bands are 2/4/7° (`BarbellTrackingConfig.tilt_asym_*`), widened for the wrist proxy
   (σ ≈ 2°).
 - 4° over a ~50 cm grip = 3.5 cm of hand-height difference.
@@ -876,10 +899,10 @@ is never told "hips not through".
 
 ### 5.7 `rdl_partial` — attempt stopped above the count floor (P46, shallow path)
 
-**Metric.** `0.45 − bar_travel_ratio` for a "partial" excursion (§3.6).
+**Metric.** `0.33 − bar_travel_ratio` for a "partial" excursion (§3.6).
 
-**Thresholds.** mild > 0, moderate ≥ 0.07, severe ≥ 0.14 short of the floor (≈ 4° and 8° of hinge,
-at ~0.018 per degree near 45°).
+**Thresholds.** mild > 0, moderate ≥ 0.04, severe ≥ 0.08 short of the floor (≈ 4° and 8° of hinge,
+at ~0.0096 per degree near the floor, k20/s5).
 - Returned by `profile.on_rep_rejected("partial", features, angles)` for **every** partial, with
   `details.shallow_rep=True`, `counted=False` and `range_label`. It therefore always yields a
   `shallow_rep` message.
@@ -1046,10 +1069,10 @@ lands first. Everything else is RDL-only.
        counter:   {entry_vel_threshold: 4.0, bottom_vel_threshold: 5.0, ascending_vel_threshold: 4.0,
                    min_depth_cm: 8.0, standing_return_cm: 4.0, min_descending_s: 0.25,
                    min_bottom_s: 0.08, min_ascending_s: 0.25, min_rep_duration_s: 0.8}
-       rom:       {count_floor_travel: 0.45, partial_min_travel: 0.25, fallback_floor_deg: 50.0,
+       rom:       {count_floor_travel: 0.33, partial_min_travel: 0.25, fallback_floor_deg: 50.0,
                    partial_min_duration_s: 1.0, partial_cue_streak: 2, max_partial_cues_per_set: 2,
                    highlight_range_tolerance_deg: 8.0, reference_cap_deg: 95.0}
-       camera:    {tripwire_deg: 8.0, correct_by_mount_angle: false}   # V1.1
+       camera:    {tripwire_deg: 8.0, posture_offset_deg: 4.0, delta_tripwire_deg: 2.5, ...}
        rig_min_cue_severity: moderate                         # until measured `up` + G6
        hip_sink:  {mild: 0.12, moderate: 0.15, severe: 0.19}     # start tier: mild iff mount certified
        bar_drift: {mild: 0.25, moderate: 0.40, severe: 0.60}     # ankle->toe lengths ahead of midfoot
@@ -1057,7 +1080,7 @@ lands first. Everything else is RDL-only.
                    back_mild: 8.0, back_moderate: 12.0, back_severe: 18.0}
        bar_tilt:  {mild: 4.0, moderate: 7.0, severe: 10.0}       # deg, bottom minus start
        range_drift: {mild: 8.0, moderate: 15.0, severe: 25.0}    # deg short of own reference
-       partial:   {moderate: 0.07, severe: 0.14}                 # travel short of the floor
+       partial:   {moderate: 0.04, severe: 0.08}                 # travel short of the floor
        tempo:     {mild_seconds: 0.67, moderate_seconds: 0.50, severe_seconds: 0.33}   # 5-95% descent
    ```
 
@@ -1613,3 +1636,16 @@ proportions, 188.5/160 cm). Sources:
   T = 2.5° with ~2–3% false trips per set, ~90–91% detection at 4°, and a residual band of 3.1–3.9°;
   G2(e) aligned. The stale "uncertified = moderate" lines (§1, bands note, R2, Phase E) now include the
   severe fallback. Praise worst case is 13.5%.
+
+**Implementation follow-ups (2026-10-04).**
+- Count floor 0.45 → **0.33** and partial bands 0.07/0.14 → **0.04/0.08**, re-derived with the bar on the
+  legs (§3.6, §4.4); the test generator now clamps the bar to max(midfoot, leg front). Tests: 45–50°
+  soft-knee reps count on both modes; grip and re-rack dips (0.14, 0.19) never count or cue.
+- Bar tilt reads against the standing pre-roll (§5.4).
+- The delta tripwire's reference and pooled sets are session-owned (`PitchCertification`, keyed by
+  profile), so they survive exercise switches; the gross tripwire now sends `camera_pitch` once a
+  session.
+- `correct_by_mount_angle` deleted (dead).
+- **Still open:** every §8 gate (G2 hip sink, G7 clips, which the flip-gate test now enforces once
+  `coaching_ready` flips), the arm-length and travel-bias terms on real lifters (the floor's margin at
+  45°/k20 is 0.02 ≈ 2° in synthetic data), and the knees-forward mapping (k15/s8 needs 59° to count).

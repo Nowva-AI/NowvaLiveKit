@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from biomechanics.analysis.press_features import REJECT_NO_LOCKOUT, REJECT_NO_RACK_START
 from biomechanics.config import BiomechanicsConfig
 from biomechanics.profiles.overhead_press import OverheadPressProfile
 from biomechanics.utils.standing_gate import PROFILE_CHECK_FAILURE
+from biomechanics.utils.types import JointAngles
 from test_press_poses import (
     FPS_MONO,
     FPS_RIG,
@@ -22,6 +24,7 @@ from test_press_poses import (
     RACK_BAR_HEIGHT_M,
     AnalyzerHarness,
     bare_hand_reach,
+    camera_pitched,
     counted_reps,
     faults_of,
     hands_down,
@@ -40,6 +43,42 @@ CLIP_HIGH_M = 0.45
 CLIP_LOW_M = 0.30
 DEEP_KNEE_BEND_M = 0.5
 SLOWING_PRESS_S = (0.6, 0.8, 1.3)
+# Tripwire sessions: anisotropic keypoint noise (sigma_z = 3 sigma_xy), rack-hold
+# lean drawn per rep, and a per-set posture offset (bar-in-hand repeatability).
+TRIPWIRE_SETS = 5
+TRIPWIRE_REPS_PER_SET = 5
+TRIPWIRE_SIGMA_M = np.array([0.01, 0.01, 0.03])
+NATURAL_LEAN_MAX_DEG = 3.0
+POSTURE_SIGMA_DEG = 0.5
+CLEAN_SESSION_SEEDS = range(24)
+KNOCK_SESSION_SEEDS = range(30)
+KNOCK_DEG = 4.0
+TRIP_DELTA_TOLERANCE_DEG = 1.5
+# A 4° knock sits just past the 3° tolerance: measured 93% over 60 sessions (the
+# residual band runs to about 4.3°, like the RDL's 3.1-3.9°).
+KNOCK_DETECTION_MIN_RATE = 0.9
+
+
+def _tripwire_session(seed: int, knock_from_set: int | None = None, sets: int = TRIPWIRE_SETS) -> list[float | None]:
+    """A certified level-mount session at 12 fps; the per-set tripwire result
+    (the tripping delta, or None). The camera turns KNOCK_DEG from knock_from_set on."""
+    rng = np.random.default_rng(seed)
+    harness = AnalyzerHarness(pitch_certified=True, mount_pitch_deg=0.0)
+    trips: list[float | None] = []
+    for set_index in range(sets):
+        poses = hands_down(1.0, FPS_MONO) + hold(1.5, FPS_MONO)
+        for _ in range(TRIPWIRE_REPS_PER_SET):
+            poses += press_rep(FPS_MONO, layback_deg=float(rng.uniform(0.0, NATURAL_LEAN_MAX_DEG)))
+        posture_deg = float(rng.normal(0.0, POSTURE_SIGMA_DEG))
+        camera_deg = KNOCK_DEG if knock_from_set is not None and set_index >= knock_from_set else 0.0
+        harness.run(
+            poses + hold(1.0, FPS_MONO),
+            transform=lambda points: camera_pitched(points, camera_deg + posture_deg)
+            + rng.normal(0.0, 1.0, points.shape) * TRIPWIRE_SIGMA_M,
+        )
+        trips.append(harness.analyzer.pitch_tripwire_delta())
+        harness.reset_set()
+    return trips
 
 
 def _unrack(fps: float, hold_s: float = 1.5, **pose) -> list[dict]:
@@ -80,6 +119,15 @@ class TestRejectionReasons:
         assert missed.fault_type == "press_missed"
         assert missed.details["observability"] == "observable"
         assert missed.rep_number == 2
+
+    def test_the_missed_event_floor_follows_the_config_each_call_receives(self):
+        poses = _unrack(FPS_MONO) + press_rep(FPS_MONO) + press_rep(FPS_MONO, top_m=MISSED_TOP_M) + hold(1.0, FPS_MONO)
+        [(reason, features)] = AnalyzerHarness().run(poses).rejections
+        strict = BiomechanicsConfig()
+        strict.faults.press.acceptance.missed_min_travel_cm = features.rom_cm + 1.0
+        profile = OverheadPressProfile()
+        assert profile.on_rep_rejected(reason, features, JointAngles(), strict) == []
+        assert len(profile.on_rep_rejected(reason, features, JointAngles(), BiomechanicsConfig())) == 1
 
     def test_short_attempt_under_the_counter_minimum_is_silent(self):
         poses = _unrack(FPS_MONO) + press_rep(FPS_MONO, top_m=SHORT_TOP_M) + hold(1.0, FPS_MONO)
@@ -239,3 +287,25 @@ class TestTouchAndGo:
         assert [rep.features["piston"] for rep in reps] == [False, True, True]
         assert all(rep.features["rack_start"] for rep in reps)
         assert not faults_of(results, "press_missed")
+
+
+class TestPitchTripwire:
+    def test_noisy_clean_sessions_never_trip(self):
+        for seed in CLEAN_SESSION_SEEDS:
+            assert _tripwire_session(seed) == [None] * TRIPWIRE_SETS, seed
+
+    def test_a_4_degree_knock_between_sets_trips_the_next_set(self):
+        knock_from = PRESS.camera.tripwire_reference_sets
+        tripped = 0
+        for seed in KNOCK_SESSION_SEEDS:
+            trips = _tripwire_session(seed, knock_from_set=knock_from, sets=knock_from + 1)
+            assert trips[:knock_from] == [None] * knock_from, seed
+            if trips[knock_from] is not None:
+                assert trips[knock_from] == pytest.approx(KNOCK_DEG, abs=TRIP_DELTA_TOLERANCE_DEG), seed
+                tripped += 1
+        assert tripped >= KNOCK_DETECTION_MIN_RATE * len(KNOCK_SESSION_SEEDS)
+
+    def test_the_reference_sets_are_never_checked(self):
+        reference_sets = PRESS.camera.tripwire_reference_sets
+        trips = _tripwire_session(0, knock_from_set=1, sets=reference_sets)
+        assert trips == [None] * reference_sets

@@ -529,8 +529,12 @@ class RepData(BaseModel):
     @property
     def is_clean(self) -> bool:
         """True when the rep had no significant fault. A recorded-only verdict
-        (below its fault's start tier) is not trusted enough to make a rep unclean."""
-        return not any(f.is_significant and not f.details.get("recorded_only") for f in self.faults)
+        (below its fault's start tier) is not trusted enough to make a rep unclean,
+        and a setup note (delivered between sets, like the press grip) is not a rep fault."""
+        return not any(
+            f.is_significant and not f.details.get("recorded_only") and not f.details.get("setup_note")
+            for f in self.faults
+        )
 
     @property
     def tempo_ratio(self) -> float:
@@ -626,6 +630,9 @@ class PipelineFrame(BaseModel):
     # Set on the frame the camera-pitch delta tripwire revokes the mount's
     # certification for the session: the measured change in degrees.
     pitch_certification_revoked_deg: Optional[float] = None
+    # Set on the frame an exercise's gross pitch tripwire first trips on an
+    # uncertified camera (once a session): the standing pitch reading, degrees.
+    camera_pitch_untrusted_deg: Optional[float] = None
 
     # Tracking status. missing_keypoints: leg keypoints (hips, knees, ankles)
     # this capture did not measure; None when no new frame was captured.

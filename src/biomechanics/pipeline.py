@@ -46,7 +46,7 @@ from biomechanics.kinematics.valgus import build_valgus_estimator
 from biomechanics.faults import RuleEngine
 from biomechanics.profiles import ExerciseProfile, get_profile
 from biomechanics.triangulation.triangulator import recentre_at_hips
-from biomechanics.utils.camera_mount import camera_mount_from_config
+from biomechanics.utils.camera_mount import PitchCertification, camera_mount_from_config
 from biomechanics.utils.frame_context import (
     CONCENTRIC_TIME_FEATURE,
     ECCENTRIC_TIME_FEATURE,
@@ -284,11 +284,15 @@ class BiomechanicsPipeline:
         self.camera_pitch_deg: float = math.nan
         self._standing_pitches: deque[float] = deque(maxlen=rg.required_consecutive_frames)
         self._camera_pitch_warned = False
+        # An exercise's gross pitch tripwire (uncertified camera) is signalled
+        # once a session, whatever exercise trips it.
+        self._camera_pitch_untrusted_signalled = False
 
-        # Single camera: the physical mount, and whether a delta tripwire has
-        # revoked its pitch certification this session.
+        # Single camera: the physical mount, and the session's pitch
+        # certification (each exercise's delta tripwire, and whether one
+        # revoked it), which outlives exercise switches.
         self._camera_mount = camera_mount_from_config(self.config.capture)
-        self._pitch_certification_revoked = False
+        self._pitch_certification = PitchCertification()
 
         # Rig: measured gravity, recomputed whenever the calibration changes.
         self._gravity_calibration = None
@@ -344,6 +348,9 @@ class BiomechanicsPipeline:
         # the shallow_rep messages that carried a cue, this set.
         self._rejection_streaks: dict[str, int] = {}
         self._shallow_cues_this_set: int = 0
+        # The last analysis timestamp the analyser observed: the Kalman warm-up
+        # after a latch repeats the latched frame, and the analyser sees it once.
+        self._last_observed_timestamp = -math.inf
 
         # Layers 4-6: fault rules, rep counting and the optional BiLSTM, all
         # set by the exercise profile and rebuilt by set_exercise().
@@ -402,7 +409,7 @@ class BiomechanicsPipeline:
         # Layer 4: Fault detection (rules provided by exercise profile)
         profile_rules = self._profile.create_fault_rules(self.config)
         self._rule_engine = RuleEngine(
-            rules=profile_rules, reference=self._profile.create_session_reference(),
+            rules=profile_rules, reference=self._profile.create_session_reference(self.config),
         )
 
         # Layer 5: Rep counting (strategy determined by exercise profile)
@@ -411,6 +418,11 @@ class BiomechanicsPipeline:
         # A non-squat exercise's analyser owns its per-frame and per-rep state;
         # None keeps every squat block as it is.
         self._rep_analyzer: RepAnalyzer | None = self._profile.create_rep_analyzer(self.config)
+        # The analyser's pitch tripwire is the session's, keyed by profile, so
+        # its certification reading survives this rebuild.
+        bind_certification = getattr(self._rep_analyzer, "bind_pitch_certification", None)
+        if bind_certification is not None:
+            bind_certification(self._pitch_certification, self._profile.name)
         self._profile_readiness_check = self._profile.get_readiness_check()
 
         # Layer 6 (optional): BiLSTM rep counting. Its model was trained on
@@ -543,13 +555,12 @@ class BiomechanicsPipeline:
     @property
     def pitch_certified(self) -> bool:
         """Single camera: a measured mount whose certification no tripwire revoked."""
-        return not self._multi_camera and self._camera_mount.is_measured and not self._pitch_certification_revoked
+        return not self._multi_camera and self._camera_mount.is_measured and not self._pitch_certification.revoked
 
     def revoke_pitch_certification(self, delta_deg: float) -> None:
         """The camera moved (an exercise's delta tripwire): certified tiers end for the session."""
-        if self._pitch_certification_revoked:
+        if not self._pitch_certification.revoke(delta_deg):
             return
-        self._pitch_certification_revoked = True
         self._record_event("revoke_pitch_certification", delta_deg=delta_deg)
         logger.warning(
             "[PIPELINE] Camera pitch moved %.1f° since certification — certified tiers off for the session",
@@ -633,6 +644,7 @@ class BiomechanicsPipeline:
             self._rep_analyzer.reset_set()
         self._rejection_streaks.clear()
         self._shallow_cues_this_set = 0
+        self._last_observed_timestamp = -math.inf
         # Per-rep rule state (asymmetry samples, cooldowns) must not cross sets;
         # baseline calibration is kept by the engine's reset.
         self._rule_engine.reset()
@@ -721,10 +733,11 @@ class BiomechanicsPipeline:
     def set_exercise(self, exercise_name: str) -> None:
         """Switch to another exercise between sets.
 
-        Capture, pose, camera calibration, body measurements and the depth
-        target carry over; fault rules, rep counting, the rep analyser, the
-        session reference and per-set state are rebuilt for the new
-        exercise's profile.
+        Capture, pose, camera calibration, body measurements, the depth
+        target and the single camera's pitch certification (each exercise's
+        tripwire reading, a revocation) carry over; fault rules, rep
+        counting, the rep analyser, the session reference and per-set state
+        are rebuilt for the new exercise's profile.
         """
         self._record_event("set_exercise", exercise_name=exercise_name)
         # The depth target belongs to the athlete, not the exercise. A stored
@@ -971,7 +984,7 @@ class BiomechanicsPipeline:
         recapped hedged at most, never cued, never making a rep unclean. The
         pipeline is the only place this is stamped."""
         for fault in faults:
-            start_tier = self._profile.cue_start_tier(fault.fault_type, ctx)
+            start_tier = self._profile.cue_start_tier(fault.fault_type, ctx, self.config)
             if start_tier == FaultSeverity.MILD:
                 continue
             if _SEVERITY_RANK[fault.severity] < _SEVERITY_RANK[start_tier]:
@@ -997,7 +1010,7 @@ class BiomechanicsPipeline:
         is due, its cue). "ignore" is silent and leaves every streak as it is.
         A recorded-only shallow verdict gets a cue-less message that is not
         counted among the set's cued ones."""
-        rejected = self._profile.on_rep_rejected(reason, features, angles)
+        rejected = self._profile.on_rep_rejected(reason, features, angles, self.config)
         if reason == REJECTION_IGNORE:
             return False, None
         streak = self._rejection_streaks.get(reason, 0) + 1
@@ -1010,7 +1023,7 @@ class BiomechanicsPipeline:
             return False, None
         if shallow_fault.details.get("recorded_only"):
             return True, None
-        cue = self._profile.shallow_rep_cue(shallow_fault, streak, self._shallow_cues_this_set)
+        cue = self._profile.shallow_rep_cue(shallow_fault, streak, self._shallow_cues_this_set, self.config)
         if cue is not None:
             self._shallow_cues_this_set += 1
         return True, cue
@@ -1024,15 +1037,18 @@ class BiomechanicsPipeline:
         angles: JointAngles,
         faults: list[FaultEvent],
         ctx: FrameContext,
-    ) -> tuple[RepData | None, bool, str | None]:
+    ) -> tuple[RepData | None, bool, str | None, float | None]:
         """Rep boundaries on the analyser path, in the spec's order: the ended
         rep is finished (or rejected, before any verdict or reference update)
         first; a rep that started on this frame, touch-and-go included, last.
-        Returns (counted rep, shallow_rep message due, its cue)."""
+        Returns (counted rep, shallow_rep message due, its cue, the delta of a
+        pitch tripwire the finished rep tripped)."""
         counter = self._rep_counter
-        shallow_rep, shallow_cue = False, None
+        shallow_rep, shallow_cue, revoked_deg = False, None, None
         if rep_data is not None:
             features = analyzer.finish_rep(rep_data.rep_number)
+            # A trip found in the rep's own rack hold judges its verdicts uncertified.
+            revoked_deg = self._poll_pitch_tripwire(analyzer, ctx)
             reason = analyzer.rejection_reason(features)
             if reason is None:
                 self._rejection_streaks.clear()
@@ -1059,7 +1075,19 @@ class BiomechanicsPipeline:
             analyzer.discard_rep()
         if counter.rep_started:
             analyzer.on_rep_start(piston=was_in_rep)
-        return rep_data, shallow_rep, shallow_cue
+        return rep_data, shallow_rep, shallow_cue, revoked_deg
+
+    def _poll_pitch_tripwire(self, analyzer: RepAnalyzer, ctx: FrameContext) -> float | None:
+        """An analyser's delta tripwire trip revokes certification for the session,
+        and every verdict of this frame stamped after it is judged uncertified.
+        Returns the delta when this poll revoked."""
+        tripwire_delta = getattr(analyzer, "pitch_tripwire_delta", None)
+        delta_deg = tripwire_delta() if tripwire_delta is not None else None
+        if delta_deg is None or self._pitch_certification.revoked:
+            return None
+        self.revoke_pitch_certification(delta_deg)
+        ctx.pitch_certified = self.pitch_certified
+        return delta_deg
 
     def _record_body_measurements(self, result: PreIKResult) -> None:
         source = result.analysis_world if result.analysis_world is not None else result.analysis
@@ -1321,19 +1349,20 @@ class BiomechanicsPipeline:
         # --- Compute rep signal (exercise-specific, from profile or analyser) ---
         analyzer = self._rep_analyzer
         pitch_revoked_deg: float | None = None
+        pitch_untrusted_deg: float | None = None
         sample = None
         if analyzer is not None:
             rep_signal = math.nan
-            if measured_frame:
+            # A frame the Kalman warm-up repeats is observed once; the counter
+            # ignores its NaN signal, as it would ignore the repeat itself.
+            if measured_frame and analysis.timestamp > self._last_observed_timestamp:
+                self._last_observed_timestamp = analysis.timestamp
                 analyzer.observe(ctx)
                 rep_signal = analyzer.rep_signal
-                tripwire_delta = getattr(analyzer, "pitch_tripwire_delta", None)
-                delta_deg = tripwire_delta() if tripwire_delta is not None else None
-                if delta_deg is not None and not self._pitch_certification_revoked:
-                    self.revoke_pitch_certification(delta_deg)
-                    pitch_revoked_deg = delta_deg
-                    # Every verdict of this frame is judged uncertified.
-                    ctx.pitch_certified = self.pitch_certified
+                pitch_revoked_deg = self._poll_pitch_tripwire(analyzer, ctx)
+                if not self._camera_pitch_untrusted_signalled and getattr(analyzer, "camera_pitch_untrusted", False):
+                    self._camera_pitch_untrusted_signalled = True
+                    pitch_untrusted_deg = self.camera_pitch_deg
         else:
             rep_signal = self._profile.get_rep_signal(analysis, angles)
 
@@ -1416,9 +1445,11 @@ class BiomechanicsPipeline:
         shallow_rep_cue: str | None = None
 
         if analyzer is not None:
-            rep_data, analyzer_shallow_rep, shallow_rep_cue = self._analyzer_rep_end(
+            rep_data, analyzer_shallow_rep, shallow_rep_cue, rep_end_revoked_deg = self._analyzer_rep_end(
                 analyzer, rep_data, feedback, was_in_rep, angles, faults, ctx,
             )
+            if rep_end_revoked_deg is not None:
+                pitch_revoked_deg = rep_end_revoked_deg
         else:
             # A completed movement whose hip never reached the athlete's depth
             # target is not a rep — and the depth fault says why.
@@ -1615,6 +1646,7 @@ class BiomechanicsPipeline:
             analyzer_shallow_rep=analyzer_shallow_rep,
             shallow_rep_cue=shallow_rep_cue,
             pitch_certification_revoked_deg=pitch_revoked_deg,
+            camera_pitch_untrusted_deg=pitch_untrusted_deg,
             bar_detection=bar_detection,
             bar_track=bar_track,
             latency_ms=latency_ms,

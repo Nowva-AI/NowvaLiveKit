@@ -216,10 +216,10 @@ class _AnalyserProfile(ExerciseProfile):
     def create_rep_analyzer(self, config):
         return self.analyzer
 
-    def create_session_reference(self):
+    def create_session_reference(self, config):
         return self.reference
 
-    def on_rep_rejected(self, reason, features, angles):
+    def on_rep_rejected(self, reason, features, angles, config):
         rep_count = self.session.pipeline.rep_count if self.session is not None else None
         self.calls.append(("on_rep_rejected", reason, rep_count))
         return [
@@ -227,7 +227,7 @@ class _AnalyserProfile(ExerciseProfile):
             for index, fault_type in enumerate(self.rejected_types)
         ]
 
-    def shallow_rep_cue(self, fault, streak, cued_this_set):
+    def shallow_rep_cue(self, fault, streak, cued_this_set, config):
         self.cue_args.append((streak, cued_this_set))
         if streak >= CUE_AFTER_STREAK and cued_this_set < MAX_CUES_PER_SET:
             return SHALLOW_CUE
@@ -235,7 +235,7 @@ class _AnalyserProfile(ExerciseProfile):
 
 
 class _AlwaysCueProfile(_AnalyserProfile):
-    def shallow_rep_cue(self, fault, streak, cued_this_set):
+    def shallow_rep_cue(self, fault, streak, cued_this_set, config):
         self.cue_args.append((streak, cued_this_set))
         return SHALLOW_CUE
 
@@ -243,7 +243,7 @@ class _AlwaysCueProfile(_AnalyserProfile):
 class _CertifiedTierProfile(_AnalyserProfile):
     """Cues from mild only while the mount is certified, severe otherwise."""
 
-    def cue_start_tier(self, fault_type, ctx):
+    def cue_start_tier(self, fault_type, ctx, config):
         return FaultSeverity.MILD if ctx.pitch_certified else FaultSeverity.SEVERE
 
 
@@ -323,12 +323,25 @@ class TestAnalyserOwnsTheRep:
         results = session.run(depths, dropped=dropout)
 
         analysed = [result for result in results if result.skeleton_3d is not None]
-        measured = [result for result in analysed if not result.extrapolated_keypoints]
+        measured = {result.skeleton_3d.timestamp for result in analysed if not result.extrapolated_keypoints}
         assert 0 < len(analyzer.observed) == len(measured) < len(analysed)
         first_ready = next(index for index, result in enumerate(results) if result.skeleton_3d is not None)
         assert first_ready >= LATCH_FRAMES - 1
-        timestamps = [ctx.timestamp for ctx in analyzer.observed]
-        assert timestamps == sorted(timestamps)
+        assert [ctx.timestamp for ctx in analyzer.observed] == sorted(measured)
+
+    def test_a_frame_the_kalman_warm_up_repeats_is_observed_once(self, monkeypatch):
+        calls: list = []
+        analyzer = _FakeAnalyzer(calls)
+        session = _session(monkeypatch, _AnalyserProfile(analyzer, calls))
+
+        results = session.run(_reps(1))
+
+        analysed = [result.skeleton_3d.timestamp for result in results if result.skeleton_3d is not None]
+        assert len(analysed) > len(set(analysed))
+        observed = [ctx.timestamp for ctx in analyzer.observed]
+        assert all(later > earlier for earlier, later in zip(observed, observed[1:]))
+        assert observed[0] == analysed[0]
+        assert [rep.rep_number for rep in _counted(results)] == [1]
 
     def test_frame_context_carries_the_rig_frame(self, monkeypatch):
         calls: list = []
@@ -594,7 +607,7 @@ class TestRecordedOnly:
         seen: list[FrameContext] = []
 
         class _SessionAwareProfile(_AnalyserProfile):
-            def cue_start_tier(self, fault_type, ctx):
+            def cue_start_tier(self, fault_type, ctx, config):
                 seen.append(ctx)
                 return FaultSeverity.SEVERE
 

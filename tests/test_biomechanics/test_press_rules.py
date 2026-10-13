@@ -201,6 +201,10 @@ class TestGrip:
         assert fault.details["phase"] == "setup"
         assert fault.details["signed_value"] == pytest.approx(tilt)
 
+    def test_the_verdict_is_a_setup_note(self):
+        fault = _judge(PressGripRule(PRESS.grip), _features(grip_tilt_deg=25.0))
+        assert fault.details["setup_note"] is True
+
 
 class TestVelocityLoss:
     def test_press_velocity_loss_is_its_own_fault_and_phase(self):

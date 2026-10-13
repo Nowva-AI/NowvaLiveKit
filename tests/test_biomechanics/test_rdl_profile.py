@@ -129,7 +129,7 @@ class TestHooks:
     def test_analyser_reference_and_counter_come_from_the_rdl_config(self, rdl_profile: RomanianDeadliftProfile):
         config = BiomechanicsConfig()
         assert isinstance(rdl_profile.create_rep_analyzer(config), RdlRepAnalyzer)
-        assert isinstance(rdl_profile.create_session_reference(), HingeSessionReference)
+        assert isinstance(rdl_profile.create_session_reference(config), HingeSessionReference)
         assert rdl_profile.create_rep_counter_config(config) == config.faults.rdl.counter
         assert rdl_profile.get_readiness_check() is None
 

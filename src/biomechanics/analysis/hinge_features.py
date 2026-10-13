@@ -26,7 +26,7 @@ from biomechanics.analysis.rep_features import (
 from biomechanics.config import RdlCameraConfig, RdlConfig, ReadinessGateConfig
 from biomechanics.diagnosis.lean_model import MIDFOOT_FRACTION_OF_ANKLE_TO_TOE
 from biomechanics.faults.observability import TRIANGULATED
-from biomechanics.utils.camera_mount import PitchDeltaTripwire
+from biomechanics.utils.camera_mount import PitchCertification, PitchDeltaTripwire
 from biomechanics.utils.frame_context import GRAVITY_CAMERA_PITCH, MOUNT_RACK, FrameContext
 from biomechanics.utils.geometry import WORLD_UP, joint_angle_3_points, level_camera_frame, sagittal_forward
 from biomechanics.utils.types import CocoKeypoints as CK
@@ -117,7 +117,7 @@ class HingeFrameSample:
 
 class HingeRepFeatures(BaseModel):
     """Per-rep RDL features (rdl.md §4.2). The thresholds the rejection path
-    needs are stamped in, since on_rep_rejected receives no config."""
+    needs are stamped in, so the rejected-rep faults read the features alone."""
     exercise: str = EXERCISE_NAME
     rep_number: int
     max_depth_angle: float = math.nan
@@ -451,7 +451,12 @@ def _range_label(bar_height_ratio: float) -> str | None:
 def _bar_tilt(
     samples: Sequence[HingeFrameSample], rep_start: int, bottom: Sequence[int],
 ) -> tuple[float, str | None]:
-    start = samples[rep_start:rep_start + START_TILT_SAMPLES]
+    # The standing pre-roll before the descent; a hand that drops gradually has
+    # already dropped in the rep's first samples. A rep started at a turnaround
+    # has no standing pre-roll: its first samples are the start.
+    start = [sample for sample in samples[:rep_start] if sample.standing]
+    if not start:
+        start = samples[rep_start:rep_start + START_TILT_SAMPLES]
     start_tilt = _nanmedian(sample.bar_tilt_signed_deg for sample in start)
     start_separation = _nanmedian(sample.wrist_lateral_sep_cm for sample in start)
     bottom_tilt = _nanmedian(samples[i].bar_tilt_signed_deg for i in bottom)
@@ -507,7 +512,9 @@ class RdlRepAnalyzer:
 
     Survives reset_set: the standing setups (references for every rep) and the
     certified-mount tripwire's reference. A fresh analyser (set_exercise)
-    starts both empty. A rep that starts at the previous rep's turnaround has
+    starts the setups empty; the tripwire, once bound to the session's
+    (bind_pitch_certification), keeps its reference and the sets pooled into
+    it across switches. A rep that starts at the previous rep's turnaround has
     no setup of its own: its pre-roll is the previous rep's samples after its
     lowest point (plus any idle frames at the turnaround), and its lockout is
     not judged. That covers the counter's touch-and-go starts (piston) and a
@@ -538,7 +545,6 @@ class RdlRepAnalyzer:
         self._set_tilt_sum = 0.0
         self._set_tilt_count = 0
         self._set_checked = False
-        self._reference_set_tilts: list[float] = []
         self._pending_trip_deg: float | None = None
 
     @property
@@ -574,6 +580,9 @@ class RdlRepAnalyzer:
             self._rep.append(sample)
         else:
             self._idle.append(sample)
+
+    def bind_pitch_certification(self, certification: PitchCertification, profile_name: str) -> None:
+        self._tripwire = certification.tripwire(profile_name, self._rdl.camera.delta_tripwire_deg)
 
     def pitch_tripwire_delta(self) -> float | None:
         """The set-averaged ankle->hip tilt change that tripped the certified
@@ -638,9 +647,7 @@ class RdlRepAnalyzer:
     def reset_set(self) -> None:
         camera = self._rdl.camera
         if not math.isfinite(self._tripwire.reference_deg) and self._set_tilt_count >= camera.delta_min_frames:
-            self._reference_set_tilts.append(self._set_tilt_sum / self._set_tilt_count)
-            if len(self._reference_set_tilts) >= camera.reference_sets:
-                self._tripwire.set_reference(float(np.mean(self._reference_set_tilts)))
+            self._tripwire.pool_reference(self._set_tilt_sum / self._set_tilt_count, camera.reference_sets)
         self._set_tilt_sum = 0.0
         self._set_tilt_count = 0
         self._set_checked = False

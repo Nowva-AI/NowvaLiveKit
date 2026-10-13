@@ -1,6 +1,7 @@
 """Press grip: forearms off vertical in the rack, from the front (ohp.md §5.6).
-A setup note, judged once per set on the first rep that faced the camera with a
-finite reading; never on a touch-and-go rep, which has no rack setup."""
+A setup note (details["setup_note"]: never makes a rep unclean), judged once per
+set on the first rep that faced the camera with a finite reading; never on a
+touch-and-go rep, which has no rack setup."""
 
 from __future__ import annotations
 
@@ -43,4 +44,5 @@ class PressGripRule(RepFaultRule):
             unit="deg", phase=PHASE_SETUP,
             direction=DIRECTION_NARROWER if tilt > 0.0 else DIRECTION_WIDER,
             signed_value=tilt,
+            setup_note=True,
         )

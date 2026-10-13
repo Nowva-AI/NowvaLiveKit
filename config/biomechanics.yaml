@@ -128,6 +128,8 @@ faults:
       missed_min_travel_cm: 20.0
     camera:                       # single-camera bands and delta tripwire (§4.1)
       tripwire_deg: 3.0
+      tripwire_min_frames: 24     # rack-hold frames behind a set's mean pitch before its one check
+      tripwire_reference_sets: 2  # sets pooled into the reference; checks from the next set on
       level_band_deg: 3.0
       tilted_band_deg: 10.0
     facing_min_width_ratio: 0.94  # cos 20 deg
@@ -140,16 +142,16 @@ faults:
     grip: {mild: 10.0, moderate: 15.0, severe: 22.0}               # forearm tilt, deg
     velocity_loss_pct: {mild: 20.0, moderate: 30.0, severe: 40.0}
     hedged_recap_faults: []       # recorded-only faults the recap may hedge (from validation)
-    tilted_band_validated: false
-    uneven_promoted: false
+    tilted_band_validated_faults: []  # per fault, from the §8.4 tilted-band gate
+    uneven_promoted: false        # unlikely: level-mount uneven P95 2.5-2.6° vs 2.0° allowance
   rdl:                            # barbell Romanian deadlift from the rack (docs/exercises/rdl.md)
     counter: {entry_vel_threshold: 4.0, bottom_vel_threshold: 5.0, ascending_vel_threshold: 4.0,
               min_depth_cm: 8.0, standing_return_cm: 4.0, min_descending_s: 0.25,
               min_bottom_s: 0.08, min_ascending_s: 0.25, min_rep_duration_s: 0.8}
-    rom: {count_floor_travel: 0.45, partial_min_travel: 0.25, fallback_floor_deg: 50.0,
+    rom: {count_floor_travel: 0.33, partial_min_travel: 0.25, fallback_floor_deg: 50.0,  # floor: 43° hinge at k20/s5 (rdl.md §3.6)
           partial_min_duration_s: 1.0, partial_cue_streak: 2, max_partial_cues_per_set: 2,
           highlight_range_tolerance_deg: 8.0, reference_cap_deg: 95.0}
-    camera: {tripwire_deg: 8.0, posture_offset_deg: 4.0, correct_by_mount_angle: false,
+    camera: {tripwire_deg: 8.0, posture_offset_deg: 4.0,
              delta_tripwire_deg: 2.5, delta_min_frames: 36, reference_sets: 3,
              certified_max_pitch_deg: 2.0, lens_min_height_m: 0.8, lens_max_height_m: 1.1,
              lens_max_below_hip_m: 0.10, ankle_height_m: 0.075}
@@ -161,7 +163,7 @@ faults:
               back_mild: 8.0, back_moderate: 12.0, back_severe: 18.0}
     bar_tilt: {mild: 4.0, moderate: 7.0, severe: 10.0}         # deg, bottom minus start
     range_drift: {mild: 8.0, moderate: 15.0, severe: 25.0}     # deg short of own reference
-    partial: {moderate: 0.07, severe: 0.14}                    # travel short of the floor
+    partial: {moderate: 0.04, severe: 0.08}                    # travel short of the floor (~4° / 8° of hinge)
     tempo: {mild_seconds: 0.67, moderate_seconds: 0.50, severe_seconds: 0.33}   # 5-95% descent
     hedged_recap_faults: []
 

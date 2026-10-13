@@ -54,10 +54,13 @@ def _fault(
     recorded_only: bool = False,
     timestamp: float = 10.0,
     rep_number: int = 1,
+    setup_note: bool = False,
 ) -> FaultEvent:
     details = {"side": "left", "observability": "observable"}
     if recorded_only:
         details["recorded_only"] = True
+    if setup_note:
+        details["setup_note"] = True
     return FaultEvent(
         fault_type=fault_type, severity=severity, severity_score=1.0, message="verdict",
         timestamp=timestamp, rep_number=rep_number, details=details,
@@ -119,6 +122,22 @@ class TestRecordedOnlyOnTheWire:
         assert rep.is_clean
         bridge.send_rep_complete(rep)
         assert _messages(bridge, "rep_complete")[0]["is_clean"] is True
+
+    def test_a_rep_whose_only_significant_verdict_is_a_setup_note_is_clean(self, bridge):
+        grip_note = _fault("press_grip", FaultSeverity.MODERATE, setup_note=True)
+        noted = _rep(1, [grip_note])
+        faulted = _rep(2, [_fault("press_grip", FaultSeverity.MODERATE, setup_note=True), _fault()])
+        assert noted.is_clean and not faulted.is_clean
+
+        bridge.send_rep_complete(noted)
+        bridge.send_set_complete(1, [noted, faulted])
+
+        message = _messages(bridge, "rep_complete")[0]
+        assert message["is_clean"] is True
+        assert message["faults_in_rep"] == ["press_grip"]
+        summary = _messages(bridge, "set_complete")[0]
+        assert summary["clean_reps"] == 1
+        assert set(summary["fault_summary"]) == {"press_uneven"}
 
     def test_set_summary_never_counts_recorded_only_verdicts(self, bridge):
         reps = [_rep(1, [_fault(recorded_only=True)]), _rep(2, [_fault(recorded_only=True), _fault("press_grip")])]
@@ -260,6 +279,20 @@ class TestSessionTrackerSummaries:
         tracker.force_end_set()
 
         assert set(tracker.last_set_summary["fault_summary"]) == {"press_grip"}
+
+    def test_a_setup_note_is_neither_a_rep_fault_nor_unclean_for_the_tracker(self, bridge):
+        tracker = SessionTracker(bridge, CoachingConfig())
+        tracker.on_exercise_changed(diagnosis_enabled=False, reports_depth=False)
+        grip_note = _fault("press_grip", FaultSeverity.MODERATE, setup_note=True)
+        tracker.on_rep_complete(_rep(1, highlight_score=1.0))
+        tracker.on_rep_complete(_rep(2, [grip_note], highlight_score=5.0))
+        tracker.force_end_set()
+
+        assert tracker.last_set_summary["fault_summary"] == {}
+        assert tracker.last_set_summary["clean_reps"] == 2
+        # The noted rep can still be the best one.
+        best = ["best_rep_so_far" in message["highlights"] for message in _messages(bridge, "rep_complete")]
+        assert best == [False, True]
 
     def test_depth_target_highlight_only_when_the_exercise_reports_depth(self, bridge):
         tracker = SessionTracker(bridge, CoachingConfig())
