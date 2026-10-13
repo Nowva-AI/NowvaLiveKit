@@ -45,6 +45,14 @@
 
 **Current Focus:** Squat diagnosis accuracy on the 3-camera rig (rebuilt pre-IK signal path, lifter-based camera calibration) and on-device speech affect perception so Nova adapts to how the athlete sounds.
 
+### Recent Changes (October 2026)
+
+#### Overhead Press + Romanian Deadlift (branch `exercises-ohp-rdl`, gated)
+- **Two more barbell lifts on the shared exercise plumbing:** the standing barbell press from the J-hooks (layback, bar forward, lockout, leg drive, uneven press, grip, missed reps, velocity loss) and the barbell RDL (hip sink, bar drift, lockout, bar tilt, range drift, tempo, partial reps). Each runs its own rep analyser; squat output is byte-identical, including after switching exercises.
+- **Still off for users:** both profiles use `gate_until_ready` until real recordings pass the validation gates in `docs/exercises/{ohp,rdl}.md`. `NOWVA_DEV_COACHING_READY=overhead_press,romanian_deadlift` turns them on for testing. Most of their cue clips are not rendered yet.
+- **Single camera:** a mount whose pitch is measured unlocks the certified start tiers; per-exercise tripwires revoke them for the session if the camera moves, and Nova asks to level it once.
+- **Review:** plans scored 9/10; the implementation scored 8.5 then 9.1/10 (pass) on synthetic sets through the real pipeline. Nothing has been validated on a real lifter. Spec: `docs/exercises/SHARED-PLUMBING.md`.
+
 ### Recent Changes (September 2026)
 
 #### Voice Agent Latency Overhaul (Session 2026-09-21, branch `voice-agent-latency-overhaul`)
@@ -825,9 +833,9 @@ Each exercise has an independent profile defining which fault rules are active, 
 | Squat | `squat.py` | Depth, knee valgus, forward lean, bilateral asymmetry |
 | Deadlift | `deadlift.py` | Back rounding, forward lean, bilateral asymmetry |
 | Barbell Row | `barbell_row.py` | Forward lean, elbow flare, bilateral asymmetry |
-| Overhead Press | `overhead_press.py` | Elbow flare, forward lean, bilateral asymmetry |
+| Overhead Press | `overhead_press.py` | Layback, bar forward, lockout, leg drive, uneven press, grip, missed reps, velocity loss (gated until validated) |
 | Barbell Curl | `barbell_curl.py` | Elbow flare, bilateral asymmetry |
-| Romanian Deadlift | `romanian_deadlift.py` | Forward lean, back rounding, bilateral asymmetry |
+| Romanian Deadlift | `romanian_deadlift.py` | Hip sink, bar drift, lockout, bar tilt, range drift, tempo, partial reps (gated until validated) |
 | Bulgarian Split Squat | `bulgarian_split_squat.py` | Depth, knee valgus, bilateral asymmetry |
 | Lunge | `lunge.py` | Depth, knee valgus, bilateral asymmetry |
 | Overhead Tricep Extension | `overhead_tricep_extension.py` | Elbow flare |
